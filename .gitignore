@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+.test-output/
+*.log
+*.sqlite
+*.sqlite.bak
+.env*
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+*cookies*.json
+user-data/
+sessions/
