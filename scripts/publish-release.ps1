@@ -9,13 +9,13 @@ try {
     $package = Get-Content -Raw -LiteralPath 'package.json' | ConvertFrom-Json
     $version = $package.version
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw '版本号必须为 X.Y.Z。' }
-    $tag = "v$version"
+    $tag = "windows-v$version"
     if ((git status --porcelain)) { throw '请先提交源码，工作目录必须干净。' }
     $head = git rev-parse HEAD
     $tagCommit = git rev-parse "$tag^{commit}" 2>$null
     if ($LASTEXITCODE -ne 0 -or $head -ne $tagCommit) { throw "请先给当前源码创建标签 $tag。" }
     $exe = "release/CangXia-$version-Windows-x64.exe"
-    $notes = "docs/releases/$tag.md"
+    $notes = "docs/releases/v$version.md"
     if (!(Test-Path -LiteralPath $exe) -or !(Test-Path -LiteralPath $notes)) { throw '程序文件或版本说明不存在。' }
     & $ghPath api user --jq .login | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI 尚未登录。' }
@@ -26,6 +26,6 @@ try {
     Set-Content -LiteralPath $hashFile -Value "$hash  CangXia-$version-Windows-x64.exe" -Encoding utf8
     git push origin HEAD $tag
     if ($LASTEXITCODE -ne 0) { throw '源码或标签推送失败。' }
-    & $ghPath release create $tag $exe $hashFile --repo $Repository --verify-tag --title "CangXia $tag" --notes-file $notes
+    & $ghPath release create $tag $exe $hashFile --repo $Repository --verify-tag --title "CangXia Windows 本地版 v$version" --notes-file $notes --latest=false
     if ($LASTEXITCODE -ne 0) { throw 'Release 发布未完成，请检查 GitHub 上的实际状态后再处理。' }
 } finally { Pop-Location }
