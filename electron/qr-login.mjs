@@ -7,7 +7,7 @@ export class QrLogin{
   update(change){if(Object.entries(change).every(([k,v])=>this.current[k]===v))return;this.current={...this.current,...change};this.onChange();}
   async start(){
     if(this.active)return;
-    this.active=true;const generation=++this.generation;this.update({phase:'loading',image:null,message:'正在获取抖音登录二维码'});
+    this.active=true;this.manualPage=false;this.lastImageUrl=null;this.lastImage=null;const generation=++this.generation;this.update({phase:'loading',image:null,message:'正在获取抖音登录二维码'});
     try{
       const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
       if(!this.active||generation!==this.generation)return;
@@ -42,7 +42,7 @@ export class QrLogin{
       try{
         const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
         if(this.loggedIn(cookies)){await this.complete(cookies,generation);return;}
-        const openLogin=openAttempts<3&&Date.now()-lastClick>5000;
+        const openLogin=!this.manualPage&&openAttempts<3&&Date.now()-lastClick>5000;
         const page=await win.webContents.executeJavaScript(qrPageScript({openLogin}));
         if(openLogin&&/正在打开|正在获取/.test(page.message)){openAttempts++;lastClick=Date.now();}
         if(!this.active||generation!==this.generation)break;
@@ -67,10 +67,11 @@ export class QrLogin{
   }
   async refresh(){
     if(Date.now()-(this.lastRefresh||0)<5000)throw new Error('请稍候再刷新二维码');this.lastRefresh=Date.now();
+    this.lastImageUrl=null;this.lastImage=null;
     if(!this.active)return this.start();
     if(!this.window||this.window.isDestroyed())return this.start();
     const result=await this.window.webContents.executeJavaScript(qrPageScript({refresh:true}));this.update({...result,image:null});
   }
-  showPage(){if(this.window&&!this.window.isDestroyed()){this.window.setSkipTaskbar(false);this.window.show();this.window.focus();}}
+  showPage(){this.manualPage=true;if(this.window&&!this.window.isDestroyed()){this.window.setSkipTaskbar(false);this.window.show();this.window.focus();}}
   cancel(){this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,message:''});if(win&&!win.isDestroyed())win.close();}
 }
