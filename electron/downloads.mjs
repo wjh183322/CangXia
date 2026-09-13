@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { isMediaURL, requireInside } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
+import { randomUUID, createHash } from 'node:crypto';
 
 function extension(contentType, kind) {
   const t = (contentType || '').split(';')[0];
@@ -71,7 +72,8 @@ export class DownloadQueue {
       }
       job.message = `保存${target.name}`; this.emit();
       try {
-        const asset = await this.saveAsset(dir, target, signal, bytes => { job.progress = Math.round((completed / targets.length) * 95); job.message = `${target.name} · ${(bytes / 1048576).toFixed(1)} MB`; this.emit(); });
+        const progress=bytes => { job.progress = Math.round((completed / targets.length) * 95); job.message = `${target.name} · ${(bytes / 1048576).toFixed(1)} MB`; this.emit(); };
+        const asset = target.key==='cover' && w.coverVariants?.length ? await this.saveBestCover(dir,w.coverVariants,signal,progress) : await this.saveAsset(dir, target, signal, progress);
         d.assets = [...d.assets.filter(a => a.key !== target.key), asset];
         store.put('downloads', job.id, d); store.save();
       } catch (e) { if (signal.aborted) throw e; failures.push(`${target.name}：${e.message}`); }
@@ -82,14 +84,14 @@ export class DownloadQueue {
     fs.writeFileSync(file + '.part', JSON.stringify(metadata, null, 2)); fs.renameSync(file + '.part', file);
     d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
     d.state = failures.length ? 'partial' : 'complete';
-    d.coverSource = w.coverSource; d.lastError = failures.join('；');
+    d.coverSource = d.assets.find(a=>a.key==='cover')?.source || w.coverSource; d.lastError = failures.join('；');
     const cover = d.assets.find(a=>a.key==='cover');
-    d.coverWarning = cover?.width && Math.min(cover.width,cover.height)<720 ? `原始单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本` : '';
+    d.coverWarning = cover?.width && Math.min(cover.width,cover.height)<720 ? `当前单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本` : '';
     store.put('downloads', job.id, d); store.save(); this.emit();
     if (failures.length) throw new Error(`部分已保存，${failures.join('；')}`);
   }
   metadata(w, d) {
-    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, coverSource: w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height }) => ({ key, file, size, width, height })) };
+    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons }) => ({ key, file, size, width, height, source, comparisons })) };
   }
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw new Error('作品未提供此资源');
@@ -117,5 +119,21 @@ export class DownloadQueue {
       }
     }
     throw lastError || new Error('没有可用的媒体地址');
+  }
+  async saveBestCover(dir,variants,signal,progress){
+    const candidates=[];const seen=new Set();let lastError;
+    try{
+      for(const variant of variants.slice(0,3)){
+        if(signal.aborted)throw new Error('已暂停');
+        const identity=JSON.stringify([...variant.urls].sort());if(seen.has(identity))continue;seen.add(identity);
+        const urls=variant.source==='cover'&&variant.urls.length>1?[variant.urls[1],variant.urls[0],...variant.urls.slice(2)]:variant.urls;
+        try{const candidate=await this.saveAsset(dir,{key:'cover',name:'.cangxia-'+randomUUID(),kind:'image',urls},signal,progress);candidate.source=variant.source;candidate.sha256=createHash('sha256').update(fs.readFileSync(path.join(dir,candidate.file))).digest('hex');candidates.push(candidate);}catch(e){lastError=e;if(signal.aborted)throw e;}
+      }
+      if(!candidates.length)throw lastError||new Error('没有可用静态单图');
+      const sorted=[...candidates].sort((a,b)=>(b.width||0)*(b.height||0)-(a.width||0)*(a.height||0));const best=sorted[0];
+      const comparisons=candidates.map(({source,width,height,size,sha256})=>({source,width,height,size,sha256}));
+      const final=path.join(dir,'单图'+path.extname(best.file));fs.renameSync(path.join(dir,best.file),final);
+      return {...best,file:path.basename(final),comparisons};
+    }finally{for(const c of candidates){const file=requireInside(dir,path.join(dir,c.file));if(fs.existsSync(file))fs.unlinkSync(file);}}
   }
 }

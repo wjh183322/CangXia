@@ -1,16 +1,18 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, session, safeStorage } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Store } from './store.mjs';
-import { Collector } from './collector.mjs';
+import { Collector } from './account-collector.mjs';
+import { AuthVault } from './auth-data.mjs';
+import { SystemBrowser } from './system-browser.mjs';
 import { DownloadQueue } from './downloads.mjs';
 import { isDouyinURL, requireInside } from './model.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const smoke = process.argv.includes('--smoke');
 const sampleProbe = process.argv.includes('--probe-sample');
-if (smoke || sampleProbe) app.setPath('userData', path.resolve('.test-output', sampleProbe ? 'probe-profile' : 'smoke-profile'));
+if (smoke || sampleProbe) app.setPath('userData', path.resolve('.test-output', sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
 app.setName('藏匣');
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
@@ -38,7 +40,10 @@ app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
-  collector = new Collector(store, notify);
+  const httpProfile=session.fromPartition('cangxia-http');
+  const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe});
+  collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser});
+  await collector.ready;
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   collector.onAccessHold=()=>queue.pause();
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
@@ -48,7 +53,10 @@ try {
       const u = new URL(request.url); const parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       const [id, filename] = parts; if (!/^\d+$/.test(id || '')) return new Response('', { status: 404 });
       let file;
-      if (u.hostname === 'asset') {
+      if (u.hostname === 'stream') {
+        const work=store.work(id);const source=work?.videoUrls?.[0];if(!source)return new Response('',{status:404});
+        const range=request.headers.get('range');return await collector.fetchMedia(source,{signal:AbortSignal.timeout(120000),headers:range?{Range:range}:{}});
+      } else if (u.hostname === 'asset') {
         const d = store.download(id); const asset = d?.assets.find(a => a.file === filename);
         if (!asset || !store.assetExists(d, asset)) return new Response('', { status: 404 });
         file = requireInside(d.path, path.join(d.path, asset.file));
@@ -77,7 +85,9 @@ try {
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   handler('state', () => snapshot());
-  handler('openAccount', () => collector.open());
+  handler('openAccount', preferred => {ensureIdle();return collector.open(preferred);});
+  handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
+  handler('importLoginConfig', async()=>{ensureIdle();const result=await dialog.showOpenDialog(window,{title:'选择参考工具的 config.json（仅在本机读取）',filters:[{name:'JSON 配置',extensions:['json']}],properties:['openFile']});if(result.canceled)return false;const file=result.filePaths[0];if(fs.statSync(file).size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
   handler('sync', (discoverOnly = false) => { ensureIdle(); void collector.sync({ discoverOnly: !!discoverOnly }); return true; });
   handler('stopSync', () => collector.stop());
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
@@ -98,7 +108,7 @@ try {
     ids([id]); const d = store.download(id); if (!d) throw new Error('作品尚未下载'); store.assertDirectory(d.path);
     const error = await shell.openPath(d.path); if (error) throw new Error(error);
   });
-  handler('openOriginal', async id => { ids([id]); const url = store.work(id)?.url; if (!isDouyinURL(url)) throw new Error('作品链接无效'); await collector.ensureWindow(true); await collector.navigate(url); });
+  handler('openOriginal', async id => { ids([id]); const url = store.work(id)?.url; if (!isDouyinURL(url)) throw new Error('作品链接无效'); await collector.openOriginal(url); });
   handler('setTags', (id, tags) => {
     ids([id]); if (!Array.isArray(tags) || tags.length > 100 || tags.some(t => typeof t !== 'string' || t.length > 80)) throw new Error('标签格式无效');
     const normalized = [...new Set(tags.map(t => t.trim().replace(/^#/, '')).filter(Boolean))];
@@ -131,21 +141,13 @@ try {
   window.on('focus', notify);
   window.on('closed',()=>{if(!quitting)app.quit();});
   if (smoke) {
-    const loginTest = await collector.ensureWindow(false,false);
-    await loginTest.loadURL('data:text/html,<title>Login isolation check</title><body>Local test</body>');
-    const passiveLogin=!loginTest.webContents.debugger.isAttached();
-    const before=collector.diagnostics.length;
-    const realOpen=collector.open.bind(collector);let loginPrompted=false;
-    collector.open=async()=>{loginPrompted=true;};
-    await collector.sync();collector.open=realOpen;
-    const unauthenticatedGuard=loginPrompted&&collector.diagnostics.length===before;
-    collector.enableCapture(loginTest);
-    const captureEnabled=loginTest.webContents.debugger.isAttached();
-    await collector.open(false);
-    const captureDetached=!loginTest.webContents.debugger.isAttached();
-    loginTest.hide();
-    fs.writeFileSync('.test-output/login-isolation-result.json',JSON.stringify({passiveLogin,unauthenticatedGuard,captureEnabled,captureDetached,title:loginTest.getTitle()},null,2));
-    if(!passiveLogin||!unauthenticatedGuard||!captureEnabled||!captureDetached)throw new Error('登录隔离检查未通过');
+    const native = await browser.launch('about:blank');
+    const info = await native.send('Browser.getVersion');
+    const noImplicitLogin = !(await collector.isAuthenticated());
+    const noCollectionRead = collector.diagnostics.length===0;
+    fs.writeFileSync('.test-output/login-isolation-result.json',JSON.stringify({systemBrowser:browser.name,userAgent:info.userAgent,noImplicitLogin,noCollectionRead},null,2));
+    if(!noImplicitLogin||!noCollectionRead)throw new Error('本机浏览器隔离检查未通过');
+    await browser.close();
     await new Promise(r => setTimeout(r, 1800));
     const text = await window.webContents.executeJavaScript('document.body.innerText');
     const screenshot = await window.webContents.capturePage();
@@ -154,7 +156,7 @@ try {
     app.quit();
   }
   if (sampleProbe) {
-    store.setSetting('root', path.resolve('.test-output/sample-downloads')); store.save();
+    store.setSetting('root', path.resolve('.test-output/native-sample-downloads')); store.save();
     try {
       const w = await collector.resolveWork('7683829929179724518');
       fs.writeFileSync('.test-output/sample-metadata.json', JSON.stringify({ id:w.id, name:w.name, tags:w.tags, coverSource:w.coverSource, covers:collector.detailCoverInfo, coverCandidates:w.coverUrls.length, videoCandidates:w.videoUrls.length, author:w.author, width:w.width, height:w.height }, null, 2));
@@ -179,9 +181,10 @@ app.on('window-all-closed', () => app.quit());
 app.on('second-instance',()=>{if(window&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
 app.on('before-quit', event => {
   if(quitting)return;
-  event.preventDefault();quitting=true;queue?.pause();collector?.dispose();clearTimeout(timer);
+  event.preventDefault();quitting=true;queue?.pause();const browserClose=collector?.dispose();clearTimeout(timer);
   void (async()=>{
     for(let i=0;i<30&&queue?.running;i++)await new Promise(r=>setTimeout(r,100));
+    await Promise.race([browserClose||Promise.resolve(),new Promise(r=>setTimeout(r,3000))]);
     store?.close();app.exit(0);
   })();
 });

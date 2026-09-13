@@ -62,14 +62,17 @@ export function parseWork(raw) {
     const av = a.play_addr || a.playAddr, bv = b.play_addr || b.playAddr;
     return Number(bv.width || 0) * Number(bv.height || 0) - Number(av.width || 0) * Number(av.height || 0) || Number(b.bit_rate || b.bitRate || 0) - Number(a.bit_rate || a.bitRate || 0);
   });
-  const candidates = [...variants.flatMap(x => urls(x.play_addr || x.playAddr)), ...urls(v.play_addr || v.playAddr), ...urls(v.play_addr_h264), ...urls(v.play_addr_265)];
+  const addresses=[...variants.map(x=>({address:x.play_addr||x.playAddr,rate:Number(x.bit_rate||x.bitRate||0),hint:0})),...['play_addr_h264_1080p','play_addr_1080p','play_addr_h264_720p','play_addr_720p','play_addr_h264','play_addr_265','play_addr'].map(key=>({address:v[key]||(key==='play_addr'?v.playAddr:null),rate:0,hint:key.includes('1080p')?1080*1920:key.includes('720p')?720*1280:0}))].filter(x=>urls(x.address).length);
+  addresses.sort((a,b)=>(Number(b.address.width||0)*Number(b.address.height||0)||b.hint)-(Number(a.address.width||0)*Number(a.address.height||0)||a.hint)||b.rate-a.rate);
+  const candidates = addresses.flatMap(x=>urls(x.address));
   const images = (raw.images || raw.image_post_info?.images || raw.image_post_info?.image_list || raw.image_list || []).map((im, i) => ({ index: i, urls: [...new Set([...urls({ url_list: im.watermark_free_download_url_list }), ...urls(im.origin_image), ...urls(im.display_image), ...urls(im)])], width: im.width || 0, height: im.height || 0 })).filter(im => im.urls.length);
   const original = urls(v.origin_cover || v.originCover || v.cover_original_scale);
   const staticCover = urls(v.cover);
+  const coverVariants=[['origin_cover',v.origin_cover||v.originCover],['cover_original_scale',v.cover_original_scale],['cover',v.cover]].map(([source,value])=>({source,urls:urls(value),width:Number(value?.width||0),height:Number(value?.height||0)})).filter(x=>x.urls.length);
   return {
     id, name, title: String(raw.item_title || raw.title || ''), caption: String(raw.caption || ''), description: desc, tags: [...tags], rawTags: { textExtra: raw.text_extra || [], challenges: raw.cha_list || [] },
     author: { uid: String(author.uid || ''), secUid: String(author.sec_uid || author.secUid || ''), uniqueId: String(author.unique_id || author.uniqueId || author.short_id || ''), nickname: String(author.nickname || '未知作者') },
-    type: images.length ? 'images' : 'video', images, videoUrls: [...new Set(candidates)],
+    type: images.length ? 'images' : 'video', images, videoUrls: [...new Set(candidates)], coverVariants,
     coverUrls: original.length ? original : staticCover, coverSource: original.length ? (v.origin_cover || v.originCover ? 'origin_cover' : 'cover_original_scale') : 'cover',
     thumbnail: staticCover[0] || original[0] || images[0]?.urls[0] || '',
     duration: Number(v.duration || raw.duration || 0), width: Number(v.width || 0), height: Number(v.height || 0),

@@ -173,7 +173,7 @@ export class Store {
         Object.assign(a,imageDimensions(fs.readFileSync(path.join(d.path,a.file))));changed=true;
       }
       const cover=d.assets?.find(a=>a.key==='cover');
-      const warning=cover?.width&&Math.min(cover.width,cover.height)<720?`原始单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本`:'';
+      const warning=cover?.width&&Math.min(cover.width,cover.height)<720?`当前单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本`:'';
       if(d.coverWarning!==warning){d.coverWarning=warning;changed=true;}
       if(changed)this.put('downloads',d.id,d);
     }
@@ -181,11 +181,11 @@ export class Store {
     const localTags = new Map(this.all('local_tags').map(t => [t.id, t.tags]));
     const works = this.all('works').map(w => {
       const d = downloads.get(w.id);
-      return { ...w, videoUrls: undefined, coverUrls: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
     const members = {};
     for (const c of collections) members[c.id] = this.rows('SELECT work_id FROM members WHERE collection_id=? ORDER BY rank', [c.id]).map(r => r.work_id);
-    return { works, collections, members, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.1' };
+    return { works, collections, members, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.2' };
   }
 }

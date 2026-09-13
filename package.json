@@ -1,6 +1,6 @@
 {
   "name": "cangxia",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "藏匣 · 抖音收藏与本地媒体库",
   "author": "CangXia",
   "private": true,
@@ -18,7 +18,8 @@
     "lucide-react": "^0.577.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "sql.js": "1.14.2"
+    "sql.js": "1.14.2",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "electron": "44.3.0",
