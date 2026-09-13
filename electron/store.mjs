@@ -186,6 +186,6 @@ export class Store {
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
     const members = {};
     for (const c of collections) members[c.id] = this.rows('SELECT work_id FROM members WHERE collection_id=? ORDER BY rank', [c.id]).map(r => r.work_id);
-    return { works, collections, members, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.2' };
+    return { works, collections, members, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.3' };
   }
 }

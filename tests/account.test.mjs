@@ -31,6 +31,11 @@ test('configuration validation excludes other sites and rejects header injection
   auth.userAgent='Browser\r\nAuthorization: injected';assert.throws(()=>validateAuth(auth),/浏览器信息/);
   assert.throws(()=>parseReferenceConfig('{bad json'),/JSON/);
 });
+test('irrelevant malformed cookies no longer reject a valid login session',()=>{
+  const auth=parseReferenceConfig(config());auth.cookies.push({name:'',value:'auxiliary',domain:'.douyin.com'},{name:'sdk:temporary',value:'auxiliary',domain:'.douyin.com'});
+  const result=validateAuth({...auth,source:'popup'});assert.equal(result.cookies.length,2);assert.equal(result.ignoredCookies,2);assert.equal(result.source,'popup');
+  auth.cookies[0].value='bad\r\nvalue';assert.throws(()=>validateAuth(auth),/关键登录会话/);
+});
 test('credential vault persists encrypted bytes and safely rejects corrupted state',async t=>{
   const {dir}=await setup(t);const secrets=new Map();const cipher=Buffer.from('ciphertext-not-credentials');
   const crypto={isEncryptionAvailable:()=>true,encryptString:text=>{secrets.set(cipher.toString(),text);return cipher;},decryptString:b=>{if(!secrets.has(b.toString()))throw new Error('invalid');return secrets.get(b.toString());}};

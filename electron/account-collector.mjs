@@ -33,7 +33,7 @@ export class Collector{
     }
     if(key)this.store.setSetting('browserAccountKey',key);
     this.store.setSetting('sessionConnected',true);this.store.save();this.status.connected=true;this.status.source=auth.source;
-    this.update('ready',auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
+    this.update('ready',auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
   }
   async isAuthenticated(){await this.ready;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value);}
   assertNotCoolingDown(){const ms=Number(this.store.getSetting('accessHoldUntil')||0)-Date.now();if(ms>0)throw new Error(`已暂停自动请求，请至少等待 ${Math.ceil(ms/1000)} 秒后再手动尝试。平台恢复时间无法确定。`);}
