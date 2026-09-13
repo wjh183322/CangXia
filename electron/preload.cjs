@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const methods = ['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','deleteWorks','setTags','checkSource','refreshFiles'];
+const methods = ['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','deleteWorks','setTags','checkSource','refreshFiles','clearCompleted'];
 const api = {};
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);

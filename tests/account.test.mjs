@@ -72,6 +72,37 @@ test('rate limiting stops the read and preserves the prior full collection',asyn
   const {store}=await setup(t);store.upsertWork(raw('1'));store.ingestMembers(TOTAL,['1'],true);
   const a=adapter(store,async()=>new Response('limited',{status:429,headers:{'retry-after':'120'}}));await a.collector.importConfig(config());let paused=false;a.collector.onAccessHold=()=>{paused=true;};await a.collector.sync();assert.equal(a.calls.length,1);assert.equal(paused,true);assert.deepEqual(store.snapshot().members[TOTAL],['1']);assert.ok(store.getSetting('accessHoldUntil')>Date.now()+110000);
 });
+
+test('partial reads count globally new works, stop within a page and update only selected folder',async t=>{
+  const {store}=await setup(t);
+  store.discoverCollections([{collects_id:'9',collects_name:'A'},{collects_id:'10',collects_name:'B'}]);store.setAdded(['9','10']);
+  for(const id of ['1','2','3'])store.upsertWork(raw(id));store.ingestMembers(TOTAL,['3','2','1'],true);
+  const a=adapter(store,async url=>{
+    assert.equal(new URL(url).searchParams.get('collects_id'),'9');
+    return new Response(JSON.stringify({aweme_list:['1','4','2','5','6'].map(raw),has_more:0}));
+  });
+  await a.collector.importConfig(config());await a.collector.sync({collectionId:'9',maxNew:2});
+  assert.equal(a.calls.length,1);assert.equal(store.work('6'),null);assert.equal(store.getSetting('readLimit'),2);
+  assert.deepEqual(store.snapshot().members['9'],['1','4','2','5']);assert.deepEqual(store.snapshot().members['10'],[]);
+  assert.deepEqual(store.snapshot().pendingMembers[TOTAL],['4','5']);assert.equal(store.collection('9').complete,false);
+  assert.match(a.collector.status.message,/新增 2 个/);
+});
+
+test('known pages are skipped for quota, scanning until exhaustion or enough new IDs',async t=>{
+  const {store}=await setup(t);for(const id of ['1','2','3'])store.upsertWork(raw(id));
+  const a=adapter(store,async(_url,options)=>{
+    const cursor=new URLSearchParams(options.body).get('cursor');
+    return new Response(JSON.stringify(cursor==='0'?{aweme_list:['3','2'].map(raw),cursor:42,has_more:1}:{aweme_list:['1','4'].map(raw),has_more:0}));
+  });await a.collector.importConfig(config());await a.collector.sync({maxNew:20});
+  assert.equal(a.calls.length,2);assert.equal(store.collection(TOTAL).complete,true);
+  assert.deepEqual(store.snapshot().members[TOTAL],['3','2','1','4']);assert.match(a.collector.status.message,/新增 1 个/);
+});
+
+test('read all ignores quota and retains actual source order',async t=>{
+  const {store}=await setup(t);const a=adapter(store,async()=>new Response(JSON.stringify({aweme_list:['9','8','7'].map(raw),has_more:0})));
+  await a.collector.importConfig(config());await a.collector.sync({maxNew:1,readAll:true});
+  assert.deepEqual(store.snapshot().members[TOTAL],['9','8','7']);assert.equal(store.collection(TOTAL).complete,true);
+});
 test('largest single image is selected by downloaded pixels, preserving bytes and source',async t=>{
   const {dir,store}=await setup(t);
   function png(w,h){const b=Buffer.alloc(24);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(w,16);b.writeUInt32BE(h,20);return b;}

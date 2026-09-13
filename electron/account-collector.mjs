@@ -68,11 +68,18 @@ export class Collector{
   stop(){this.cancelled=true;this.syncController?.abort();this.update('idle','已停止，保留已读取内容');}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
   async dispose(){this.closed=true;this.stop();this.cancelResolve();await this.browser.close();}
-  async sync({discoverOnly=false}={}){
+  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20}={}){
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');
+    if(!discoverOnly){
+      const c=this.store.collection(collectionId);
+      if(!c?.added||c.remoteMissing)throw new Error('请先添加有效的收藏夹');
+      if(!Number.isSafeInteger(maxNew)||maxNew<1||maxNew>100000)throw new Error('最大读取数须为 1 到 100000 的整数');
+      this.store.setSetting('readLimit',maxNew);this.store.save();
+    }
     await this.ready;
     try{this.assertNotCoolingDown();if(!(await this.isAuthenticated())){this.update('attention','请先点击“连接抖音账号”，使用系统浏览器或导入配置完成连接');return;}}catch(e){this.update('attention',e.message);return;}
     this.busy=true;this.cancelled=false;this.syncController=new AbortController();const signal=this.syncController.signal;
+    let needsReconcile=false;
     const delay=async()=>{await this.delay();if(signal.aborted)throw new Error('读取已停止');};
     try{
       if(discoverOnly){
@@ -82,24 +89,37 @@ export class Collector{
         },{signal,delay});
         this.update(result.complete?'done':'attention',result.complete?'收藏夹目录已读取，请选择添加':'已保留发现的收藏夹，但接口未提供完整分页结束依据');return;
       }
-      let allComplete=true;
-      for(const c of this.store.all('collections').filter(c=>c.added&&!c.remoteMissing).sort((a,b)=>a.rank-b.rank)){
-        if(this.cancelled)break;this.update('syncing',`正在读取「${c.name}」`,0);
-        let processed=0;const memberIds=new Set();
-        const result=await paginate(async cursor=>{
-          const data=c.id===TOTAL?await this.request('/aweme/v1/web/aweme/listcollection/',{method:'POST',form:{cursor,count:'30'},signal}):await this.request('/aweme/v1/web/collects/video/list/',{params:{collects_id:c.id,cursor,count:30},signal});
-          return pageResult(data,'aweme_list');
-        },async(items,complete)=>{
-          for(const raw of items.slice(processed)){const id=this.store.upsertWork(raw)?.id;if(!id)throw new Error('作品结构无法识别，已停止更新列表并保留已有收藏');memberIds.add(id);}processed=items.length;
-          const ids=[...memberIds];this.store.ingestMembers(c.id,ids,complete);this.update('syncing',`正在读取「${c.name}」 · ${ids.length} 个作品`,ids.length);
-        },{signal,delay});
-        if(!result.complete)allComplete=false;
-        await delay();
+      const c=this.store.collection(collectionId), memberIds=new Set(), cursors=new Set();
+      let cursor='0',added=0,complete=false,limited=false;
+      this.update('syncing',`正在读取「${c.name}」`,0);
+      for(let page=0;page<10000&&!this.cancelled;page++){
+        if(cursors.has(cursor))break;cursors.add(cursor);
+        const data=c.id===TOTAL?await this.request('/aweme/v1/web/aweme/listcollection/',{method:'POST',form:{cursor,count:'30'},signal}):await this.request('/aweme/v1/web/collects/video/list/',{params:{collects_id:c.id,cursor,count:30},signal});
+        const result=pageResult(data,'aweme_list');let consumed=0;
+        for(const raw of result.items){
+          if(signal.aborted)break;
+          const id=String(raw.aweme_id||raw.awemeId||'');
+          if(!/^\d+$/.test(id))throw new Error('作品结构无法识别，已保留原列表');
+          const known=!!this.store.work(id);
+          this.store.upsertWork(raw);memberIds.add(id);consumed++;
+          if(!known)added++;
+          if(!readAll&&added>=maxNew){limited=true;break;}
+        }
+        complete=result.complete&&consumed===result.items.length&&!signal.aborted;
+        this.store.ingestMembers(c.id,[...memberIds],complete);
+        needsReconcile=true;
+        this.update('syncing',`「${c.name}」 · 已检查 ${memberIds.size} 个，新增 ${added} 个`,added);
+        if(complete||limited||result.next===null||!result.items.length||cursors.has(result.next))break;
+        cursor=result.next;await delay();
       }
-      if(this.cancelled)return;
       const errors=this.store.reconcile();
-      this.update(allComplete&&!errors.length?'done':'attention',errors.length?errors.join('；'):allComplete?'收藏已同步，可先预览再勾选下载':'已保留读取内容，但部分列表未完整读取，请勿将显示数量视为全部收藏');
-    }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{this.busy=false;this.syncController=null;this.notify();}
+      needsReconcile=false;
+      if(this.cancelled)return;
+      this.update((complete||limited)&&!errors.length?'done':'attention',errors.length?errors.join('；'):`「${c.name}」${complete?'已读完':limited?'部分读取完成':'读取未完整结束'} · 已检查 ${memberIds.size} 个，新增 ${added} 个`,added);
+    }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{
+      if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}
+      this.busy=false;this.syncController=null;this.notify();
+    }
   }
   markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
   async resolveWork(id){

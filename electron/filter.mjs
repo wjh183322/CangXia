@@ -1,5 +1,5 @@
 export const TOTAL = '__all__';
-export function selectWorks(works, { query = '', type = 'all', tags = [], tagMode = 'all', author = '', downloaded = 'all' } = {}) {
+export function selectWorks(works, { query = '', type = 'all', tags = [], tagMode = 'any', localTags = [], localTagMode = 'any', author = '', downloaded = 'all' } = {}) {
   const q = query.trim().toLocaleLowerCase();
   return works.filter(w => {
     const searchable = [w.name, w.title, w.description, w.author.nickname, w.author.uniqueId, w.author.uid, ...(w.tags || []), ...(w.localTags || [])].join(' ').toLocaleLowerCase();
@@ -8,7 +8,7 @@ export function selectWorks(works, { query = '', type = 'all', tags = [], tagMod
     if (author && (w.author.uid || w.author.secUid || w.author.nickname) !== author) return false;
     if (downloaded === 'complete' && !w.downloaded) return false;
     if (downloaded === 'missing' && w.downloaded) return false;
-    const actual = new Set([...(w.tags || []), ...(w.localTags || [])]);
-    return !tags.length || (tagMode === 'any' ? tags.some(t => actual.has(t)) : tags.every(t => actual.has(t)));
+    const matches=(selected,actual,mode)=>!selected.length||(mode==='any'?selected.some(t=>actual.includes(t)):selected.every(t=>actual.includes(t)));
+    return matches(tags,w.tags||[],tagMode)&&matches(localTags,w.localTags||[],localTagMode);
   });
 }

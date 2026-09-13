@@ -19,6 +19,11 @@ function extension(contentType, kind) {
 export class DownloadQueue {
   constructor(store, collector, fetchMedia, notify) { Object.assign(this, { store, collector, fetchMedia, notify }); this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,state:j.state==='running'?'waiting':j.state})); this.running = false; this.paused = this.jobs.some(j=>j.state==='waiting'); this.controller = null; }
   state() { return { jobs: this.jobs.map(({ id, title, state, progress, message }) => ({ id, title, state, progress, message })), paused: this.paused, running: this.running }; }
+  clearCompleted(ids) {
+    const selected=new Set(ids);
+    this.jobs=this.jobs.filter(j=>j.state!=='complete'||!selected.has(j.id));
+    this.emit();this.store.save();
+  }
   emit() { this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
   enqueue(ids) {
     for (const id of [...new Set(ids)]) {
@@ -34,9 +39,9 @@ export class DownloadQueue {
   async run() {
     if (this.running) return; this.running = true;
     try {
-      for (const job of this.jobs) {
-        if (this.paused) break;
-        if (job.state !== 'waiting') continue;
+      while (!this.paused) {
+        const job=this.jobs.find(j=>j.state==='waiting');
+        if(!job)break;
         job.state = 'running'; this.controller = new AbortController(); this.emit();
         try { await this.saveWork(job, this.controller.signal); job.state = 'complete'; job.progress = 100; job.message = '文件已保存'; }
         catch (e) { job.state = this.paused ? 'waiting' : 'failed'; job.message = this.paused ? '已暂停，继续时补齐' : e.message; }

@@ -99,7 +99,12 @@ try {
   handler('showQrLoginPage',()=>qrLogin.showPage());
   handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
   handler('importLoginConfig', async()=>{ensureIdle();const result=await dialog.showOpenDialog(window,{title:'选择参考工具的 config.json（仅在本机读取）',filters:[{name:'JSON 配置',extensions:['json']}],properties:['openFile']});if(result.canceled)return false;const file=result.filePaths[0];if(fs.statSync(file).size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
-  handler('sync', (discoverOnly = false) => { ensureIdle(); void collector.sync({ discoverOnly: !!discoverOnly }); return true; });
+  handler('sync', (options = {}) => {
+    ensureIdle();
+    if(!options||typeof options!=='object')throw new Error('读取选项无效');
+    void collector.sync(options).catch(e=>{collector.update('attention',e.message);}); return true;
+  });
+  handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
   handler('stopSync', () => collector.stop());
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
@@ -109,7 +114,7 @@ try {
   handler('refreshFiles', () => { notify(); return snapshot(); });
   handler('chooseRoot', async () => {
     ensureIdle();
-    if (store.all('downloads').length) throw new Error('媒体库已有作品。此版本不支持移动整个媒体库，请保留当前根目录。');
+    if (store.all('downloads').length) throw new Error('媒体库已有下载作品，不能修改保存目录。');
     const r = await dialog.showOpenDialog(window, { title: '选择下载根目录', defaultPath: store.root, properties: ['openDirectory', 'createDirectory'] });
     if (!r.canceled && r.filePaths[0]) { store.setSetting('root', r.filePaths[0]); store.save(); notify(); }
     return store.root;

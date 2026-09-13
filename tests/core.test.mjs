@@ -74,8 +74,48 @@ test('removing from selected folder while still collected moves to total; unfavo
 test('same titles never overwrite another work, downloaded badge checks real assets',async t=>{
   const s=await setup(t);s.upsertWork(raw('1'));s.upsertWork(raw('2'));const a=localFile(s,'1');const b=localFile(s,'2');assert.notEqual(a.path,b.path);assert.equal(s.isDownloaded('1'),true);fs.unlinkSync(path.join(a.path,'视频.mp4'));assert.equal(s.isDownloaded('1'),false);assert.equal(s.isDownloaded('2'),true);
 });
-test('tag filtering supports original and custom tags, all/any and author ID',()=>{
-  const w={...parseWork(raw()),localTags:['待整理'],downloaded:true};assert.equal(selectWorks([w],{tags:['cos','待整理']}).length,1);assert.equal(selectWorks([w],{tags:['cos','不存在']}).length,0);assert.equal(selectWorks([w],{tags:['cos','不存在'],tagMode:'any'}).length,1);assert.equal(selectWorks([w],{author:'42',query:'author42'}).length,1);
+test('source and personal tags filter independently and intersect, with any/all per row',()=>{
+  const w={...parseWork(raw()),localTags:['待整理'],downloaded:true};
+  assert.equal(selectWorks([w],{tags:['cos'],localTags:['待整理']}).length,1);
+  assert.equal(selectWorks([w],{tags:['待整理']}).length,0);
+  assert.equal(selectWorks([w],{localTags:['cos']}).length,0);
+  assert.equal(selectWorks([w],{tags:['cos','不存在'],tagMode:'all'}).length,0);
+  assert.equal(selectWorks([w],{tags:['cos','不存在'],tagMode:'any'}).length,1);
+  assert.equal(selectWorks([w],{tags:['cos'],localTags:['不存在']}).length,0);
+  assert.equal(selectWorks([w],{author:'42',query:'author42'}).length,1);
+});
+
+test('folder-only discoveries remain pending in total until total confirms their independent order',async t=>{
+  const s=await setup(t);for(const id of ['1','2','3','4','5'])s.upsertWork(raw(id));
+  s.discoverCollections([{collects_id:'9',collects_name:'A'}]);s.setAdded(['9']);
+  s.ingestMembers(TOTAL,['3','2','1'],true);
+  s.ingestMembers('9',['1','4','3'],true);
+  assert.deepEqual(s.snapshot().members[TOTAL],['3','2','1','4']);
+  assert.deepEqual(s.snapshot().pendingMembers[TOTAL],['4']);
+  s.ingestMembers(TOTAL,['5','4','3'],false);
+  assert.deepEqual(s.snapshot().members[TOTAL],['5','4','3','2','1']);
+  assert.deepEqual(s.snapshot().pendingMembers[TOTAL],[]);
+  assert.deepEqual(s.snapshot().members['9'],['1','4','3']);
+  s.ingestMembers('9',['2','1'],false);
+  assert.deepEqual(s.snapshot().members['9'],['2','1','4','3']);
+  assert.deepEqual(s.snapshot().members[TOTAL],['5','4','3','2','1']);
+});
+
+test('sparse refresh preserves known identity and missing text, while local tags stay independent',async t=>{
+  const s=await setup(t);s.upsertWork(raw());s.put('local_tags','123',{id:'123',tags:['我的分类']});
+  s.upsertWork({aweme_id:'123',author:{uid:'42',nickname:'新作者名'}});
+  assert.equal(s.work('123').description,'原始文案 #cos #fgo');assert.equal(s.work('123').author.uniqueId,'author42');
+  assert.deepEqual(s.snapshot().works[0].localTags,['我的分类']);assert.deepEqual(s.work('123').tags,['cos','fgo']);
+});
+
+test('deleting completed queue history preserves library files and does not skip waiting jobs',async t=>{
+  const s=await setup(t);for(const id of ['1','2','3'])s.upsertWork(raw(id));localFile(s,'1');
+  const q=new DownloadQueue(s,{},async()=>{},()=>{});
+  q.jobs=[{id:'1',state:'complete'},{id:'2',state:'waiting'},{id:'3',state:'waiting'}];
+  const visited=[];q.saveWork=async job=>{visited.push(job.id);if(job.id==='2')q.clearCompleted(['1','3']);};
+  await q.run();assert.deepEqual(visited,['2','3']);assert.equal(s.isDownloaded('1'),true);
+  assert.deepEqual(q.jobs.map(j=>j.id),['2','3']);assert.equal(s.download('1').state,'complete');
+  q.clearCompleted(['2','3']);assert.equal(q.jobs.length,0);assert.equal(s.getSetting('downloadJobs').length,0);
 });
 test('download partial completion is retained and retry fetches only the missing asset',async t=>{
   const s=await setup(t);s.upsertWork(raw());let failImage=true;const requests=[];

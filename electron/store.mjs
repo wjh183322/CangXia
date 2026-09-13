@@ -51,6 +51,10 @@ export class Store {
     const next = parseWork(raw); if (!next) return null;
     const old = this.work(next.id);
     if (old) {
+      for (const key of ['title','caption','description','thumbnail']) if (!next[key]) next[key] = old[key];
+      if (next.name === '未命名作品') next.name = old.name;
+      if (!('text_extra' in raw || 'textExtra' in raw || 'cha_list' in raw || 'desc' in raw || 'caption' in raw)) { next.tags = old.tags; next.rawTags = old.rawTags; }
+      for (const key of ['uid','secUid','uniqueId','nickname']) if (!next.author[key] || next.author[key] === '未知作者') next.author[key] = old.author[key];
       if (!next.videoUrls.length) next.videoUrls = old.videoUrls || [];
       if (!next.coverUrls.length) { next.coverUrls = old.coverUrls || []; next.coverSource = old.coverSource; }
       if (!next.images.length && old.type === 'images') { next.images = old.images; next.type = old.type; }
@@ -77,14 +81,22 @@ export class Store {
   }
   ingestMembers(id, ids, complete) {
     const c = this.collection(id); if (!c || !c.added) return;
+    ids = [...new Set(ids)];
+    const seen = new Set(ids);
+    const previous = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [id]);
+    const ordered = complete ? ids : [...ids, ...previous.filter(r => r.rank !== null && !seen.has(r.work_id)).map(r => r.work_id)];
+    const pending = complete ? [] : previous.filter(r => r.rank === null && !seen.has(r.work_id)).map(r => r.work_id);
     this.db.run('BEGIN');
     try {
-      // A partial read adds to the existing snapshot; only a complete traversal replaces it.
-      if (complete) this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
-      ids.forEach((wid, rank) => {
-        if (id !== TOTAL) this.db.run('DELETE FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?', [wid, TOTAL, id]);
-        this.db.run('INSERT OR REPLACE INTO members VALUES (?,?,?)', [id, wid, rank]);
-      });
+      // Each scope owns its order. A partial prefix retains the unvisited suffix without rank collisions.
+      this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
+      ordered.forEach((wid, rank) => this.db.run('INSERT INTO members VALUES (?,?,?)', [id, wid, rank]));
+      pending.forEach(wid => this.db.run('INSERT INTO members VALUES (?,?,NULL)', [id, wid]));
+      if (id !== TOTAL) for (const wid of ids) {
+        this.db.run('DELETE FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?', [wid, TOTAL, id]);
+        // A folder proves total membership, but cannot establish the total's position.
+        this.db.run('INSERT OR IGNORE INTO members VALUES (?,?,NULL)', [TOTAL, wid]);
+      }
       this.put('collections', id, { ...c, syncedAt: new Date().toISOString(), complete, count: complete ? ids.length : Math.max(c.count || 0, ids.length), loadedCount: ids.length });
       this.db.run('COMMIT');
     } catch (e) { this.db.run('ROLLBACK'); throw e; }
@@ -128,7 +140,7 @@ export class Store {
   relocate(id) {
     const d = this.download(id); if (!d) return;
     const target = this.destination(id);
-    if (path.resolve(d.path) === target.dir) return;
+    if (path.resolve(d.path) === target.dir) { this.refreshMetadata(id); return; }
     this.assertDirectory(d.path); this.assertDirectory(target.dir);
     if (fs.existsSync(d.path)) {
       fs.mkdirSync(path.dirname(target.dir), { recursive: true });
@@ -139,11 +151,17 @@ export class Store {
     }
     const moved={ ...d, path: target.dir, collectionId: target.collectionId };
     this.put('downloads', id, moved);
-    const infoPath=path.join(target.dir,'作品信息.json');
+    this.refreshMetadata(id);
+  }
+  refreshMetadata(id) {
+    const moved=this.download(id); if(!moved)return;
+    this.assertDirectory(moved.path);
+    const infoPath=path.join(moved.path,'作品信息.json');
     if(fs.existsSync(infoPath)){
       const info=JSON.parse(fs.readFileSync(infoPath,'utf8'));const w=this.work(id);
-      Object.assign(info,{collection:this.collection(target.collectionId)?.name,collectionId:target.collectionId,author:w.author,workName:w.name,title:w.title,description:w.description});
-      fs.writeFileSync(infoPath+'.part',JSON.stringify(info,null,2));fs.renameSync(infoPath+'.part',infoPath);
+      Object.assign(info,{collection:this.collection(moved.collectionId)?.name,collectionId:moved.collectionId,author:w.author,workName:w.name,title:w.title,caption:w.caption,description:w.description,tags:w.tags,rawTags:w.rawTags,localTags:this.get('local_tags',id)?.tags||[],remoteState:w.remoteState,checkedAt:w.checkedAt});
+      const text=JSON.stringify(info,null,2);
+      if(fs.readFileSync(infoPath,'utf8')!==text){fs.writeFileSync(infoPath+'.part',text);fs.renameSync(infoPath+'.part',infoPath);}
       const asset=moved.assets.find(a=>a.key==='metadata');if(asset)asset.size=fs.statSync(infoPath).size;
       this.put('downloads',id,moved);
     }
@@ -184,8 +202,12 @@ export class Store {
       return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
-    const members = {};
-    for (const c of collections) members[c.id] = this.rows('SELECT work_id FROM members WHERE collection_id=? ORDER BY rank', [c.id]).map(r => r.work_id);
-    return { works, collections, members, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.3' };
+    const members = {}, pendingMembers = {};
+    for (const c of collections) {
+      const rows = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [c.id]);
+      members[c.id] = rows.map(r => r.work_id);
+      pendingMembers[c.id] = rows.filter(r => r.rank === null).map(r => r.work_id);
+    }
+    return { works, collections, members, pendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:downloads.size>0, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.4' };
   }
 }
