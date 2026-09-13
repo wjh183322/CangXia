@@ -9,7 +9,7 @@ try {
     $package = Get-Content -Raw -LiteralPath 'package.json' | ConvertFrom-Json
     $version = $package.version
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw '版本号必须为 X.Y.Z。' }
-    $tag = "windows-v$version"
+    $tag = "v$version"
     if ((git status --porcelain)) { throw '请先提交源码，工作目录必须干净。' }
     $head = git rev-parse HEAD
     $tagCommit = git rev-parse "$tag^{commit}" 2>$null
@@ -26,6 +26,6 @@ try {
     Set-Content -LiteralPath $hashFile -Value "$hash  CangXia-$version-Windows-x64.exe" -Encoding utf8
     git push origin HEAD $tag
     if ($LASTEXITCODE -ne 0) { throw '源码或标签推送失败。' }
-    & $ghPath release create $tag $exe $hashFile --repo $Repository --verify-tag --title "CangXia Windows 本地版 v$version" --notes-file $notes --latest=false
+    & $ghPath release create $tag $exe $hashFile --repo $Repository --verify-tag --title "CangXia v$version" --notes-file $notes
     if ($LASTEXITCODE -ne 0) { throw 'Release 发布未完成，请检查 GitHub 上的实际状态后再处理。' }
 } finally { Pop-Location }
