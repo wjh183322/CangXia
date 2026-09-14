@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { isMediaURL, requireInside } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import { randomUUID, createHash } from 'node:crypto';
+import { inspectWorkFiles } from './repair-check.mjs';
 
 function extension(contentType, kind) {
   const t = (contentType || '').split(';')[0];
@@ -51,7 +52,9 @@ export class DownloadQueue {
   }
   async saveWork(job, signal) {
     const { store } = this;
-    if (store.isDownloaded(job.id)) { job.message = '已存在，跳过'; return; }
+    const inspection=inspectWorkFiles(store,job.id);
+    if(inspection.status==='error')throw new Error(inspection.error);
+    if (inspection.status==='complete') { job.message = '文件完整，无需补齐'; return; }
     let w = store.work(job.id);
     job.message = '刷新作品资源'; this.emit();
     try { const fresh = await this.collector.resolveWork(job.id); if (fresh) w = fresh; }

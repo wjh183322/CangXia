@@ -103,6 +103,13 @@ test('read all ignores quota and retains actual source order',async t=>{
   await a.collector.importConfig(config());await a.collector.sync({maxNew:1,readAll:true});
   assert.deepEqual(store.snapshot().members[TOTAL],['9','8','7']);assert.equal(store.collection(TOTAL).complete,true);
 });
+
+test('deleted records count as new when reread even if metadata and local membership remain',async t=>{
+  const {store}=await setup(t);store.upsertWork(raw('1'));store.upsertWork(raw('2'));store.ingestMembers(TOTAL,['2','1'],true);store.deleteReadRecords(['1']);
+  const a=adapter(store,async()=>new Response(JSON.stringify({aweme_list:['2','1','3'].map(raw),has_more:0})));
+  await a.collector.importConfig(config());await a.collector.sync({maxNew:1});
+  assert.equal(store.work('3'),null);assert.equal(store.hasRead('1'),true);assert.deepEqual(store.snapshot().members[TOTAL],['2','1']);assert.match(a.collector.status.message,/新增 1 个/);
+});
 test('largest single image is selected by downloaded pixels, preserving bytes and source',async t=>{
   const {dir,store}=await setup(t);
   function png(w,h){const b=Buffer.alloc(24);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(w,16);b.writeUInt32BE(h,20);return b;}

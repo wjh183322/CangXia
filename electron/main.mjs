@@ -1,4 +1,7 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, session, safeStorage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, session, safeStorage, screen } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { listDirectory, makeDirectory, absolutePath } from './file-browser.mjs';
+import { inspectRepairs } from './repair-check.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -19,6 +22,7 @@ app.setName('藏匣');
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let window, store, collector, queue, qrLogin, timer, quitting=false;
+const deleteIntents=new Map();
 function snapshot() { return { ...store.snapshot(), collector: { ...collector.status, busy: collector.busy }, queue: queue.state(), qr:qrLogin?.state() }; }
 function notify() {
   if (quitting) return;
@@ -87,7 +91,8 @@ try {
       return net.fetch(pathToFileURL(file).href, { headers: request.headers });
     } catch { return new Response('', { status: 404 }); }
   });
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), width: 1440, height: 940, minWidth: 1000, minHeight: 700, show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  const area=screen.getPrimaryDisplay().workAreaSize;
+  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), width: Math.min(area.width,Math.max(1000,Math.floor(area.width*.94))), height:Math.min(area.height,Math.max(700,Math.floor(area.height*.92))), minWidth:Math.min(1000,area.width), minHeight:Math.min(700,area.height), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -98,7 +103,11 @@ try {
   handler('cancelQrLogin',()=>qrLogin.cancel());
   handler('showQrLoginPage',()=>qrLogin.showPage());
   handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
-  handler('importLoginConfig', async()=>{ensureIdle();const result=await dialog.showOpenDialog(window,{title:'选择参考工具的 config.json（仅在本机读取）',filters:[{name:'JSON 配置',extensions:['json']}],properties:['openFile']});if(result.canceled)return false;const file=result.filePaths[0];if(fs.statSync(file).size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
+  handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
+  handler('listDirectory',(value,mode)=>listDirectory(value,mode));
+  handler('makeDirectory',(parent,name)=>makeDirectory(parent,name));
+  handler('checkRepairs',selected=>{ensureIdle();return inspectRepairs(store,ids(selected));});
+  handler('startRepairs',selected=>{ensureIdle();const report=inspectRepairs(store,ids(selected));const missing=report.items.filter(i=>i.status==='missing');if(missing.length)queue.enqueue(missing.map(i=>i.id));return {...report,started:missing.length};});
   handler('sync', (options = {}) => {
     ensureIdle();
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
@@ -112,11 +121,10 @@ try {
   handler('pause', () => queue.pause());
   handler('resume', () => { if (collector.busy) throw new Error('请等待同步完成'); queue.resume(); });
   handler('refreshFiles', () => { notify(); return snapshot(); });
-  handler('chooseRoot', async () => {
+  handler('chooseRoot', async value => {
     ensureIdle();
     if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
-    const r = await dialog.showOpenDialog(window, { title: '选择下载根目录', defaultPath: store.root, properties: ['openDirectory', 'createDirectory'] });
-    if (!r.canceled && r.filePaths[0]) { ensureIdle(); store.setDownloadRoot(r.filePaths[0]); notify(); }
+    store.setDownloadRoot(absolutePath(value));notify();
     return store.root;
   });
   handler('openRoot', async () => { fs.mkdirSync(store.root, { recursive: true }); const error = await shell.openPath(store.root); if (error) throw new Error(error); });
@@ -138,12 +146,19 @@ try {
     notify();
   });
   handler('checkSource', async id => { ids([id]); ensureIdle(); try { await collector.resolveWork(id); } finally { notify(); } });
-  handler('deleteWorks', async selected => {
-    ensureIdle(); const records = ids(selected).map(id => store.download(id)).filter(Boolean);
-    if (!records.length) return false;
-    const invalid = records.some(d => store.work(d.id)?.remoteState === 'unavailable');
-    const result = await dialog.showMessageBox(window, { type: 'warning', title: '删除本地作品', message: invalid ? '原作品已失效，删除本地副本后将无法从抖音重新下载。确定删除吗？' : `确定删除这 ${records.length} 个作品的本地文件吗？`, detail: '将删除视频、图片及作品信息，并撤销“已下载”标记。抖音账号收藏不受影响。文件会移入系统回收站。', buttons: ['取消', '删除本地文件'], defaultId: 0, cancelId: 0, noLink: true });
-    if (result.response !== 1) return false;
+  handler('prepareDelete',(selected,kind)=>{
+    ensureIdle();if(!['local','records'].includes(kind))throw new Error('删除类型无效');
+    const selectedIds=ids(selected).filter(id=>kind==='local'?store.download(id):store.hasRead(id));
+    const invalid=selectedIds.some(id=>store.work(id)?.remoteState==='unavailable');
+    const token=randomUUID();deleteIntents.clear();deleteIntents.set(token,{ids:selectedIds,kind,invalid,expires:Date.now()+600000});
+    return {token,kind,count:selectedIds.length,invalid};
+  });
+  handler('confirmDelete',async token=>{
+    ensureIdle();const intent=deleteIntents.get(token);if(!intent||intent.expires<Date.now())throw new Error('删除确认已过期，请重新选择');
+    deleteIntents.delete(token);
+    if(intent.kind==='records'){store.deleteReadRecords(intent.ids);notify();return true;}
+    const records=intent.ids.map(id=>store.download(id)).filter(Boolean);
+    if(!intent.invalid&&records.some(d=>store.work(d.id)?.remoteState==='unavailable'))throw new Error('原作品状态已变化，请重新确认删除');
     const failed = [];
     for (const d of records) try {
       store.assertDirectory(d.path);

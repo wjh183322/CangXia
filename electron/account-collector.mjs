@@ -100,7 +100,7 @@ export class Collector{
           if(signal.aborted)break;
           const id=String(raw.aweme_id||raw.awemeId||'');
           if(!/^\d+$/.test(id))throw new Error('作品结构无法识别，已保留原列表');
-          const known=!!this.store.work(id);
+          const known=this.store.hasRead(id)||memberIds.has(id);
           this.store.upsertWork(raw);memberIds.add(id);consumed++;
           if(!known)added++;
           if(!readAll&&added>=maxNew){limited=true;break;}

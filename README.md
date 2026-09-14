@@ -1,11 +1,13 @@
 # 藏匣 CangXia
 
-当前版本：**v0.1.5** · Windows 10/11 64位 · 分支 `main`
+稳定版本：**v0.1.5** · Windows 10/11 64位 · 分支 `main`
 
 [下载 v0.1.5](https://github.com/wjh183322/CangXia/releases/tag/v0.1.5) · [历史 v0.1.0](https://github.com/wjh183322/CangXia/releases/tag/v0.1.0) · [变更记录](CHANGELOG.md)
 
 
 Windows 本地抖音收藏管理工具。账号收藏与本地媒体库独立，按自建收藏夹存放媒体文件，保持总收藏和自建收藏夹的逻辑关系。
+
+最新预览版：[v0.1.6](https://github.com/wjh183322/CangXia/releases/tag/v0.1.6)，新增读取记录删除、每页 20 个、统一弹窗和补齐前检查。桌面验收状态见版本说明。
 
 ## 运行
 

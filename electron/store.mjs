@@ -39,6 +39,14 @@ export class Store {
   get root() { return this.getSetting('root'); }
   collection(id) { return this.get('collections', id); }
   work(id) { return this.get('works', id); }
+  hasRead(id) { const w=this.work(id);return !!w&&!w.readHidden; }
+  deleteReadRecords(ids) {
+    this.db.run('BEGIN');
+    try { for(const id of new Set(ids)){const w=this.work(id);if(w)this.put('works',id,{...w,readHidden:true});}this.db.run('COMMIT'); }
+    catch(e){this.db.run('ROLLBACK');throw e;}
+    // Keep the underlying membership and rank for the independent local library.
+    this.save();
+  }
   download(id) { return this.get('downloads', id); }
   save() {
     const temp = this.file + '.tmp';
@@ -89,6 +97,7 @@ export class Store {
     this.db.run('BEGIN');
     try {
       // Each scope owns its order. A partial prefix retains the unvisited suffix without rank collisions.
+      for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}
       this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
       ordered.forEach((wid, rank) => this.db.run('INSERT INTO members VALUES (?,?,?)', [id, wid, rank]));
       pending.forEach(wid => this.db.run('INSERT INTO members VALUES (?,?,NULL)', [id, wid]));
@@ -241,12 +250,15 @@ export class Store {
       return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
-    const members = {}, pendingMembers = {};
+    const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
+    const hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
     for (const c of collections) {
       const rows = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [c.id]);
-      members[c.id] = rows.map(r => r.work_id);
-      pendingMembers[c.id] = rows.filter(r => r.rank === null).map(r => r.work_id);
+      localMembers[c.id]=rows.map(r=>r.work_id);
+      localPendingMembers[c.id]=rows.filter(r=>r.rank===null).map(r=>r.work_id);
+      members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
+      pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.5' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.6' };
   }
 }

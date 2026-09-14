@@ -7,6 +7,8 @@ import { Store } from '../electron/store.mjs';
 import { parseWork, classifyResponse, safeName, inside, selectWorks, TOTAL, parsePlatformJSON, joinPages } from '../electron/model.mjs';
 import { imageDimensions } from '../electron/media-info.mjs';
 import { DownloadQueue } from '../electron/downloads.mjs';
+import { inspectRepairs } from '../electron/repair-check.mjs';
+import { listDirectory,makeDirectory } from '../electron/file-browser.mjs';
 
 const media='https://v3.douyinvod.com/test.mp4', cover='https://p3.douyinpic.com/cover.jpg';
 const raw=(id='123', name='测试标题')=>({ aweme_id:id, item_title:name, desc:'原始文案 #cos #fgo', create_time:1, author:{uid:'42',sec_uid:'MS4wABC',unique_id:'author42',nickname:'原作者'}, text_extra:[{hashtag_name:'cos',hashtag_id:'3'}], video:{duration:7000,play_addr:{url_list:[media]},origin_cover:{url_list:[cover]},cover:{url_list:[cover]}}});
@@ -19,6 +21,39 @@ function localFile(store,id,collectionId=TOTAL) {
   const {dir}=store.destination(id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'视频.mp4'),'video');
   const d={id,path:dir,collectionId,state:'complete',assets:[{key:'video',file:'视频.mp4',kind:'video',size:5}],savedAt:new Date().toISOString()};store.put('downloads',id,d);store.save();return d;
 }
+
+test('deleting read records hides all account views while preserving local order files and labels',async t=>{
+  const s=await setup(t);for(const id of ['1','2','3'])s.upsertWork(raw(id));s.ingestMembers(TOTAL,['3','2','1'],true);
+  s.discoverCollections([{collects_id:'9',collects_name:'A'}]);s.setAdded(['9']);s.ingestMembers('9',['1','2'],true);const d=localFile(s,'2','9');s.put('local_tags','2',{id:'2',tags:['保留']});
+  const before=s.snapshot();s.deleteReadRecords(['2']);const after=s.snapshot();
+  assert.deepEqual(after.members[TOTAL],['3','1']);assert.deepEqual(after.members['9'],['1']);
+  assert.deepEqual(after.localMembers,before.localMembers);assert.equal(s.download('2').path,d.path);assert.deepEqual(s.get('local_tags','2').tags,['保留']);assert.equal(s.hasRead('2'),false);
+  s.upsertWork(raw('2','更新元数据'));assert.equal(s.hasRead('2'),false,'metadata refresh alone does not restore a deleted read record');
+  s.ingestMembers(TOTAL,['2','3','1'],true);assert.equal(s.hasRead('2'),true);assert.deepEqual(s.snapshot().members[TOTAL],['2','3','1']);assert.equal(s.all('works').length,3);
+});
+
+test('repair report distinguishes complete, missing and uncheckable without modifying queue',async t=>{
+  const s=await setup(t);for(const id of ['1','2','3']){s.upsertWork(raw(id));localFile(s,id);}
+  const d=s.download('1');for(const [key,file] of [['cover','单图.jpg'],['metadata','作品信息.json']]){fs.writeFileSync(path.join(d.path,file),'ok');d.assets.push({key,file,size:2});}s.put('downloads','1',d);
+  const outside=s.download('3');outside.path=path.join(path.dirname(s.root),'outside');s.put('downloads','3',outside);
+  const report=inspectRepairs(s,['1','2','3']);assert.equal(report.complete,1);assert.equal(report.missing,1);assert.equal(report.errors,1);
+  assert.deepEqual(report.items[1].missing.map(m=>m.key),['cover','metadata']);assert.equal(s.getSetting('downloadJobs'),null);
+  fs.writeFileSync(path.join(d.path,'视频.mp4'),'');assert.ok(inspectRepairs(s,['1']).items[0].missing.some(m=>m.key==='video'));
+});
+
+test('repair checks required keys rather than trusting a completed download flag',async t=>{
+  const s=await setup(t);s.upsertWork(raw());localFile(s,'123');const urls=[];
+  const q=new DownloadQueue(s,{resolveWork:async()=>s.work('123')},async url=>{urls.push(url);return new Response(Buffer.from('image'),{headers:{'content-type':'image/jpeg'}});},()=>{});
+  assert.equal(s.isDownloaded('123'),true);assert.equal(inspectRepairs(s,['123']).missing,1);
+  await q.saveWork({id:'123'},new AbortController().signal);assert.deepEqual(urls,[cover]);assert.equal(inspectRepairs(s,['123']).complete,1);
+});
+
+test('custom picker lists directories and JSON only and prevents traversal in new folder names',async t=>{
+  const s=await setup(t);const dir=path.dirname(s.root);fs.writeFileSync(path.join(dir,'one.json'),'{}');fs.writeFileSync(path.join(dir,'two.txt'),'data');await makeDirectory(dir,'新建文件夹');
+  const directories=await listDirectory(dir);assert.ok(directories.entries.every(e=>e.directory));
+  const files=await listDirectory(dir,'json');assert.ok(files.entries.some(e=>e.name==='one.json'));assert.ok(!files.entries.some(e=>e.name==='two.txt'));
+  await assert.rejects(makeDirectory(dir,'../outside'));await assert.rejects(makeDirectory(dir,'CON'));await assert.rejects(listDirectory('relative'));
+});
 
 test('external deletion releases root lock; switching root retains favorites tags and history',async t=>{
   const s=await setup(t);s.upsertWork(raw());s.ingestMembers(TOTAL,['123'],true);
