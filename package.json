@@ -1,6 +1,6 @@
 {
   "name": "cangxia",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "藏匣 · 抖音收藏与本地媒体库",
   "author": "CangXia",
   "private": true,
@@ -14,7 +14,8 @@
     "test": "node --test tests/*.test.mjs",
     "dist": "npm run build && electron-builder --win portable --x64",
     "test:ui": "vite build --ssr src/main.jsx --outDir .test-output/dom-build && node tests/workspace-ui.mjs",
-    "test:layout": "npm run build && electron tests/layout-smoke.cjs"
+    "test:layout": "npm run build && electron tests/layout-smoke.cjs",
+    "test:nas-desktop": "npm run build && node scripts/nas-desktop-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.577.0",

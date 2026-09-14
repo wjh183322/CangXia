@@ -14,6 +14,7 @@ export class Store {
     if (fs.existsSync(file)) bytes = fs.readFileSync(file);
     const db = new SQL.Database(bytes);
     const s = new Store(db, file);
+    s.SQL=SQL;
     db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS works (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -31,12 +32,12 @@ export class Store {
     try { stmt.bind(args); while (stmt.step()) out.push(stmt.getAsObject()); } finally { stmt.free(); }
     return out;
   }
-  put(table, id, body) { this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]); }
+  put(table, id, body) { this.nas?.assertWritable();this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]); }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
   all(table) { return this.rows(`SELECT body FROM ${table}`).map(r => JSON.parse(r.body)); }
-  getSetting(key) { const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
-  setSetting(key, value) { this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]); }
-  get root() { return this.getSetting('root'); }
+  getSetting(key) { if(this.nas&&['sessionConnected','accessHoldUntil'].includes(key))return this.nas.deviceSettings[key]??null;const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
+  setSetting(key, value) { if(this.nas&&['sessionConnected','accessHoldUntil'].includes(key)){this.nas.deviceSettings[key]=value;return;}if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;this.nas?.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]); }
+  get root() { return this.nas?.mediaRoot||this.getSetting('root'); }
   collection(id) { return this.get('collections', id); }
   work(id) { return this.get('works', id); }
   hasRead(id) { const w=this.work(id);return !!w&&!w.readHidden; }
@@ -53,8 +54,9 @@ export class Store {
     fs.writeFileSync(temp, this.db.export());
     if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.file + '.bak');
     fs.renameSync(temp, this.file);
+    this.nas?.changed();
   }
-  close() { this.save(); this.db.close(); }
+  close() { if(!this.nas)this.save(); this.db.close(); }
   upsertWork(raw) {
     const next = parseWork(raw); if (!next) return null;
     const old = this.work(next.id);
@@ -126,6 +128,7 @@ export class Store {
   }
   assertDirectory(dir) {
     requireInside(this.root, dir);
+    if(this.nas)return;
     let part = path.resolve(dir), root = path.resolve(this.root);
     while (true) {
       if (fs.existsSync(part) && fs.lstatSync(part).isSymbolicLink()) throw new Error('媒体目录包含符号链接，请选择普通文件夹');
@@ -141,12 +144,14 @@ export class Store {
     let dir = requireInside(this.root, path.join(parent, basename));
     const current = this.download(id);
     const occupied = this.all('downloads').some(d => d.id !== id && path.resolve(d.path).toLowerCase() === dir.toLowerCase());
-    if (occupied || (fs.existsSync(dir) && path.resolve(current?.path || '.') !== dir)) dir += '-' + id;
+    if (occupied || (!this.nas&&fs.existsSync(dir) && path.resolve(current?.path || '.') !== dir)) dir += '-' + id;
+    if(this.nas&&!dir.endsWith('-'+id))dir+='-'+id;
     if (dir.length > 235) throw new Error('保存路径过长，请选择更短的下载根目录');
     this.assertDirectory(dir);
     return { dir, collectionId: c.id };
   }
   relocate(id) {
+    if(this.nas){this.nas.relocations.add(id);return;}
     const d = this.download(id); if (!d) return;
     const target = this.destination(id);
     if (path.resolve(d.path) === target.dir) { this.refreshMetadata(id); return; }
@@ -163,6 +168,7 @@ export class Store {
     this.refreshMetadata(id);
   }
   refreshMetadata(id) {
+    if(this.nas){this.nas.relocations.add(id);return;}
     const moved=this.download(id); if(!moved)return;
     this.assertDirectory(moved.path);
     const infoPath=path.join(moved.path,'作品信息.json');
@@ -181,6 +187,7 @@ export class Store {
     this.save(); return errors;
   }
   assetExists(d, asset) {
+    if(this.nas)return this.nas.assets[d.id+':'+asset.key]?.exists??false;
     try {
       this.assertDirectory(d.path);
       const file = requireInside(d.path, path.join(d.path, asset.file));
@@ -193,6 +200,7 @@ export class Store {
     return d.assets.every(a => this.assetExists(d, a));
   }
   hasSavedFiles() {
+    if(this.nas)return true;
     const records=this.all('downloads');
     if(!records.length)return false;
     // An unavailable drive is not evidence that its files were deleted.
@@ -216,6 +224,7 @@ export class Store {
     return false;
   }
   setDownloadRoot(root) {
+    if(this.nas)throw new Error('NAS 媒体库路径由库连接管理，请切换媒体库');
     if(typeof root!=='string'||!root.trim())throw new Error('保存目录无效');
     const target=path.resolve(root);
     if(target===path.resolve(this.root))return this.root;
@@ -232,7 +241,7 @@ export class Store {
     this.save();return target;
   }
   snapshot() {
-    for(const d of this.all('downloads')){
+    for(const d of this.nas?[]:this.all('downloads')){
       let changed=false;
       for(const a of d.assets||[])if(a.kind==='image'&&a.width===undefined&&this.assetExists(d,a)){
         if(a.size>50000000)continue;
@@ -259,6 +268,6 @@ export class Store {
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.7' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.8' };
   }
 }

@@ -25,7 +25,7 @@ export class DownloadQueue {
     this.jobs=this.jobs.filter(j=>j.state!=='complete'||!selected.has(j.id));
     this.emit();this.store.save();
   }
-  emit() { this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
+  emit() { if(!this.store.nas||this.store.nas.canWrite())this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
   enqueue(ids) {
     for (const id of [...new Set(ids)]) {
       const w = this.store.work(id); if (!w) continue;
@@ -51,6 +51,7 @@ export class DownloadQueue {
     } finally { this.running = false; this.emit(); }
   }
   async saveWork(job, signal) {
+    if(this.remoteSaveWork)return this.remoteSaveWork(job,signal);
     const { store } = this;
     const inspection=inspectWorkFiles(store,job.id);
     if(inspection.status==='error')throw new Error(inspection.error);

@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const methods = ['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'];
 const api = {};
+methods.push('planNas','migrateNas','openNas','reconnectNas','leaveNas','openNasRecovery','openNasTrash','nasTrash','restoreNasDeleted');
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);
   if (!result.ok) throw new Error(result.error);
