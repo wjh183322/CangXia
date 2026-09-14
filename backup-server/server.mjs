@@ -62,7 +62,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
      try{const total=Number(req.headers['upload-length']),offset=Number(req.headers['upload-offset']);if(!Number.isSafeInteger(total)||total<=0||total>100*1024**3||!Number.isSafeInteger(offset)||offset<0)throw error(400,'上传长度无效');
       const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(known){if(known.size!==total)throw error(409,'文件长度冲突');send(req,res,200,{complete:true,offset:total,size:total});return;}
       let actual=0;try{actual=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}if(offset!==actual)throw error(409,'上传位置已变化，请重新检查进度');
-      const chunk=await body(req,MAX_CHUNK);validLease(req);if(!chunk.length||offset+chunk.length>total)throw error(400,'上传分块无效');await fsp.appendFile(partial,chunk,{flush:true});const next=offset+chunk.length;
+      const chunk=await body(req,MAX_CHUNK);validLease(req);if((!chunk.length&&offset!==total)||offset+chunk.length>total)throw error(400,'上传分块无效');if(chunk.length)await fsp.appendFile(partial,chunk,{flush:true});const next=offset+chunk.length;
       if(next===total){if(await hashFile(partial)!==sha){await fsp.unlink(partial);throw error(422,'文件内容校验失败，原有备份未改变');}await fsp.rename(partial,file);db.prepare('INSERT OR REPLACE INTO objects VALUES(?,?)').run(sha,total);}
       send(req,res,200,{complete:next===total,offset:next,size:total});return;
      }finally{busyUploads.delete(sha);}
