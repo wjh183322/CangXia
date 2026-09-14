@@ -1,6 +1,7 @@
 import {parentPort} from 'node:worker_threads';
 import fs from 'node:fs/promises';import syncFs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawn} from 'node:child_process';import {randomUUID,createHash} from 'node:crypto';import {pipeline} from 'node:stream/promises';
 import {child,digest,headFromLog} from './nas-format.mjs';
+import {findDeletedDownloads} from './deleted-downloads.mjs';
 let root,meta,manifest,broker,writeable=false,revision=0;const replies=new Map();
 const post=value=>parentPort.postMessage(value);
 async function safe(file,base=root){
@@ -63,6 +64,7 @@ const actions={
   async refresh(){return {...await readLatest(),writable:writeable};},
   async commit({bytes}){await callBroker('ping');const content=Buffer.from(bytes),file=randomUUID()+'.sqlite',sha=digest(content);await fs.writeFile(path.join(meta,'versions',file),content,{flag:'wx',flush:true});const result=await callBroker('commit',{file,sha,expected:revision});revision=result.head.revision;return result.head;},
   scan:({records})=>scan(records),
+  async findDeleted({records}){return findDeletedDownloads(records.map(d=>({...d,path:child(root,d.relative)})),{probe:async()=>{await callBroker('ping');const current=JSON.parse(await fs.readFile(path.join(meta,'library.json'),'utf8'));if(current.id!==manifest.id)throw new Error('NAS 媒体库已变化，未清理记录');},validate:dir=>safe(dir)});},
   async copyOut({source,destination,size}){const file=child(root,source);await safe(file);const stat=await fs.stat(file);if(stat.size!==size)throw new Error('NAS 原文件已变化，请重新检查');await fs.mkdir(path.dirname(destination),{recursive:true});await fs.copyFile(file,destination);return true;},
   async publishFiles({relative,assets}){
     await callBroker('ping');const target=child(root,relative);await safe(target);const output=[];

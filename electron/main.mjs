@@ -57,6 +57,7 @@ try {
   const profile = app.getPath('userData');
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
   localStore=store;
+  await localStore.pruneDeletedDownloads();
   nas=new NasLibrary(profile,notify,()=>{collector?.stop();queue?.pause();});
   try{store=await nas.restore()||localStore;}catch(e){nas.status={mode:'local',backupDeferred:true,message:'NAS 无法打开，已返回本机库：'+e.message};}
   const httpProfile=session.fromPartition('cangxia-http');
@@ -66,6 +67,7 @@ try {
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   function attach(next){store=next;collector.store=next;queue=new DownloadQueue(next,collector,(url,options)=>collector.fetchMedia(url,options),notify);if(next.nas)queue.remoteSaveWork=(job,signal)=>nas.saveWork(job,signal,collector,(url,options)=>collector.fetchMedia(url,options),()=>queue.emit());deleteIntents.clear();notify();}
   attach(store);nas.onReload=attach;
+  nas.onPruned=()=>{if(queue.store===nas.store&&!queue.running)queue.jobs=store.getSetting('downloadJobs')||[];};
   async function switchNas(action){
     ensureIdle();if(store.nas&&nas.writable)try{await nas.settle();}catch(e){nas.fail(e.message);}
     const old=store,previous={root:nas.root,libraryId:nas.libraryId,status:{...nas.status},assets:nas.assetStates};nasBusy=true;notify();
@@ -74,7 +76,7 @@ try {
     finally{nasBusy=false;notify();}
   }
   let nasPlan;
-  handler('planNas',async value=>{ensureIdle();const plan=await nas.migrationPlan(store,absolutePath(value));nasPlan={...plan,token:randomUUID(),expires:Date.now()+600000};return nasPlan;});
+  handler('planNas',async value=>{ensureIdle();const plan=await nas.migrationPlan(store,absolutePath(value));queue.jobs=store.getSetting('downloadJobs')||[];notify();nasPlan={...plan,token:randomUUID(),expires:Date.now()+600000};return nasPlan;});
   handler('migrateNas',async token=>{if(!nasPlan||nasPlan.token!==token||nasPlan.expires<Date.now())throw new Error('迁移预览已过期，请重新选择目录');const root=nasPlan.root;nasPlan=null;return switchNas(async()=>{await nas.migrationPlan(store,root);return nas.migrate(store,root);});});
   handler('openNas',value=>switchNas(async()=>{await nas.open(absolutePath(value));nas.remember();return nas.store;}));
   handler('reconnectNas',()=>{if(!store.nas)throw new Error('当前为本机库');const root=nas.root;return switchNas(async()=>{await nas.open(root);nas.remember();return nas.store;});});
@@ -153,7 +155,7 @@ try {
   handler('download', selected => { if (collector.busy || collector.waiters.size) throw new Error('请等待读取完成再下载'); queue.enqueue(ids(selected)); return true; });
   handler('pause', () => queue.pause());
   handler('resume', () => { if (collector.busy) throw new Error('请等待同步完成'); queue.resume(); });
-  handler('refreshFiles', async () => { if(store.nas)await nas.refreshFiles();notify(); return snapshot(); });
+  handler('refreshFiles', async () => {if(collector.busy||queue.running||collector.waiters.size)return snapshot();nasMutation=true;try{if(store.nas){await nas.pruneDeletedDownloads();await nas.refreshFiles();}else await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];notify();return snapshot();}finally{nasMutation=false;}});
   handler('chooseRoot', async value => {
     ensureIdle();
     if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
@@ -198,9 +200,9 @@ try {
     for (const d of records) try {
       store.assertDirectory(d.path);
       if (fs.existsSync(d.path)) await shell.trashItem(d.path);
-      store.db.run('DELETE FROM downloads WHERE id=?', [d.id]);
+      store.forgetDownloads([d.id]);
     } catch (e) { failed.push(e.message); }
-    store.save(); notify(); if (failed.length) throw new Error(`部分文件删除失败：${failed.join('；')}`); return true;
+    queue.jobs=store.getSetting('downloadJobs')||[];store.save(); notify(); if (failed.length) throw new Error(`部分文件删除失败：${failed.join('；')}`); return true;
   });
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));

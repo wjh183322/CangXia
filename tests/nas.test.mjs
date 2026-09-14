@@ -39,6 +39,9 @@ test('NAS writer lock, migration, immutable media, read-only and handoff', {skip
    const job={id:'123'};await b.saveWork(job,new AbortController().signal,{resolveWork:async()=>w},async()=>{fetched++;return new Response(png,{headers:{'content-type':'image/png'}});},()=>{});
    assert.equal(fetched,1);assert.equal(b.store.isDownloaded('123'),true);
    assert.equal(fs.readFileSync(path.join(b.store.download('123').path,b.store.download('123').assets.find(a=>a.key==='video').file),'utf8'),'test-content');
+   b.store.upsertWork({aweme_id:'456',desc:'deleted fixture',author:{nickname:'test'},video:{play_addr:{url_list:[]}}});
+   b.store.put('downloads','456',{id:'456',path:path.join(b.store.root,'deleted-fixture'),state:'complete',assets:[{key:'video',file:'absent.mp4',size:4}]});b.store.setSetting('downloadJobs',[{id:'456',state:'complete'}]);b.store.save();await b.flush();
+   assert.deepEqual(await b.pruneDeletedDownloads(),['456']);assert.ok(b.store.work('456'));assert.equal(b.store.download('456'),null);assert.equal(b.store.getSetting('downloadJobs').length,0);
    // A new mount path uses the same relative library paths and ID.
    if(!process.env.CANGXIA_NAS_TEST_ROOT){await b.close();const moved=path.join(base,'new-mount');fs.renameSync(root,moved);await b.open(moved);assert.equal(b.store.isDownloaded('123'),true);assert.ok(b.store.download('123').path.startsWith(moved));
      await b.close();const head=headFromLog(fs.readFileSync(path.join(moved,'.cangxia','head.log')));fs.writeFileSync(path.join(moved,'.cangxia','versions',head.file),'corrupted');await assert.rejects(b.open(moved),/校验失败/);assert.equal(b.writable,false);

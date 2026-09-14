@@ -8,7 +8,7 @@ import { Pagination, Toast, FilePicker, DeleteConfirmation, RepairReport } from 
 import { SoundProvider, VolumeControl, MediaVideo, CoverAction, Viewer, TagRow, TagChoices, ChoiceList, TagEditor, DownloadManager } from './library-ui.jsx';
 
 const preview = !window.cangxia;
-const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.1.8', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
+const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.1.9', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
 const api = window.cangxia || Object.fromEntries(['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'].map(k => [k, async () => { if (k === 'state' || k === 'refreshFiles') return blank; throw new Error('浏览器仅用于界面预览，请在 Windows 桌面程序中操作'); }]));
 const fmt = n => Number(n || 0).toLocaleString('zh-CN');
 const time = ms => `${Math.floor(ms / 60000).toString().padStart(2,'0')}:${Math.floor(ms / 1000 % 60).toString().padStart(2,'0')}`;

@@ -23,6 +23,8 @@ app.on('browser-window-created',(_event,win)=>{
    const deleted=await call('nasTrash');await call('restoreNasDeleted',deleted[0].batch,'123');check('restore returns saved media',(await call('state')).works[0].local===true);
    await call('leaveNas');data=await call('state');check('local original and original tags retained',data.storage.mode==='local'&&data.works[0].local&&!data.works[0].localTags.length);
    await call('openNas',root);data=await call('state');check('reopen NAS loads shared tags',data.storage.writable&&data.works[0].localTags.includes('desktop-test'));
+   const saved=data.works[0].localRecord;for(const asset of saved.assets)fs.unlinkSync(path.join(saved.path,asset.file));
+   data=await call('refreshFiles');check('external deletion clears stale record without removing work or tags',data.works.length===1&&data.works[0].localRecord===null&&data.works[0].localTags.includes('desktop-test'));
    await win.webContents.executeJavaScript(`document.querySelector('[aria-label="设置"]').click()`);await new Promise(r=>setTimeout(r,600));
    const ui=await win.webContents.executeJavaScript(`({text:document.querySelector('.modal').innerText,scroll:document.querySelector('.modal-content').scrollHeight})`);check('NAS controls visible in settings',ui.text.includes('当前电脑可写')&&ui.text.includes('恢复已删除作品')&&ui.text.includes('后续事项'));
    fs.mkdirSync('.test-output',{recursive:true});fs.writeFileSync('.test-output/nas-desktop.png',(await win.webContents.capturePage()).toPNG());fs.writeFileSync('.test-output/nas-desktop-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});clearTimeout(deadline);app.quit();

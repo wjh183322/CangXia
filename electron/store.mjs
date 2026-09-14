@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
 import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
+import {findDeletedDownloads} from './deleted-downloads.mjs';
 const require = createRequire(import.meta.url);
 
 export class Store {
@@ -49,6 +50,21 @@ export class Store {
     this.save();
   }
   download(id) { return this.get('downloads', id); }
+  forgetDownloads(ids){
+    this.nas?.assertWritable();const removed=new Set(ids),jobs=this.getSetting('downloadJobs')||[];
+    let changed=false;this.db.run('BEGIN');try{
+      for(const id of removed)this.db.run('DELETE FROM downloads WHERE id=?',[id]);
+      const kept=jobs.filter(j=>!((j.state==='complete'&&!this.download(j.id))||(j.state==='failed'&&removed.has(j.id))));
+      if(kept.length!==jobs.length)this.setSetting('downloadJobs',kept);
+      this.db.run('COMMIT');changed=removed.size||kept.length!==jobs.length;
+    }catch(e){this.db.run('ROLLBACK');throw e;}
+    if(changed)this.save();
+    return [...removed];
+  }
+  async pruneDeletedDownloads(){
+    if(this.nas)throw new Error('NAS 文件状态须通过连接检查');
+    try{const removed=await findDeletedDownloads(this.all('downloads'),{probe:()=>fs.promises.stat(path.parse(path.resolve(this.root)).root),validate:dir=>this.assertDirectory(dir)});return this.forgetDownloads(removed);}catch{return [];}
+  }
   save() {
     const temp = this.file + '.tmp';
     fs.writeFileSync(temp, this.db.export());
@@ -268,6 +284,6 @@ export class Store {
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.8' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.9' };
   }
 }

@@ -33,7 +33,7 @@ export class NasLibrary{
   try{
    const info=await this.call('connect',{root:this.root,create,deviceId:this.deviceId,device:os.hostname().slice(0,40)});this.libraryId=info.manifest.id;this.writable=info.writable;this.revision=info.head?.revision||0;
    this.status={...this.status,libraryId:this.libraryId,connected:true,writable:this.writable,message:this.writable?'NAS 已连接 · 当前电脑可写':'其他电脑占用写入锁 · 当前只读'};
-   if(!create){await this.loadStore(info.bytes,this.libraryId);await this.refreshFiles();}
+   if(!create){await this.loadStore(info.bytes,this.libraryId);await this.pruneDeletedDownloads();await this.refreshFiles();}
    this.dirty=false;this.installPoll();this.emit();return info;
   }catch(e){this.fail(e.message);await this.close();throw e;}
  }
@@ -53,6 +53,7 @@ export class NasLibrary{
   });return this.serial;
  }
  records(){return this.store.all('downloads').map(d=>({...d,relative:path.relative(this.root,d.path).split(path.sep).join('/')}));}
+ async pruneDeletedDownloads(){if(!this.writable||!this.status.connected)return [];let removed;try{removed=await this.call('findDeleted',{records:this.records()});this.assertWritable();this.store.forgetDownloads(removed);await this.flush();this.onPruned?.(removed);return removed;}catch(e){this.fail(e.message);throw e;}}
  async refreshFiles(ids){if(!this.status.connected)throw new Error('NAS 离线，不能据此判断文件已删除');const records=this.records().filter(d=>!ids||ids.includes(d.id));let states;try{states=await this.call('scan',{records});}catch(e){this.fail(e.message);throw e;}for(const [key,state]of Object.entries(states)){if(state.error)this.assetStates[key]={...this.assetStates[key],error:state.error};else this.assetStates[key]=state;}if(this.store.nas)this.store.nas.assets=this.assetStates;fs.writeFileSync(this.store.file+'.assets',JSON.stringify(this.assetStates));this.emit();return states;}
  async checkRepairs(ids){await this.refreshFiles(ids);const items=ids.map(id=>{const w=this.store.work(id),d=this.store.download(id);if(!w)return {id,name:id,status:'error',error:'作品不存在',missing:[]};const targets=w.type==='video'?[['video','视频'],['cover','高清单图']]:w.images.map(i=>['image-'+i.index,'图片 '+(i.index+1)]);targets.push(['metadata','作品信息']);const missing=[],errors=[];for(const [key,label]of targets){const state=this.assetStates[id+':'+key];if(state?.error)errors.push(state.error);else if(!d?.assets?.some(a=>a.key===key)||!state?.exists)missing.push({key,label,reason:'尚未保存或文件缺失/大小异常'});}return {id,name:w.name,status:errors.length?'error':missing.length?'missing':'complete',missing,error:errors.join('；')};});return {items,complete:items.filter(i=>i.status==='complete').length,missing:items.filter(i=>i.status==='missing').length,errors:items.filter(i=>i.status==='error').length};}
  async uploadRecord(record,sourcePath,{forceCopy=false}={}){
@@ -99,7 +100,7 @@ export class NasLibrary{
  async deleteFiles(ids){
   this.assertWritable();const records=ids.map(id=>this.store.download(id)).filter(Boolean),relativeRecords=records.map(d=>({...d,path:undefined,relative:path.relative(this.root,d.path).split(path.sep).join('/')}));
   // Finish and verify the recoverable copy before publishing the deletion.
-  await this.call('prepareDelete',{records:relativeRecords});this.assertWritable();this.store.db.run('BEGIN');try{for(const d of records)this.store.db.run('DELETE FROM downloads WHERE id=?',[d.id]);this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');throw e;}
+  await this.call('prepareDelete',{records:relativeRecords});this.store.forgetDownloads(records.map(d=>d.id));this.onPruned?.(records.map(d=>d.id));
   this.store.save();await this.flush();const files=records.flatMap(d=>d.assets.map(a=>path.relative(this.root,path.join(d.path,a.file)).split(path.sep).join('/')));await this.call('discardFiles',{files}).catch(e=>{this.status.message='删除已保存并可恢复，原位置的残留文件待清理：'+e.message;});this.emit();
  }
  async trash(){if(!this.status.connected)throw new Error('请先连接 NAS');const batches=await this.call('trash');return batches.flatMap(b=>(b.records||[]).filter(d=>!(b.restored||[]).includes(d.id)).map(d=>({batch:b.batch,id:d.id,name:this.store.work(d.id)?.name||d.id,time:b.time})));}
@@ -115,6 +116,7 @@ export class NasLibrary{
  }
  async migrationPlan(source,target){
   if(source.nas)throw new Error('请先返回本机库，再迁移本机资料');
+  await source.pruneDeletedDownloads();
   const root=path.resolve(target),relative=path.relative(source.root,root);if(!relative||!relative.startsWith('..')&&!path.isAbsolute(relative))throw new Error('NAS 目标不能位于现有媒体目录内');
   const stat=await fsp.lstat(root);if(!stat.isDirectory()||stat.isSymbolicLink())throw new Error('请选择普通共享文件夹');
   try{const marker=JSON.parse(await fsp.readFile(path.join(root,'.cangxia','library.json'),'utf8'));if(marker.initializer!==this.deviceId||headFromLog(await fsp.readFile(path.join(root,'.cangxia','head.log'))))throw new Error('目标已有媒体库，请打开已有 NAS 库');}catch(e){if(e.code!=='ENOENT')throw e;}
