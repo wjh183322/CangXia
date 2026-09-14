@@ -19,7 +19,10 @@ const smoke = process.argv.includes('--smoke');
 const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
 if (smoke || sampleProbe || qrProbe) app.setPath('userData', path.resolve('.test-output', qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
-app.setName('藏匣');
+app.setName('藏匣NAS版');
+if (!smoke && !sampleProbe && !qrProbe) app.setPath('userData', path.join(app.getPath('appData'), '藏匣NAS版'));
+fs.mkdirSync(app.getPath('userData'), { recursive: true });
+app.setPath('sessionData', app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let window, store, collector, queue, qrLogin, timer, nas, localStore, nasBusy=false, nasMutation=false, quitting=false;
@@ -55,7 +58,7 @@ function ensureIdle() { if (nasBusy||collector.busy || queue.running || collecto
 app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
-  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
+  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣NAS版'));
   localStore=store;
   await localStore.pruneDeletedDownloads();
   nas=new NasLibrary(profile,notify,()=>{collector?.stop();queue?.pause();});
@@ -90,7 +93,7 @@ try {
   qrProfile.on('will-download',event=>event.preventDefault());
   qrProfile.setPermissionRequestHandler((_wc,permission,callback,details)=>callback(permission==='storage-access'&&isDouyinURL(details?.requestingUrl||'')));
   qrProfile.setPermissionCheckHandler((_wc,permission,origin)=>permission==='storage-access'&&isDouyinURL(origin||''));
-  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:auth=>collector.applyAuth(auth),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
+  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:auth=>collector.applyAuth(auth),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣NAS版 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
   const cachePending = new Map();
   protocol.handle('app-media', async request => {
@@ -126,7 +129,7 @@ try {
     } catch { return new Response('', { status: 404 }); }
   });
   const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window = new BrowserWindow({ title: '藏匣NAS版', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -249,7 +252,7 @@ try {
   }
 } catch (error) {
   if (smoke || sampleProbe || qrProbe) { fs.mkdirSync('.test-output', {recursive:true}); fs.writeFileSync('.test-output/startup-error.txt', error.stack || error.message); }
-  else dialog.showErrorBox('藏匣启动失败', error.message);
+  else dialog.showErrorBox('藏匣NAS版启动失败', error.message);
   app.exit(1);
 }
 });

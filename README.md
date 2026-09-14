@@ -1,8 +1,8 @@
 # 藏匣 CangXia
 
-稳定版本：**v0.1.7** · Windows 10/11 64位 · 分支 `main`
+本地稳定版本：**v0.1.7** · Windows 10/11 64位 · 分支 `codex/local`
 
-NAS 预览版：**[v0.1.11](https://github.com/wjh183322/CangXia/releases/tag/v0.1.11)**。支持复制迁移、另一台电脑打开同一共享库、单写入者锁与删除恢复；见[使用和验证边界](docs/releases/v0.1.11.md)。独立备份已列为[后续事项](docs/后续事项.md)。
+NAS 预览版：**[v0.1.12](https://github.com/wjh183322/CangXia/releases/tag/v0.1.12)** · 分支 `codex/nas`。使用独立的“藏匣NAS版”数据目录，支持复制迁移、另一台电脑打开同一共享库、单写入者锁与删除恢复；见[升级说明和验证边界](docs/releases/v0.1.12.md)。独立备份已列为[后续事项](docs/后续事项.md)。
 
 [下载 v0.1.7](https://github.com/wjh183322/CangXia/releases/tag/v0.1.7) · [历史 v0.1.0](https://github.com/wjh183322/CangXia/releases/tag/v0.1.0) · [变更记录](CHANGELOG.md)
 
@@ -13,7 +13,9 @@ Windows 本地抖音收藏管理工具。账号收藏与本地媒体库独立，
 
 ## 运行
 
-打开 `release/CangXia-0.1.7-Windows-x64.exe`。这是免安装程序，需要 Windows 10/11 64 位。程序数据保存在 `%APPDATA%/藏匣`，媒体默认保存在 Windows 下载目录下的 `藏匣` 文件夹；首次下载前可在右上角齿轮“设置”中选择其他目录；已有下载作品后锁定目录。
+打开 `release/CangXia-NAS-0.1.12-Windows-x64.exe`。这是免安装程序，需要 Windows 10/11 64 位。程序数据保存在 `%APPDATA%/藏匣NAS版`，媒体默认保存在 Windows 下载目录下的 `藏匣NAS版` 文件夹；首次下载前可在右上角齿轮“设置”中选择其他目录；已有下载作品后锁定目录。连接已有 NAS 库后，媒体保存在所选共享目录。
+
+旧 NAS 版升级后需在设置中“打开已有 NAS 库”并重新登录。新版不会自动读取或清理本地版的 `%APPDATA%/藏匣` 目录。
 
 ## 第一次使用
 

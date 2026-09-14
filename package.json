@@ -1,6 +1,6 @@
 {
-  "name": "cangxia",
-  "version": "0.1.11",
+  "name": "cangxia-nas",
+  "version": "0.1.12",
   "description": "藏匣 · 抖音收藏与本地媒体库",
   "author": "CangXia",
   "private": true,
@@ -31,8 +31,8 @@
     "vite": "8.3.0"
   },
   "build": {
-    "appId": "local.cangxia.desktop",
-    "productName": "藏匣",
+    "appId": "local.cangxia.nas",
+    "productName": "藏匣NAS版",
     "directories": {
       "output": "release"
     },
@@ -49,7 +49,7 @@
       "icon": "assets/icon.ico"
     },
     "portable": {
-      "artifactName": "CangXia-${version}-Windows-x64.exe"
+      "artifactName": "CangXia-NAS-${version}-Windows-x64.exe"
     }
   }
 }

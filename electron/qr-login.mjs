@@ -15,7 +15,7 @@ export class QrLogin{
       if(!this.window||this.window.isDestroyed()){
         const win=this.createWindow();this.window=win;
         win.webContents.setUserAgent(this.userAgent);
-        win.on('page-title-updated',e=>e.preventDefault());win.setTitle('藏匣 · 抖音登录验证');
+        win.on('page-title-updated',e=>e.preventDefault());win.setTitle('藏匣NAS版 · 抖音登录验证');
         win.webContents.setWindowOpenHandler(({url})=>{if(isDouyinURL(url))void win.loadURL(url);return {action:'deny'};});
         win.webContents.on('will-navigate',(e,url)=>{if(!isDouyinURL(url))e.preventDefault();});
         win.webContents.on('will-redirect',(e,url)=>{if(!isDouyinURL(url))e.preventDefault();});
