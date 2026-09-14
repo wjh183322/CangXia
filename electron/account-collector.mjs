@@ -2,24 +2,28 @@ import { createHash } from 'node:crypto';
 import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, sleep } from './model.mjs';
 import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
+import {validAccountIdentity} from './account-identity.mjs';
 
 const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/']);
 export class Collector{
-  constructor(store,notify,{profile,vault,browser,delay=()=>sleep(1100)}){
-    Object.assign(this,{store,notify,profile,vault,browser,delay});this.busy=false;this.cancelled=false;this.waiters=new Map();this.diagnostics=[];
+  constructor(store,notify,{profile,vault,browser,delay=()=>sleep(1100),verifyIdentity}){
+    Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity});this.busy=false;this.cancelled=false;this.waiters=new Map();this.diagnostics=[];
     this.status={phase:'idle',message:'通过系统 Chrome / Edge 连接抖音账号',count:0,connected:false,browserOpened:false};
     this.ready=this.restore();
     browser.on?.('closed',()=>{this.status.browserOpened=false;this.notify();});
   }
   update(phase,message,count=this.status.count){this.status={...this.status,phase,message,count};this.notify();}
   async restore(){const auth=this.vault.load();if(auth)try{await this.applyAuth(auth,false);}catch{this.update('attention','保存的登录信息不可用，请重新连接浏览器或导入配置');}}
-  async applyAuth(input,persist=true){
+  async applyAuth(input,persist=true,{signal}={}){
+    signal?.throwIfAborted();
+    if(persist)this.store.backup?.assertWritable();
     const auth=validateAuth(input);
     const identity=auth.cookies.find(c=>c.name==='uid_tt')?.value;
     const key=identity?createHash('sha256').update(identity).digest('hex'):null;
     const previous=this.store.getSetting('browserAccountKey');
-    if(key&&previous&&key!==previous)throw new Error('这份媒体库已绑定另一个账号，请使用原账号的登录会话');
-    if(persist)this.vault.save(auth);
+    const savedAccount=this.store.getSetting('account');
+    const boundUid=typeof previous==='string'&&previous.startsWith('uid:')?previous.slice(4):validAccountIdentity(savedAccount)?savedAccount.uid:null;
+    this.status.connected=false;
     await this.profile.clearStorageData({storages:['cookies']});
     this.userAgent=auth.userAgent;
     this.profile.setUserAgent(auth.userAgent);
@@ -31,8 +35,27 @@ export class Collector{
       if(c.sameSite==='Lax')cookie.sameSite='lax';if(c.sameSite==='Strict')cookie.sameSite='strict';
       await this.profile.cookies.set(cookie);
     }
-    if(key)this.store.setSetting('browserAccountKey',key);
-    this.store.setSetting('sessionConnected',true);this.store.save();this.status.connected=true;this.status.source=auth.source;
+    try{
+      if(this.verifyIdentity&&(persist||auth.identity)){
+        const needsLegacyCheck=!!previous&&!boundUid&&key!==previous;
+        let verified;this.verifyingIdentity=true;
+        try{verified=persist?await this.verifyIdentity(this.profile,auth.userAgent,{signal,legacyCollections:needsLegacyCheck?this.store.all('collections').filter(c=>c.id!==TOTAL&&c.added).map(c=>c.id):[]}):auth.identity;}finally{this.verifyingIdentity=false;}
+        signal?.throwIfAborted();
+        if(this.store.getSetting('browserAccountKey')!==previous)throw new Error('资料库账号信息刚发生变化，请重新检查连接后登录');
+        if(!validAccountIdentity(verified))throw new Error('未取得可靠的抖音账号标识');
+        if(boundUid&&verified.uid!==boundUid)throw Object.assign(new Error('这份媒体库属于另一个抖音账号，请使用原账号重新扫码'),{code:'ACCOUNT_MISMATCH'});
+        if(needsLegacyCheck&&!verified.ownsLegacyCollection)throw Object.assign(new Error('无法核对旧版账号绑定：未在当前账号中找到备份的自建收藏夹，已保留原资料'),{code:'ACCOUNT_UNVERIFIED'});
+        auth.identity={uid:verified.uid,nickname:verified.nickname||''};
+        this.store.setSetting('browserAccountKey','uid:'+verified.uid);
+        this.store.setSetting('account',{...savedAccount,uid:verified.uid,nickname:verified.nickname||savedAccount?.nickname||'抖音已连接'});
+      }else{
+        if(previous&&key!==previous)throw Object.assign(new Error('旧版账号绑定需要重新扫码验证，已保留原资料'),{code:'ACCOUNT_UNVERIFIED'});
+        if(key)this.store.setSetting('browserAccountKey',key);
+      }
+      this.store.setSetting('sessionConnected',true);this.store.save();
+      if(persist)this.vault.save(auth);
+      this.status.connected=true;this.status.source=auth.source;
+    }catch(e){await this.profile.clearStorageData({storages:['cookies']});this.store.setSetting('sessionConnected',false);throw e;}
     this.update('ready',auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
   }
   async isAuthenticated(){await this.ready;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value);}

@@ -1,10 +1,10 @@
 # 藏匣备份版 CangXia Backup
 
-**备份版 0.1.1 预览 · Windows 10/11 64 位 · `codex/backup`**
+**备份版 0.1.2 预览 · Windows 10/11 64 位 · `codex/backup`**
 
 日常在本机读取收藏、浏览和保存媒体；配套 NAS 服务负责后台同步、断点续传与 NAS 本机校验。启动先比对 NAS，无法连接时只读浏览本机已有资料。
 
-本版修复清空本机后 NAS 封面不显示的问题。已有用户只更新电脑端，NAS 服务继续使用 0.1.0；见[升级说明](docs/releases/backup-v0.1.1.md)。
+本版修复 NAS 恢复后的待确认收藏顺序，并核验稳定账号身份，避免会话变化造成账号误判。已有用户只更新电脑端，NAS 服务继续使用 0.1.0；见[升级说明](docs/releases/backup-v0.1.2.md)。
 
 ## 三个开发方向
 
@@ -18,11 +18,11 @@
 
 ## 下载与部署
 
-[备份版 0.1.1 Release](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.1.1) 提供：
+[备份版 0.1.2 Release](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.1.2) 提供：
 
-- `CangXia-Backup-0.1.1-Windows-x64.exe`：免安装电脑端。
+- `CangXia-Backup-0.1.2-Windows-x64.exe`：免安装电脑端。
 - `CangXia-Backup-Server-0.1.0.tar.gz`：NAS Docker 镜像。
-- `CangXia-Backup-Deploy-0.1.1.zip`：Compose 配置和部署说明。
+- `CangXia-Backup-Deploy-0.1.2.zip`：Compose 配置和部署说明。
 
 先按[服务部署说明](backup-server/README.md)部署 NAS 服务，再打开电脑端设置，填写 HTTPS 地址、服务访问密钥和证书指纹。密钥与指纹从自己的 NAS 容器日志复制，直接填入程序。
 

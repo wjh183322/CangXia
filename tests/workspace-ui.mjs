@@ -44,6 +44,9 @@ try{
  check('toast uses dialog center instead of sidebar-offset content center',document.querySelector('.toast').style.left==='370px');
  await act(async()=>{document.querySelector('details').open=true;await settle();});await click('导入登录会话配置');check('custom file picker rendered',!!document.querySelector('.file-picker'));await click('取消');await aria('关闭弹窗');
  check('toast returns to content center when dialog closes',document.querySelector('.toast').style.left==='760px');
+ window.cangxia.startQrLogin=async()=>{notify({...data(),account:{nickname:'同步来的账号名称'},qr:{phase:'error',message:'测试账号核验失败'}});};window.cangxia.cancelQrLogin=async()=>{};
+ await act(async()=>{document.querySelector('.account-button').click();await settle();});check('failed account verification is not shown as loading a QR code',document.querySelector('.qr-placeholder').textContent.includes('登录未完成')&&!document.querySelector('.qr-placeholder').textContent.includes('正在获取二维码'));check('synced account metadata is not presented as a local login',document.querySelector('.account-button').textContent.includes('连接抖音账号'));
+ await aria('关闭弹窗');
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

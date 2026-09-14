@@ -11,6 +11,7 @@ import {exportRecords,applyChanges} from './backup-model.mjs';
 import {requireLocalStorage} from './local-storage.mjs';
 import { Collector } from './account-collector.mjs';
 import { AuthVault } from './auth-data.mjs';
+import {verifyAccountIdentity} from './account-identity.mjs';
 import { SystemBrowser } from './system-browser.mjs';
 import { QrLogin } from './qr-login.mjs';
 import { DownloadQueue } from './downloads.mjs';
@@ -43,21 +44,21 @@ function handler(name,action){ipcMain.handle('cangxia:'+name,async(event,...args
  if(backupBusy&&!['state','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
  if(writes.has(name))backup.assertWritable();return {ok:true,data:await action(...args)};
 }catch(e){return {ok:false,error:e.message||'操作未完成'};}});}
-function ensureIdle(){if(backupBusy||collector.busy||queue.running||collector.waiters.size)throw new Error('请先暂停下载并等待当前读取结束');}
+function ensureIdle(){if(backupBusy||collector.busy||collector.verifyingIdentity||queue.running||collector.waiters.size)throw new Error('请先暂停下载并等待当前读取结束');}
 
 app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣备份版'));
-  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onUnavailable:()=>{collector?.stop();queue?.pause();},isIdle:()=>!collector?.busy&&!queue?.running&&!backupBusy});
+  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onUnavailable:()=>{collector?.stop();queue?.pause();},isIdle:()=>!collector?.busy&&!collector?.verifyingIdentity&&!queue?.running&&!backupBusy});
   const httpProfile=session.fromPartition('cangxia-http');
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe});
-  collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser});
+  collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity});
   await collector.ready;
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
   queue.onIdle=()=>backup.afterDownloads();
-  async function restoreBackupAuth(){await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();}
+  async function restoreBackupAuth(){if(collector.verifyingIdentity)return;await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();}
   backup.onRemoteApplied=restoreBackupAuth;
   handler('configureBackup',async input=>{ensureIdle();await backup.configure(input);await restoreBackupAuth();return snapshot();});
   handler('checkBackup',async()=>{ensureIdle();await backup.check();await restoreBackupAuth();return snapshot();});
@@ -71,7 +72,23 @@ try {
     const legacy=process.env.CANGXIA_BACKUP_TEST_PROFILE&&process.env.CANGXIA_BACKUP_TEST_ORIGINAL?process.env.CANGXIA_BACKUP_TEST_ORIGINAL:path.join(app.getPath('appData'),'藏匣');let file=path.join(legacy,'library.sqlite');
     if(kind==='nas'){const c=JSON.parse(fs.readFileSync(path.join(legacy,'library-location.json'),'utf8'));if(!c.id||!/^[a-f0-9-]+$/.test(c.id))throw new Error('没有可导入的 NAS 版缓存');file=path.join(legacy,'nas-cache',c.id+'.sqlite');}
     else if(kind!=='local')throw new Error('导入来源无效');
-    if(!fs.existsSync(file))throw new Error('未找到旧版资料');const temp=path.join(profile,'import-preview.sqlite');fs.copyFileSync(file,temp);const source=await Store.open(temp,path.join(app.getPath('downloads'),'藏匣'));const currentKey=store.getSetting('browserAccountKey'),sourceKey=source.getSetting('browserAccountKey');if(currentKey&&sourceKey&&currentKey!==sourceKey){source.close();throw new Error('旧资料与当前备份库绑定的抖音账号不同，未合并导入');}await source.pruneDeletedDownloads();return source;
+    if(!fs.existsSync(file))throw new Error('未找到旧版资料');const temp=path.join(profile,'import-preview.sqlite');fs.copyFileSync(file,temp);const source=await Store.open(temp,path.join(app.getPath('downloads'),'藏匣'));
+    try{
+      const currentKey=store.getSetting('browserAccountKey'),sourceKey=source.getSetting('browserAccountKey');
+      if(currentKey&&sourceKey&&currentKey!==sourceKey){
+        const currentUid=currentKey.startsWith('uid:')?currentKey.slice(4):store.getSetting('account')?.uid;
+        const sourceUid=sourceKey.startsWith('uid:')?sourceKey.slice(4):source.getSetting('account')?.uid;
+        if(sourceUid){if(!currentUid||currentUid!==sourceUid)throw new Error('旧资料与当前备份库绑定的抖音账号不同，未合并导入');}
+        else{
+          if(!currentUid||!collector.status.connected)throw new Error('请先登录当前备份库的抖音账号，再核对旧版资料的归属');
+          const identity=await verifyAccountIdentity(httpProfile,collector.userAgent,{legacyCollections:source.all('collections').filter(c=>c.id!== '__all__'&&c.added).map(c=>c.id)});
+          if(identity.uid!==currentUid||!identity.ownsLegacyCollection)throw new Error('无法核对旧资料归属，未合并导入');
+        }
+        if(store.getSetting('browserAccountKey')!==currentKey)throw new Error('资料库账号信息刚发生变化，请重新预览');
+        source.setSetting('browserAccountKey',currentKey);source.setSetting('account',store.getSetting('account'));
+      }
+      await source.pruneDeletedDownloads();return source;
+    }catch(e){source.close();throw e;}
   }
   handler('previewExistingLibrary',async kind=>{ensureIdle();if(store.all('works').length)throw new Error('当前备份版本机库已有记录，不能直接合并导入');const source=await oldLibrary(kind);try{const entries=exportRecords(source),downloads=source.all('downloads');let files=0,bytes=0;for(const d of downloads)for(const a of d.assets||[])if(source.assetExists(d,a)){files++;bytes+=a.size||0;}importPreview={token:randomUUID(),kind,works:entries.filter(e=>e.table==='works').length,files,bytes};return importPreview;}finally{source.close();}});
   handler('importExistingLibrary',async token=>{ensureIdle();if(!importPreview||importPreview.token!==token||store.all('works').length)throw new Error('请重新预览导入范围');const kind=importPreview.kind;importPreview=null;backupBusy=true;backup.applying=true;notify();let source;try{
@@ -86,7 +103,7 @@ try {
   qrProfile.on('will-download',event=>event.preventDefault());
   qrProfile.setPermissionRequestHandler((_wc,permission,callback,details)=>callback(permission==='storage-access'&&isDouyinURL(details?.requestingUrl||'')));
   qrProfile.setPermissionCheckHandler((_wc,permission,origin)=>permission==='storage-access'&&isDouyinURL(origin||''));
-  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:auth=>collector.applyAuth(auth),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
+  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:(auth,options)=>collector.applyAuth(auth,true,options),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
   const cachePending = new Map();
   protocol.handle('app-media', async request => {

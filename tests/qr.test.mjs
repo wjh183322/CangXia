@@ -32,6 +32,12 @@ test('successful login invokes connection and closes the hidden page automatical
 test('connection validation failure is shown instead of looping indefinitely',async()=>{
   const c=controller({authenticated:async()=>{throw new Error('会话验证失败');}});await c.qr.start();await c.qr.complete([{name:'sessionid',value:'TEST_ONLY'}],c.qr.generation);assert.equal(c.qr.state().phase,'error');assert.equal(c.qr.state().message,'会话验证失败');assert.equal(c.qr.active,false);c.qr.cancel();
 });
+test('account mismatch clears only the rejected popup session so a fresh QR can be requested',async()=>{
+ let cleared=0;const c=controller({cookieRead:async()=>cleared?[]:[{name:'sessionid',value:'TEST_ONLY'}],authenticated:async()=>{throw Object.assign(new Error('different account'),{code:'ACCOUNT_MISMATCH'});}});c.qr.profile.clearStorageData=async options=>{assert.deepEqual(options,{storages:['cookies']});cleared++;};await c.qr.start();assert.equal(c.qr.state().phase,'error');assert.equal(cleared,1);await c.qr.refresh();assert.equal(c.created,1);assert.equal(c.qr.state().phase,'loading');c.qr.cancel();
+});
+test('cancel during account verification aborts the verification and does not reopen an error dialog',async()=>{
+ let signal,release;const gate=new Promise(r=>{release=r;});const c=controller({cookieRead:async()=>[{name:'sessionid',value:'TEST_ONLY'}],authenticated:async(_auth,options)=>{signal=options.signal;await gate;signal.throwIfAborted();}});const pending=c.qr.start();await new Promise(r=>setImmediate(r));assert.equal(c.qr.state().phase,'verifying');c.qr.cancel();release();await pending;assert.equal(signal.aborted,true);assert.equal(c.qr.state().phase,'idle');
+});
 test('page frequency warning prevents any click even during manual refresh',()=>{
   const result=vm.runInNewContext(qrPageScript({refresh:true}),{document:{body:{innerText:'访问太频繁，请稍后再试'}}});assert.equal(result.phase,'limited');
 });

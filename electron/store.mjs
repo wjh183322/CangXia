@@ -105,11 +105,23 @@ export class Store {
     for (const id of ids) { const c = this.collection(id); if (c) this.put('collections', id, { ...c, added: true }); }
     this.save();
   }
+  orderedMemberRows(id) {
+    const rows=this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank,work_id',[id]);
+    if(id!==TOTAL)return rows;
+    // Pending total members have no confirmed total position. Use their saved
+    // folder positions as a stable display order, never SQLite insertion order.
+    const folders=new Map(this.all('collections').map(c=>[c.id,c]));
+    const pendingOrder=new Map();
+    const members=this.rows('SELECT collection_id,work_id,rank FROM members WHERE collection_id<>? AND rank IS NOT NULL',[TOTAL]);
+    members.sort((a,b)=>(folders.get(a.collection_id)?.rank??0)-(folders.get(b.collection_id)?.rank??0)||a.collection_id.localeCompare(b.collection_id)||a.rank-b.rank||a.work_id.localeCompare(b.work_id));
+    members.forEach((row,index)=>{if(!pendingOrder.has(row.work_id))pendingOrder.set(row.work_id,index);});
+    return rows.sort((a,b)=>Number(a.rank===null)-Number(b.rank===null)||(a.rank!==null?a.rank-b.rank:(pendingOrder.get(a.work_id)??Number.MAX_SAFE_INTEGER)-(pendingOrder.get(b.work_id)??Number.MAX_SAFE_INTEGER))||a.work_id.localeCompare(b.work_id));
+  }
   ingestMembers(id, ids, complete) {
     const c = this.collection(id); if (!c || !c.added) return;
     ids = [...new Set(ids)];
     const seen = new Set(ids);
-    const previous = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [id]);
+    const previous = this.orderedMemberRows(id);
     const ordered = complete ? ids : [...ids, ...previous.filter(r => r.rank !== null && !seen.has(r.work_id)).map(r => r.work_id)];
     const pending = complete ? [] : previous.filter(r => r.rank === null && !seen.has(r.work_id)).map(r => r.work_id);
     this.db.run('BEGIN');
@@ -272,12 +284,12 @@ export class Store {
     const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
     const hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
     for (const c of collections) {
-      const rows = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [c.id]);
+      const rows = this.orderedMemberRows(c.id);
       localMembers[c.id]=rows.map(r=>r.work_id);
       localPendingMembers[c.id]=rows.filter(r=>r.rank===null).map(r=>r.work_id);
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.1' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.2' };
   }
 }
