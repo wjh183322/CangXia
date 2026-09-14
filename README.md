@@ -1,15 +1,15 @@
 # 藏匣 CangXia
 
-当前版本：**v0.1.4** · Windows 10/11 64位 · 分支 `main`
+当前版本：**v0.1.5** · Windows 10/11 64位 · 分支 `main`
 
-[下载 v0.1.4](https://github.com/wjh183322/CangXia/releases/tag/v0.1.4) · [历史 v0.1.0](https://github.com/wjh183322/CangXia/releases/tag/v0.1.0) · [变更记录](CHANGELOG.md)
+[下载 v0.1.5](https://github.com/wjh183322/CangXia/releases/tag/v0.1.5) · [历史 v0.1.0](https://github.com/wjh183322/CangXia/releases/tag/v0.1.0) · [变更记录](CHANGELOG.md)
 
 
 Windows 本地抖音收藏管理工具。账号收藏与本地媒体库独立，按自建收藏夹存放媒体文件，保持总收藏和自建收藏夹的逻辑关系。
 
 ## 运行
 
-打开 `release/CangXia-0.1.4-Windows-x64.exe`。这是免安装程序，需要 Windows 10/11 64 位。程序数据保存在 `%APPDATA%/藏匣`，媒体默认保存在 Windows 下载目录下的 `藏匣` 文件夹；首次下载前可在右上角齿轮“设置”中选择其他目录；已有下载作品后锁定目录。
+打开 `release/CangXia-0.1.5-Windows-x64.exe`。这是免安装程序，需要 Windows 10/11 64 位。程序数据保存在 `%APPDATA%/藏匣`，媒体默认保存在 Windows 下载目录下的 `藏匣` 文件夹；首次下载前可在右上角齿轮“设置”中选择其他目录；已有下载作品后锁定目录。
 
 ## 第一次使用
 
@@ -80,7 +80,7 @@ npm run dist
 
 已根据参考项目接入系统 Chrome/Edge 登录和本机配置导入，支持下载前视频预览。图片将比较实际像素并显示来源，仍不承诺取得所有作品的高清原文件。详细分析见 [参考项目核查](docs/参考项目核查.md)，相关 MIT 许可证已随程序保留。
 
-## 0.1.4 软件内扫码弹窗
+## 0.1.5 软件内扫码弹窗
 
 参考 legacy v0.2.6 改为二维码弹窗，默认不打开完整浏览器，扫码后自动连接。已验证真实二维码可取得，后台页保持隐藏；实际用户登录仍需扫码确认。
 

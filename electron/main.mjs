@@ -114,9 +114,9 @@ try {
   handler('refreshFiles', () => { notify(); return snapshot(); });
   handler('chooseRoot', async () => {
     ensureIdle();
-    if (store.all('downloads').length) throw new Error('媒体库已有下载作品，不能修改保存目录。');
+    if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
     const r = await dialog.showOpenDialog(window, { title: '选择下载根目录', defaultPath: store.root, properties: ['openDirectory', 'createDirectory'] });
-    if (!r.canceled && r.filePaths[0]) { store.setSetting('root', r.filePaths[0]); store.save(); notify(); }
+    if (!r.canceled && r.filePaths[0]) { ensureIdle(); store.setDownloadRoot(r.filePaths[0]); notify(); }
     return store.root;
   });
   handler('openRoot', async () => { fs.mkdirSync(store.root, { recursive: true }); const error = await shell.openPath(store.root); if (error) throw new Error(error); });

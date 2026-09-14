@@ -183,6 +183,45 @@ export class Store {
     const d = this.download(id); if (!d || d.state !== 'complete' || !d.assets?.length) return false;
     return d.assets.every(a => this.assetExists(d, a));
   }
+  hasSavedFiles() {
+    const records=this.all('downloads');
+    if(!records.length)return false;
+    // An unavailable drive is not evidence that its files were deleted.
+    try { if(!fs.statSync(path.parse(path.resolve(this.root)).root).isDirectory())return true; } catch { return true; }
+    for(const d of records){
+      try {
+        this.assertDirectory(d.path);
+        const pending=[d.path];
+        while(pending.length){
+          const dir=pending.pop();
+          let stat;
+          try{stat=fs.lstatSync(dir);}catch(e){if(e.code==='ENOENT')continue;throw e;}
+          if(stat.isSymbolicLink()||!stat.isDirectory())return true;
+          for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
+            if(!entry.isDirectory()||entry.isSymbolicLink())return true;
+            pending.push(path.join(dir,entry.name));
+          }
+        }
+      } catch { return true; }
+    }
+    return false;
+  }
+  setDownloadRoot(root) {
+    if(typeof root!=='string'||!root.trim())throw new Error('保存目录无效');
+    const target=path.resolve(root);
+    if(target===path.resolve(this.root))return this.root;
+    if(this.hasSavedFiles())throw new Error('原目录仍有本地文件，或暂时无法检查。请保留当前目录，清空文件后重新检查。');
+    const stat=fs.lstatSync(target);
+    if(!stat.isDirectory()||stat.isSymbolicLink())throw new Error('请选择普通文件夹作为保存目录');
+    this.db.run('BEGIN');
+    try {
+      // These are now missing-file locations, not the independent download history.
+      this.db.run('DELETE FROM downloads');
+      this.setSetting('root',target);
+      this.db.run('COMMIT');
+    }catch(e){this.db.run('ROLLBACK');throw e;}
+    this.save();return target;
+  }
   snapshot() {
     for(const d of this.all('downloads')){
       let changed=false;
@@ -208,6 +247,6 @@ export class Store {
       members[c.id] = rows.map(r => r.work_id);
       pendingMembers[c.id] = rows.filter(r => r.rank === null).map(r => r.work_id);
     }
-    return { works, collections, members, pendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:downloads.size>0, root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.4' };
+    return { works, collections, members, pendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.5' };
   }
 }

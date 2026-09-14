@@ -19,6 +19,43 @@ function localFile(store,id,collectionId=TOTAL) {
   const {dir}=store.destination(id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'视频.mp4'),'video');
   const d={id,path:dir,collectionId,state:'complete',assets:[{key:'video',file:'视频.mp4',kind:'video',size:5}],savedAt:new Date().toISOString()};store.put('downloads',id,d);store.save();return d;
 }
+
+test('external deletion releases root lock; switching root retains favorites tags and history',async t=>{
+  const s=await setup(t);s.upsertWork(raw());s.ingestMembers(TOTAL,['123'],true);
+  s.put('local_tags','123',{id:'123',tags:['保留标签']});
+  s.setSetting('downloadJobs',[{id:'123',state:'complete',title:'保留历史'}]);
+  const d=localFile(s,'123');assert.equal(s.snapshot().rootLocked,true);
+  const next=path.join(path.dirname(s.root),'new-media');fs.mkdirSync(next);
+  assert.throws(()=>s.setDownloadRoot(next),/仍有本地文件/);
+  fs.unlinkSync(path.join(d.path,'视频.mp4'));
+  assert.equal(s.snapshot().rootLocked,false);assert.equal(s.isDownloaded('123'),false);
+  assert.ok(s.download('123'),'checking alone must not erase missing file records');
+  s.setDownloadRoot(next);
+  assert.equal(s.download('123'),null);assert.deepEqual(s.snapshot().members[TOTAL],['123']);
+  assert.deepEqual(s.get('local_tags','123').tags,['保留标签']);assert.equal(s.getSetting('downloadJobs').length,1);
+  const q=new DownloadQueue(s,{resolveWork:async()=>s.work('123')},async url=>new Response(Buffer.from('test-data'),{headers:{'content-type':url===media?'video/mp4':'image/jpeg'}}),()=>{});
+  await q.saveWork({id:'123'},new AbortController().signal);
+  assert.ok(inside(next,s.download('123').path));assert.equal(s.isDownloaded('123'),true);
+});
+
+test('lock counts partial or untracked files instead of relying on completed asset sizes',async t=>{
+  const s=await setup(t);s.upsertWork(raw());const d=localFile(s,'123');
+  fs.writeFileSync(path.join(d.path,'视频.mp4'),'damaged-file');
+  assert.equal(s.isDownloaded('123'),false);assert.equal(s.hasSavedFiles(),true);
+  fs.unlinkSync(path.join(d.path,'视频.mp4'));
+  const sub=path.join(d.path,'partial');fs.mkdirSync(sub);fs.writeFileSync(path.join(sub,'图片.part'),'');
+  assert.equal(s.hasSavedFiles(),true);
+  fs.unlinkSync(path.join(sub,'图片.part'));assert.equal(s.hasSavedFiles(),false);
+});
+
+test('deleting the complete media tree unlocks directory without losing account data',async t=>{
+  const s=await setup(t);s.upsertWork(raw());const d=localFile(s,'123');
+  // Delete only the explicitly created test file and now-empty test directories.
+  fs.unlinkSync(path.join(d.path,'视频.mp4'));fs.rmdirSync(d.path);fs.rmdirSync(path.dirname(d.path));fs.rmdirSync(s.root);
+  assert.equal(s.snapshot().rootLocked,false);assert.ok(s.work('123'));
+  const old=s.root;assert.throws(()=>s.setDownloadRoot(path.join(old,'not-created')));
+  assert.equal(s.root,old);assert.ok(s.download('123'),'failed directory selection keeps old records');
+});
 test('normalizes author identity, preserves description and tags, prefers original image',()=>{
   const w=parseWork(raw());assert.equal(w.author.uid,'42');assert.equal(w.author.uniqueId,'author42');assert.equal(w.description,'原始文案 #cos #fgo');assert.deepEqual(w.tags,['cos','fgo']);assert.equal(w.coverSource,'origin_cover');
   const r=raw();r.video.origin_cover=null;r.video.cover_original_scale={url_list:[cover]};assert.equal(parseWork(r).coverSource,'cover_original_scale');
