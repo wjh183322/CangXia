@@ -92,7 +92,7 @@ try {
     } catch { return new Response('', { status: 404 }); }
   });
   const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), width: Math.min(area.width,Math.max(1000,Math.floor(area.width*.94))), height:Math.min(area.height,Math.max(700,Math.floor(area.height*.92))), minWidth:Math.min(1000,area.width), minHeight:Math.min(700,area.height), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
