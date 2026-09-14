@@ -10,11 +10,11 @@ export class NasLibrary{
  emit(){this.onChange?.();}
  fail(message){this.writable=false;this.status={...this.status,connected:false,writable:false,message,pending:this.dirty};if(this.store?.nas)this.store.nas.offline=true;this.onLost?.();this.emit();}
  startWorker(){this.worker=new Worker(new URL('./nas-worker.mjs',import.meta.url));this.worker.on('message',r=>{
-   if(r.event==='lost'){this.fail(r.message);return;}if(r.event==='heartbeat'){this.lastHeartbeat=Date.now();return;}
+   if(r.event==='lost'){this.fail(r.message);return;}if(r.event==='heartbeat'){this.lastHeartbeat=Date.now();if(r.phase==='verify'){this.status.message=`正在校验 NAS 记录：${(r.bytes/1048576).toFixed(1)} / ${(r.total/1048576).toFixed(1)} MB`;this.emit();}return;}
    const p=this.pending.get(r.id);if(!p)return;this.pending.delete(r.id);clearTimeout(p.timer);r.ok?p.resolve(r.data):p.reject(new Error(r.error));
   });this.worker.on('error',e=>this.fail(e.message));this.worker.on('exit',()=>{for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('NAS 后台连接已关闭'));}this.pending.clear();});
  }
- call(action,args={}){return new Promise((resolve,reject)=>{if(!this.worker)return reject(new Error('NAS 未连接'));const id=randomUUID();const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('NAS 响应超时，已保留本机工作副本'));this.fail('NAS 响应超时，已停止写入');void this.worker?.terminate();},['publishFiles','copyOut','prepareDelete'].includes(action)?1800000:action==='disconnect'?5000:45000);this.pending.set(id,{resolve,reject,timer});this.worker.postMessage({id,action,args});});}
+ call(action,args={}){return new Promise((resolve,reject)=>{if(!this.worker)return reject(new Error('NAS 未连接'));const id=randomUUID();const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('NAS 响应超时，已保留本机工作副本'));this.fail('NAS 响应超时，已停止写入');void this.worker?.terminate();},['publishFiles','copyOut','prepareDelete'].includes(action)?1800000:['commit','connect','refresh'].includes(action)?330000:action==='disconnect'?5000:45000);this.pending.set(id,{resolve,reject,timer});this.worker.postMessage({id,action,args});});}
  assertWritable(){if(!this.writable||!this.status.connected)throw new Error(this.status.message||'NAS 媒体库当前只读');}
  context(){return {mediaRoot:path.join(this.root,'媒体'),deviceSettings:{},assets:this.assetStates,relocations:new Set(),canWrite:()=>this.writable&&this.status.connected,assertWritable:()=>this.assertWritable(),changed:()=>this.changed()};}
  async loadStore(bytes,id){
@@ -46,9 +46,9 @@ export class NasLibrary{
    if(!this.dirty)return;this.assertWritable();const bytes=serializeShared(this.store),hash=digest(bytes);
    if(hash===this.lastHash){this.dirty=false;this.status.pending=false;try{fs.unlinkSync(this.store.file+'.pending');}catch{}return;}
    this.status.saving=true;this.emit();
-   try{const head=await this.call('commit',{bytes});this.revision=head.revision;this.lastHash=hash;
+   try{const head=await this.call('commit',{bytes});this.lastHeartbeat=Date.now();this.revision=head.revision;this.lastHash=hash;
     if(digest(serializeShared(this.store))===hash){this.dirty=false;this.status.pending=false;try{fs.unlinkSync(this.store.file+'.pending');}catch{}}
-    this.status.lastSaved=head.time;
+    this.status.lastSaved=head.time;if(this.writable&&!this.status.migrating)this.status.message='NAS 已连接 · 当前电脑可写';
    }finally{this.status.saving=false;this.emit();}
   });return this.serial;
  }
@@ -125,7 +125,7 @@ export class NasLibrary{
   if(free!==null&&free<bytes+source.db.export().length*3)throw new Error('目标可用空间不足，无法复制当前媒体库');
   return {root,works:source.all('works').length,files,bytes,missing,free};
  }
- installPoll(){clearInterval(this.poll);this.lastHeartbeat=Date.now();this.poll=setInterval(async()=>{if(this.polling||!this.store||!this.status.connected||this.status.migrating)return;if(this.writable&&Date.now()-this.lastHeartbeat>15000){this.fail('NAS 写入锁心跳超时，修改已停用，请重新连接');return;}this.polling=true;try{if(!this.writable){const latest=await this.call('refresh');if(latest.head&&latest.head.revision!==this.revision){const old=this.store;await this.loadStore(latest.bytes,this.libraryId);this.revision=latest.head.revision;await this.refreshFiles();this.onReload?.(this.store);old.db.close();this.emit();}}}catch(e){this.fail(e.message);}finally{this.polling=false;}},5000);this.poll.unref?.();}
+ installPoll(){clearInterval(this.poll);this.lastHeartbeat=Date.now();this.poll=setInterval(async()=>{if(this.polling||!this.store||!this.status.connected||this.status.migrating)return;if(this.writable&&Date.now()-this.lastHeartbeat>(this.status.saving?330000:15000)){this.fail('NAS 写入锁心跳超时，修改已停用，请重新连接');return;}this.polling=true;try{if(!this.writable){const latest=await this.call('refresh');if(latest.head&&latest.head.revision!==this.revision){const old=this.store;await this.loadStore(latest.bytes,this.libraryId);this.revision=latest.head.revision;await this.refreshFiles();this.onReload?.(this.store);old.db.close();this.emit();}}}catch(e){this.fail(e.message);}finally{this.polling=false;}},5000);this.poll.unref?.();}
  async close(){clearTimeout(this.saveTimer);clearInterval(this.poll);if(this.worker){await this.call('disconnect').catch(()=>{});await this.worker.terminate();this.worker=null;}this.writable=false;}
  async leave(){await this.close();fs.writeFileSync(this.configFile,JSON.stringify({mode:'local'}));this.store=null;this.status={mode:'local',backupDeferred:true};this.dirty=false;this.emit();}
 }

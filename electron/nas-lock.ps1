@@ -38,8 +38,16 @@ try {
         if([long]$command.expected -ne $revision){throw 'NAS 记录版本已变化，已拒绝覆盖'}
         if([string]$command.file -notmatch '^[a-f0-9-]+\.sqlite$' -or [string]$command.sha -notmatch '^[a-f0-9]{64}$'){throw '版本文件无效'}
         $snapshot=[IO.Path]::Combine([IO.Path]::GetDirectoryName($logPath),'versions',[string]$command.file)
-        $hashStream=[IO.File]::OpenRead($snapshot);$algorithm=[Security.Cryptography.SHA256]::Create()
-        try{$actual=[BitConverter]::ToString($algorithm.ComputeHash($hashStream)).Replace('-','').ToLower()}finally{$hashStream.Dispose();$algorithm.Dispose()}
+        $hashStream=[IO.FileStream]::new($snapshot,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,65536,[IO.FileOptions]::SequentialScan);$algorithm=[Security.Cryptography.SHA256]::Create()
+        try{
+          $chunk=[byte[]]::new(65536);$verified=0L;$progressAt=[DateTime]::UtcNow
+          while(($count=$hashStream.Read($chunk,0,$chunk.Length)) -gt 0){
+            [void]$algorithm.TransformBlock($chunk,0,$count,$chunk,0);$verified+=$count
+            if(([DateTime]::UtcNow-$progressAt).TotalSeconds -ge 2){Pulse;Send-Json @{event='heartbeat';phase='verify';bytes=$verified;total=$hashStream.Length};$progressAt=[DateTime]::UtcNow}
+          }
+          [void]$algorithm.TransformFinalBlock([byte[]]::new(0),0,0)
+          $actual=[BitConverter]::ToString($algorithm.Hash).Replace('-','').ToLower()
+        }finally{$hashStream.Dispose();$algorithm.Dispose()}
         if($actual -ne [string]$command.sha){throw 'NAS 版本文件校验失败'}
         $revision++
         $record=@{kind='commit';revision=$revision;file=[string]$command.file;sha=[string]$command.sha;time=[DateTime]::UtcNow.ToString('o')}

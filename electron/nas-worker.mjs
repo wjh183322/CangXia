@@ -16,7 +16,7 @@ async function readLatest(){
 }
 function callBroker(action,data={}){return new Promise((resolve,reject)=>{
   if(!writeable||!broker)return reject(new Error('NAS 当前不可写'));
-  const id=randomUUID();const timer=setTimeout(()=>{writeable=false;reject(new Error('NAS 写入确认超时，已停止写入'));post({event:'lost',message:'NAS 写入确认超时'});broker?.kill();},20000);
+  const id=randomUUID();const timer=setTimeout(()=>{replies.delete(id);writeable=false;reject(new Error('NAS 写入确认超时，已停止写入'));post({event:'lost',message:'NAS 写入确认超时'});broker?.kill();},action==='commit'?300000:20000);
   replies.set(id,{resolve,reject,timer});broker.stdin.write(JSON.stringify({id,action,...data})+'\n');
 });}
 async function closeBroker(){writeable=false;const previous=broker;broker=null;if(previous&&previous.exitCode===null){await new Promise(resolve=>{const timer=setTimeout(()=>{previous.kill();resolve();},3000);previous.once('exit',()=>{clearTimeout(timer);resolve();});previous.stdin.end();});}for(const p of replies.values()){clearTimeout(p.timer);p.reject(new Error('NAS 连接已关闭'));}replies.clear();}
