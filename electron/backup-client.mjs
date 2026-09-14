@@ -1,9 +1,11 @@
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import os from 'node:os';import {randomUUID,createHash} from 'node:crypto';
 import {BackupTransport,normalizeEndpoint,normalizeFingerprint} from './backup-transport.mjs';import {exportRecords,hashes,changesSince,applyChanges,recordId} from './backup-model.mjs';import {contentHash,PROTOCOL} from '../shared/backup-protocol.mjs';import {requireInside} from './model.mjs';
+import {BackupCovers} from './backup-covers.mjs';
 
 const localKeys=new Set(['root','sessionConnected','accessHoldUntil','downloadJobs']);
 export class BackupClient{
  constructor(store,profile,{vault,onChange=()=>{},onUnavailable=()=>{},isIdle=()=>true,heartbeatMs=15000}={}){
+  this.covers=new BackupCovers(this);
   Object.assign(this,{store,profile,vault,onChange,onUnavailable,isIdle,heartbeatMs});this.deviceId=this.read('device.json')?.id||randomUUID();this.write('device.json',{id:this.deviceId});this.config=this.read('backup-connection.json');this.meta=this.read('backup-state.json')||{baseRevision:null,baseline:{},files:{},dirty:false};this.status={mode:'backup',phase:'unconfigured',writable:false,connected:false,message:'请先连接 NAS 备份服务',deviceName:this.config?.deviceName||os.hostname(),pending:!!this.meta.dirty};
   store.backup={assertWritable:()=>this.assertWritable(),canWrite:()=>this.status.writable||!!this.applying,changed:()=>this.changed(),localKey:key=>localKeys.has(key),applying:()=>!!this.applying};
  }
@@ -81,5 +83,5 @@ export class BackupClient{
   this.applying=true;try{applyChanges(this.store,update.changes,{replace:true});}finally{this.applying=false;}this.meta={libraryId:update.libraryId,baseRevision:update.revision,baseline:hashes(update.changes.filter(e=>e.body!==null)),files:{},dirty:false,mediaSignature:this.mediaSignature()};this.persist();this.status={...this.status,recovery:file,connected:true,writable:true,phase:'synced',message:'已保留本机恢复副本，并更新为 NAS 的记录',lastSync:update.lastSync,pending:false};this.installTimers();this.emit();return this.status;
  }
  async release(){clearInterval(this.heartbeat);clearInterval(this.schedule);if(this.transport?.leaseToken)try{await this.transport.json('DELETE','/v1/lease',{timeout:4000});}catch{}if(this.transport)this.transport.leaseToken='';this.status.writable=false;}
- async close(){this.cancel();if(this.syncing)await this.syncing.catch(()=>{});await this.release();this.transport?.close();this.persist();}
+ async close(){this.cancel();await this.covers.close();if(this.syncing)await this.syncing.catch(()=>{});await this.release();this.transport?.close();this.persist();}
 }

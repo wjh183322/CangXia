@@ -105,7 +105,10 @@ try {
       } else if (u.hostname === 'cover') {
         const d = store.download(id), cover = d?.assets.find(a => a.key === 'cover' || a.key === 'image-0');
         if (cover && store.assetExists(d, cover)) file = requireInside(d.path, path.join(d.path, cover.file));
-        else {
+        else if(store.get('backup_downloads',id)?.assets?.some(a=>a.kind==='image')) {
+          file=await backup.covers.get(id);
+          if(!file)return new Response('',{status:404,headers:{'cache-control':'no-store'}});
+        } else {
           file = requireInside(cacheRoot, path.join(cacheRoot, id + '.jpg'));
           if (!fs.existsSync(file)) {
             if(!backup.status.writable)return new Response('',{status:404});
@@ -121,7 +124,7 @@ try {
         }
       } else return new Response('', { status: 404 });
       return net.fetch(pathToFileURL(file).href, { headers: request.headers });
-    } catch { return new Response('', { status: 404 }); }
+    } catch { return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
   });
   const area=screen.getPrimaryDisplay().workAreaSize;
   window = new BrowserWindow({ title: '藏匣备份版', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });

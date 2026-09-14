@@ -1,6 +1,6 @@
 {
   "name": "cangxia-backup",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "藏匣备份版 · 本地优先与 NAS 后台同步",
   "author": "CangXia",
   "private": true,
