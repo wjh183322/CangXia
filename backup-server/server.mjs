@@ -1,5 +1,5 @@
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import http from 'node:http';import https from 'node:https';import {randomUUID,randomBytes,timingSafeEqual,createHash} from 'node:crypto';import {gzipSync,gunzipSync} from 'node:zlib';import {DatabaseSync} from 'node:sqlite';import {pipeline} from 'node:stream/promises';
-import {PROTOCOL,validateEntry} from '../shared/backup-protocol.mjs';
+import {PROTOCOL,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
 
 const MAX_JSON=32*1024*1024,MAX_CHUNK=4*1024*1024;
 function error(status,message){return Object.assign(new Error(message),{status});}
@@ -17,6 +17,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  CREATE TABLE IF NOT EXISTS objects(sha TEXT PRIMARY KEY,size INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS commits(revision INTEGER PRIMARY KEY,device TEXT NOT NULL,name TEXT NOT NULL,time TEXT NOT NULL,count INTEGER NOT NULL);`);
+ const columns=db.prepare('PRAGMA table_info(commits)').all().map(c=>c.name);if(!columns.includes('request'))db.exec('ALTER TABLE commits ADD COLUMN request TEXT; ALTER TABLE commits ADD COLUMN requestHash TEXT;');db.exec('CREATE UNIQUE INDEX IF NOT EXISTS commits_request ON commits(request) WHERE request IS NOT NULL');
  const get=key=>{const r=db.prepare('SELECT value FROM meta WHERE key=?').get(key);return r?JSON.parse(r.value):null;},set=(key,value)=>db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(key,JSON.stringify(value));
  if(!get('libraryId')){set('libraryId',randomUUID());set('revision',0);}
  let lease=null;const busyUploads=new Set();
@@ -41,15 +42,17 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     const changes=db.prepare('SELECT kind,id,body,revision FROM records WHERE revision>? ORDER BY revision,kind,id').all(since).map(r=>({table:r.kind,key:r.id,body:r.body===null?null:JSON.parse(r.body),revision:r.revision}));
     send(req,res,200,{...status(),changes});return;
    }
+   const receipt=route.match(/^\/v1\/commits\/([a-f0-9-]{36})$/);if(receipt&&req.method==='GET'){const entry=db.prepare('SELECT revision,device,name,time,count,request,requestHash FROM commits WHERE request=?').get(receipt[1]);if(!entry||entry.device!==req.headers['x-device-id'])throw error(404,'未找到提交确认');send(req,res,200,entry);return;}
    if(route==='/v1/commit'&&req.method==='POST'){
-    const input=await json(req),device=validLease(req);if(input.libraryId!==get('libraryId')||input.baseRevision!==get('revision'))throw error(409,'NAS 已有其他更新，未覆盖任何记录');
+    const input=await json(req),device=validLease(req),request=input.requestId||randomUUID();if(!/^[a-f0-9-]{36}$/.test(request))throw error(400,'提交标识无效');const requestHash=contentHash({libraryId:input.libraryId,baseRevision:input.baseRevision,changes:input.changes});const previous=db.prepare('SELECT * FROM commits WHERE request=?').get(request);if(previous){if(previous.device!==device||previous.requestHash!==requestHash)throw error(409,'提交标识被用于不同内容');send(req,res,200,{...status(),ackRevision:previous.revision,requestId:request});return;}
+    if(input.libraryId!==get('libraryId')||input.baseRevision!==get('revision'))throw error(409,'NAS 已有其他更新，未覆盖任何记录');
     if(!Array.isArray(input.changes)||input.changes.length>100000)throw error(400,'变更数量无效');const seen=new Set();
     for(const entry of input.changes){validateEntry(entry);const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);if(entry.table==='downloads'&&entry.body)for(const a of entry.body.assets){const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
     if(!input.changes.length){send(req,res,200,status());return;}
     const revision=get('revision')+1,time=new Date(now()).toISOString();db.exec('BEGIN IMMEDIATE');try{
      const update=db.prepare('INSERT OR REPLACE INTO records VALUES(?,?,?,?)');for(const e of input.changes)update.run(e.table,e.key,e.body===null?null:JSON.stringify(e.body),revision);
-     set('revision',revision);db.prepare('INSERT INTO commits VALUES(?,?,?,?,?)').run(revision,device,lease.name,time,input.changes.length);db.exec('COMMIT');
-    }catch(e){db.exec('ROLLBACK');throw e;}send(req,res,200,status());return;
+     set('revision',revision);db.prepare('INSERT INTO commits(revision,device,name,time,count,request,requestHash) VALUES(?,?,?,?,?,?,?)').run(revision,device,lease.name,time,input.changes.length,request,requestHash);db.exec('COMMIT');
+    }catch(e){db.exec('ROLLBACK');throw e;}send(req,res,200,{...status(),ackRevision:revision,requestId:request});return;
    }
    const match=route.match(/^\/v1\/(uploads|objects)\/([a-f0-9]{64})$/);
    if(match){const [,kind,sha]=match,file=objectPath(sha),partial=path.join(dataDir,'uploads',sha+'.part');
