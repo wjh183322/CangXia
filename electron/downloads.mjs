@@ -25,7 +25,7 @@ export class DownloadQueue {
     this.jobs=this.jobs.filter(j=>j.state!=='complete'||!selected.has(j.id));
     this.emit();this.store.save();
   }
-  emit() { if(!this.store.nas||this.store.nas.canWrite())this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
+  emit() { this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
   enqueue(ids) {
     for (const id of [...new Set(ids)]) {
       const w = this.store.work(id); if (!w) continue;
@@ -48,10 +48,10 @@ export class DownloadQueue {
         catch (e) { job.state = this.paused ? 'waiting' : 'failed'; job.message = this.paused ? '已暂停，继续时补齐' : e.message; }
         this.controller = null; this.emit(); this.store.save();
       }
-    } finally { this.running = false; this.emit(); }
+    } finally { this.running = false; this.emit();if(!this.paused)this.onIdle?.(); }
   }
   async saveWork(job, signal) {
-    if(this.remoteSaveWork)return this.remoteSaveWork(job,signal);
+    if(this.backupRestore&&await this.backupRestore(job,signal))return;
     const { store } = this;
     const inspection=inspectWorkFiles(store,job.id);
     if(inspection.status==='error')throw new Error(inspection.error);

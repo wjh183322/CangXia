@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Store } from './store.mjs';
-import { NasLibrary } from './nas-library.mjs';
+import { BackupClient } from './backup-client.mjs';
+import {exportRecords,applyChanges} from './backup-model.mjs';
+import {requireLocalStorage} from './local-storage.mjs';
 import { Collector } from './account-collector.mjs';
 import { AuthVault } from './auth-data.mjs';
 import { SystemBrowser } from './system-browser.mjs';
@@ -19,13 +21,15 @@ const smoke = process.argv.includes('--smoke');
 const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
 if (smoke || sampleProbe || qrProbe) app.setPath('userData', path.resolve('.test-output', qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
-app.setName('藏匣');
+app.setName('藏匣备份版');
+if(process.env.CANGXIA_BACKUP_TEST_PROFILE)app.setPath('userData',process.env.CANGXIA_BACKUP_TEST_PROFILE);
+else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getPath('appData'),'藏匣备份版'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let window, store, collector, queue, qrLogin, timer, nas, localStore, nasBusy=false, nasMutation=false, quitting=false;
+let window, store, collector, queue, qrLogin, timer, backup, backupBusy=false, quitting=false, exitApproved=false;
 const deleteIntents=new Map();
-const writes=new Set(['sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','restoreNasDeleted']);
-function snapshot() { return { ...store.snapshot(), collector: { ...collector.status, busy: collector.busy||nasBusy }, queue: queue.state(), qr:qrLogin?.state(), storage:{...nas?.status,busy:nasBusy} }; }
+const writes=new Set(['sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
+function snapshot(){return {...store.snapshot(),collector:{...collector.status,busy:collector.busy||backupBusy},queue:queue.state(),qr:qrLogin?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing}};}
 function notify() {
   if (quitting) return;
   clearTimeout(timer); timer = setTimeout(() => { if (window && !window.isDestroyed()) window.webContents.send('cangxia:change', snapshot()); }, 120);
@@ -34,57 +38,49 @@ function ids(value) {
   if (!Array.isArray(value) || value.length > 100000 || value.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('作品选择无效');
   return [...new Set(value)];
 }
-function handler(name, action) {
-  ipcMain.handle('cangxia:' + name, async (event, ...args) => {
-    let ownsMutation=false;
-    try {
-      if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if(nasBusy&&!['state','pause','stopSync','cancelQrLogin','openRoot'].includes(name))throw new Error('正在处理 NAS 媒体库，请等待完成');
-      if(nasMutation&&!['state','pause','stopSync','cancelQrLogin'].includes(name))throw new Error('正在保存 NAS 修改，请稍候');
-      if(store.nas&&writes.has(name)){nas.assertWritable();ensureIdle();}
-      if(store.nas&&writes.has(name)){nasMutation=true;ownsMutation=true;}
-      const result=await action(...args);
-      if(store.nas&&writes.has(name)&&!['sync','download','resume','startRepairs','prepareDelete'].includes(name)&&!queue.running){try{await nas.settle();}catch(e){nas.fail(e.message);throw e;}}
-      return { ok: true, data:result };
-    } catch (error) { return { ok: false, error: error.message || '操作未完成' }; }
-    finally{if(ownsMutation){nasMutation=false;notify();}}
-  });
-}
-function ensureIdle() { if (nasBusy||collector.busy || queue.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取结束，再进行此操作'); }
+function handler(name,action){ipcMain.handle('cangxia:'+name,async(event,...args)=>{try{
+ if(!window||event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame)throw new Error('无效调用来源');
+ if(backupBusy&&!['state','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
+ if(writes.has(name))backup.assertWritable();return {ok:true,data:await action(...args)};
+}catch(e){return {ok:false,error:e.message||'操作未完成'};}});}
+function ensureIdle(){if(backupBusy||collector.busy||queue.running||collector.waiters.size)throw new Error('请先暂停下载并等待当前读取结束');}
 
 app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
-  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
-  localStore=store;
-  await localStore.pruneDeletedDownloads();
-  nas=new NasLibrary(profile,notify,()=>{collector?.stop();queue?.pause();});
-  try{store=await nas.restore()||localStore;}catch(e){nas.status={mode:'local',backupDeferred:true,message:'NAS 无法打开，已返回本机库：'+e.message};}
+  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣备份版'));
+  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onUnavailable:()=>{collector?.stop();queue?.pause();},isIdle:()=>!collector?.busy&&!queue?.running&&!backupBusy});
   const httpProfile=session.fromPartition('cangxia-http');
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser});
   await collector.ready;
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
-  function attach(next){store=next;collector.store=next;queue=new DownloadQueue(next,collector,(url,options)=>collector.fetchMedia(url,options),notify);if(next.nas)queue.remoteSaveWork=(job,signal)=>nas.saveWork(job,signal,collector,(url,options)=>collector.fetchMedia(url,options),()=>queue.emit());deleteIntents.clear();notify();}
-  attach(store);nas.onReload=attach;
-  nas.onPruned=()=>{if(queue.store===nas.store&&!queue.running)queue.jobs=store.getSetting('downloadJobs')||[];};
-  async function switchNas(action){
-    ensureIdle();if(store.nas&&nas.writable)try{await nas.settle();}catch(e){nas.fail(e.message);}
-    const old=store,previous={root:nas.root,libraryId:nas.libraryId,status:{...nas.status},assets:nas.assetStates};nasBusy=true;notify();
-    try{const next=await action();attach(next);if(old!==localStore&&old!==next)old.close();await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();return snapshot();}
-    catch(e){if(old.nas){nas.store=old;nas.root=previous.root;nas.libraryId=previous.libraryId;nas.assetStates=previous.assets;nas.status={...previous.status,connected:false,writable:false,message:e.message};}else await nas.leave();throw e;}
-    finally{nasBusy=false;notify();}
+  queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
+  queue.onIdle=()=>backup.afterDownloads();
+  async function restoreBackupAuth(){await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();}
+  backup.onRemoteApplied=restoreBackupAuth;
+  handler('configureBackup',async input=>{ensureIdle();await backup.configure(input);await restoreBackupAuth();return snapshot();});
+  handler('checkBackup',async()=>{ensureIdle();await backup.check();await restoreBackupAuth();return snapshot();});
+  handler('syncBackup',async()=>{await backup.sync();return snapshot();});
+  handler('cancelBackup',()=>{backup.cancel();return true;});
+  handler('finishBackupExit',async mode=>{if(!['keep','sync'].includes(mode))throw new Error('退出选项无效');if(mode==='sync'){collector.stop();queue.pause();for(let i=0;i<100&&(queue.running||collector.busy);i++)await new Promise(r=>setTimeout(r,100));if(queue.running||collector.busy)throw new Error('下载正在停止，请稍后再试');await backup.sync();if(backup.status.pending)throw new Error('仍有本机变化待同步，请检查后退出');}exitApproved=true;app.quit();return true;});
+  handler('acceptRemoteBackup',async()=>{ensureIdle();backupBusy=true;notify();try{await backup.acceptRemote();queue.jobs=store.getSetting('downloadJobs')||[];await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();return snapshot();}finally{backupBusy=false;notify();}});
+  handler('openBackupRecovery',async()=>{const dir=path.join(profile,'recovery');fs.mkdirSync(dir,{recursive:true});const error=await shell.openPath(dir);if(error)throw new Error(error);});
+  let importPreview;
+  async function oldLibrary(kind){
+    const legacy=process.env.CANGXIA_BACKUP_TEST_PROFILE&&process.env.CANGXIA_BACKUP_TEST_ORIGINAL?process.env.CANGXIA_BACKUP_TEST_ORIGINAL:path.join(app.getPath('appData'),'藏匣');let file=path.join(legacy,'library.sqlite');
+    if(kind==='nas'){const c=JSON.parse(fs.readFileSync(path.join(legacy,'library-location.json'),'utf8'));if(!c.id||!/^[a-f0-9-]+$/.test(c.id))throw new Error('没有可导入的 NAS 版缓存');file=path.join(legacy,'nas-cache',c.id+'.sqlite');}
+    else if(kind!=='local')throw new Error('导入来源无效');
+    if(!fs.existsSync(file))throw new Error('未找到旧版资料');const temp=path.join(profile,'import-preview.sqlite');fs.copyFileSync(file,temp);const source=await Store.open(temp,path.join(app.getPath('downloads'),'藏匣'));const currentKey=store.getSetting('browserAccountKey'),sourceKey=source.getSetting('browserAccountKey');if(currentKey&&sourceKey&&currentKey!==sourceKey){source.close();throw new Error('旧资料与当前备份库绑定的抖音账号不同，未合并导入');}await source.pruneDeletedDownloads();return source;
   }
-  let nasPlan;
-  handler('planNas',async value=>{ensureIdle();const plan=await nas.migrationPlan(store,absolutePath(value));queue.jobs=store.getSetting('downloadJobs')||[];notify();nasPlan={...plan,token:randomUUID(),expires:Date.now()+600000};return nasPlan;});
-  handler('migrateNas',async token=>{if(!nasPlan||nasPlan.token!==token||nasPlan.expires<Date.now())throw new Error('迁移预览已过期，请重新选择目录');const root=nasPlan.root;nasPlan=null;return switchNas(async()=>{await nas.migrationPlan(store,root);return nas.migrate(store,root);});});
-  handler('openNas',value=>switchNas(async()=>{await nas.open(absolutePath(value));nas.remember();return nas.store;}));
-  handler('reconnectNas',()=>{if(!store.nas)throw new Error('当前为本机库');const root=nas.root;return switchNas(async()=>{await nas.open(root);nas.remember();return nas.store;});});
-  handler('leaveNas',()=>switchNas(async()=>{await nas.leave();return localStore;}));
-  handler('openNasRecovery',async()=>{const dir=nas.status.staging||path.join(profile,'nas-cache');const error=await shell.openPath(dir);if(error)throw new Error(error);});
-  handler('nasTrash',()=>nas.trash());
-  handler('restoreNasDeleted',async(batch,id)=>{ids([id]);ensureIdle();nasBusy=true;notify();try{await nas.restoreDeleted(batch,id);return await nas.trash();}finally{nasBusy=false;notify();}});
-  handler('openNasTrash',async()=>{if(!store.nas||!nas.status.connected)throw new Error('请先连接 NAS');const error=await shell.openPath(path.join(nas.root,'.cangxia','trash'));if(error)throw new Error('尚无归档文件，或目录暂时无法打开');});
+  handler('previewExistingLibrary',async kind=>{ensureIdle();if(store.all('works').length)throw new Error('当前备份版本机库已有记录，不能直接合并导入');const source=await oldLibrary(kind);try{const entries=exportRecords(source),downloads=source.all('downloads');let files=0,bytes=0;for(const d of downloads)for(const a of d.assets||[])if(source.assetExists(d,a)){files++;bytes+=a.size||0;}importPreview={token:randomUUID(),kind,works:entries.filter(e=>e.table==='works').length,files,bytes};return importPreview;}finally{source.close();}});
+  handler('importExistingLibrary',async token=>{ensureIdle();if(!importPreview||importPreview.token!==token||store.all('works').length)throw new Error('请重新预览导入范围');const kind=importPreview.kind;importPreview=null;backupBusy=true;backup.applying=true;notify();let source;try{
+    source=await oldLibrary(kind);const entries=exportRecords(source).filter(e=>e.table!=='downloads');applyChanges(store,entries);const errors=[];let count=0;
+    for(const original of source.all('downloads')){if(!store.work(original.id))continue;const target=store.destination(original.id);fs.mkdirSync(target.dir,{recursive:true});const assets=[];
+      for(const a of original.assets||[]){if(!source.assetExists(original,a))continue;try{backup.status.progress='正在复制已有文件：'+a.file;notify();await fs.promises.copyFile(requireInside(original.path,path.join(original.path,a.file)),requireInside(target.dir,path.join(target.dir,a.file)),fs.constants.COPYFILE_EXCL);assets.push(a);count++;}catch(e){errors.push(e.message);}}
+      if(assets.length)store.put('downloads',original.id,{...original,path:target.dir,collectionId:target.collectionId,assets,state:assets.length===original.assets.length?original.state:'partial'});
+    }store.save();return {works:entries.filter(e=>e.table==='works').length,files:count,errors};
+  }finally{source?.close();backup.applying=false;backupBusy=false;backup.status.progress='';backup.changed();notify();}});
   collector.onAccessHold=()=>queue.pause();
   const qrProfile=session.fromPartition('persist:cangxia-popup-login');
   qrProfile.on('will-download',event=>event.preventDefault());
@@ -99,6 +95,7 @@ try {
       const [id, filename] = parts; if (!/^\d+$/.test(id || '')) return new Response('', { status: 404 });
       let file;
       if (u.hostname === 'stream') {
+        if(!backup.status.writable)return new Response('',{status:503});
         const work=store.work(id);const source=work?.videoUrls?.[0];if(!source)return new Response('',{status:404});
         const range=request.headers.get('range');return await collector.fetchMedia(source,{signal:AbortSignal.timeout(120000),headers:range?{Range:range}:{}});
       } else if (u.hostname === 'asset') {
@@ -111,6 +108,7 @@ try {
         else {
           file = requireInside(cacheRoot, path.join(cacheRoot, id + '.jpg'));
           if (!fs.existsSync(file)) {
+            if(!backup.status.writable)return new Response('',{status:404});
             if (!cachePending.has(id)) cachePending.set(id, (async () => {
               const w = store.work(id); if (!w?.thumbnail) throw new Error('无封面');
               const r = await collector.fetchMedia(w.thumbnail, { signal: AbortSignal.timeout(12000) });
@@ -126,7 +124,7 @@ try {
     } catch { return new Response('', { status: 404 }); }
   });
   const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window = new BrowserWindow({ title: '藏匣备份版', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -140,13 +138,12 @@ try {
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
   handler('listDirectory',(value,mode)=>listDirectory(value,mode));
   handler('makeDirectory',(parent,name)=>makeDirectory(parent,name));
-  handler('checkRepairs',selected=>{ensureIdle();return store.nas?nas.checkRepairs(ids(selected)):inspectRepairs(store,ids(selected));});
-  handler('startRepairs',async selected=>{ensureIdle();const report=store.nas?await nas.checkRepairs(ids(selected)):inspectRepairs(store,ids(selected));const missing=report.items.filter(i=>i.status==='missing');if(missing.length)queue.enqueue(missing.map(i=>i.id));return {...report,started:missing.length};});
+  handler('checkRepairs',selected=>{ensureIdle();return inspectRepairs(store,ids(selected));});
+  handler('startRepairs',async selected=>{ensureIdle();const report=inspectRepairs(store,ids(selected));const missing=report.items.filter(i=>i.status==='missing');if(missing.length)queue.enqueue(missing.map(i=>i.id));return {...report,started:missing.length};});
   handler('sync', (options = {}) => {
     ensureIdle();
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
-    const shared=!!store.nas;
-    void collector.sync(options).then(async()=>{if(shared){nasBusy=true;notify();await nas.settle();}}).catch(e=>{collector.update('attention',e.message);}).finally(()=>{nasBusy=false;notify();}); return true;
+    void collector.sync(options).catch(e=>collector.update('attention',e.message));return true;
   });
   handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
   handler('stopSync', () => collector.stop());
@@ -155,14 +152,14 @@ try {
   handler('download', selected => { if (collector.busy || collector.waiters.size) throw new Error('请等待读取完成再下载'); queue.enqueue(ids(selected)); return true; });
   handler('pause', () => queue.pause());
   handler('resume', () => { if (collector.busy) throw new Error('请等待同步完成'); queue.resume(); });
-  handler('refreshFiles', async () => {if(collector.busy||queue.running||collector.waiters.size)return snapshot();nasMutation=true;try{if(store.nas){await nas.pruneDeletedDownloads();await nas.refreshFiles();}else await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];notify();return snapshot();}finally{nasMutation=false;}});
+  handler('refreshFiles',async()=>{if(!collector.busy&&!queue.running&&backup.status.writable)await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];backup.changed();notify();return snapshot();});
   handler('chooseRoot', async value => {
     ensureIdle();
     if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
-    store.setDownloadRoot(absolutePath(value));notify();
+    store.setDownloadRoot(await requireLocalStorage(absolutePath(value)));notify();
     return store.root;
   });
-  handler('openRoot', async () => { if(!store.nas)fs.mkdirSync(store.root, { recursive: true }); const error = await shell.openPath(store.root); if (error) throw new Error(error); });
+  handler('openRoot', async () => { fs.mkdirSync(store.root, { recursive: true }); const error = await shell.openPath(store.root); if (error) throw new Error(error); });
   handler('openFolder', async id => {
     ids([id]); const d = store.download(id); if (!d) throw new Error('作品尚未下载'); store.assertDirectory(d.path);
     const error = await shell.openPath(d.path); if (error) throw new Error(error);
@@ -172,7 +169,6 @@ try {
     ids([id]); if (!Array.isArray(tags) || tags.length > 100 || tags.some(t => typeof t !== 'string' || t.length > 80)) throw new Error('标签格式无效');
     const normalized = [...new Set(tags.map(t => t.trim().replace(/^#/, '')).filter(Boolean))];
     store.put('local_tags', id, { id, tags: normalized }); store.save();
-    if(store.nas){await nas.refreshInfo(id);notify();return;}
     const d = store.download(id), w = store.work(id);
     if (d && w && fs.existsSync(d.path)) {
       store.assertDirectory(d.path); const meta = path.join(d.path, '作品信息.json');
@@ -187,13 +183,12 @@ try {
     const selectedIds=ids(selected).filter(id=>kind==='local'?store.download(id):store.hasRead(id));
     const invalid=selectedIds.some(id=>store.work(id)?.remoteState==='unavailable');
     const token=randomUUID();deleteIntents.clear();deleteIntents.set(token,{ids:selectedIds,kind,invalid,expires:Date.now()+600000});
-    return {token,kind,count:selectedIds.length,invalid,nas:!!store.nas};
+    return {token,kind,count:selectedIds.length,invalid,backup:true};
   });
   handler('confirmDelete',async token=>{
     ensureIdle();const intent=deleteIntents.get(token);if(!intent||intent.expires<Date.now())throw new Error('删除确认已过期，请重新选择');
     deleteIntents.delete(token);
     if(intent.kind==='records'){store.deleteReadRecords(intent.ids);notify();return true;}
-    if(store.nas){await nas.deleteFiles(intent.ids);notify();return true;}
     const records=intent.ids.map(id=>store.download(id)).filter(Boolean);
     if(!intent.invalid&&records.some(d=>store.work(d.id)?.remoteState==='unavailable'))throw new Error('原作品状态已变化，请重新确认删除');
     const failed = [];
@@ -206,6 +201,8 @@ try {
   });
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
+  void backup.start().then(()=>restoreBackupAuth()).catch(()=>{});
+  window.on('close',event=>{if(!quitting&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
   window.on('focus', notify);
   window.on('closed',()=>{if(!quitting)app.quit();});
   if(qrProbe){
@@ -257,11 +254,11 @@ app.on('window-all-closed', () => app.quit());
 app.on('second-instance',()=>{if(window&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
 app.on('before-quit', event => {
   if(quitting)return;
+  if(!exitApproved&&window&&!window.isDestroyed()&&(backup?.syncing||(backup?.config&&backup?.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');return;}
   event.preventDefault();quitting=true;qrLogin?.cancel();queue?.pause();const browserClose=collector?.dispose();clearTimeout(timer);
   void (async()=>{
     for(let i=0;i<30&&queue?.running;i++)await new Promise(r=>setTimeout(r,100));
     await Promise.race([browserClose||Promise.resolve(),new Promise(r=>setTimeout(r,3000))]);
-    if(nas?.writable){try{await Promise.race([nas.flush(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('关闭时 NAS 未确认保存')),8000))]);}catch{}}
-    await nas?.close();store?.close();if(localStore&&localStore!==store)localStore.close();app.exit(0);
+    await backup?.close();store?.close();app.exit(0);
   })();
 });
