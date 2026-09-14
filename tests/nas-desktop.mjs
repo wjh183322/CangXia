@@ -15,6 +15,8 @@ app.on('browser-window-created',(_event,win)=>{
   try{
    const root=path.join(base,'share');fs.mkdirSync(root);
    let data=await call('state');check('real app starts with original local data',data.works.length===1&&data.storage.mode==='local');
+   const version=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
+   const pageTitle=await win.webContents.executeJavaScript('document.title');check('window title, document title and settings use the package version',data.version===version&&pageTitle.includes(`藏匣 v${version} ·`)&&win.getTitle()===pageTitle);
    const plan=await call('planNas',root);check('migration review has files and leaves local state unchanged',plan.files===1&&(await call('state')).storage.mode==='local');
    await call('migrateNas',plan.token);data=await call('state');check('real IPC migration activates writer',data.storage.writable&&data.works[0].local);
    await call('setTags','123',['desktop-test']);check('tag commit acknowledged',!(await call('state')).storage.pending);
