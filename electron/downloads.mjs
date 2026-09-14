@@ -48,9 +48,10 @@ export class DownloadQueue {
         catch (e) { job.state = this.paused ? 'waiting' : 'failed'; job.message = this.paused ? '已暂停，继续时补齐' : e.message; }
         this.controller = null; this.emit(); this.store.save();
       }
-    } finally { this.running = false; this.emit(); }
+    } finally { this.running = false; this.emit();if(!this.paused)this.onIdle?.(); }
   }
   async saveWork(job, signal) {
+    if(this.backupRestore&&await this.backupRestore(job,signal))return;
     const { store } = this;
     const inspection=inspectWorkFiles(store,job.id);
     if(inspection.status==='error')throw new Error(inspection.error);

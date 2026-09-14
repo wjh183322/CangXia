@@ -1,0 +1,23 @@
+import {app} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
+app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false;
+const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
+app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.once('did-finish-load',()=>{void(async()=>{
+ const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
+ try{
+  let data=await call('state');check('backup starts isolated and read-only',data.storage.mode==='backup'&&!data.storage.writable&&data.works.length===0);
+  const title=await win.webContents.executeJavaScript('document.title');check('backup title and settings identify the correct edition',title.includes('藏匣备份版 v'+data.version)&&win.getTitle()===title);
+  await assert.rejects(call('setTags','123',['blocked']));check('mutations rejected before NAS comparison',true);
+  await call('configureBackup',settings);data=await call('state');check('pinned HTTPS service permits local use after comparison',data.storage.writable===true);
+  const preview=await call('previewExistingLibrary','local');check('import preview reports fixture records and preserves the empty destination',preview.works===1&&preview.files===3&&(await call('state')).works.length===0);
+  await call('importExistingLibrary',preview.token);data=await call('state');check('copy import retains local media and marks pending changes',data.works[0].local&&data.storage.pending&&fs.existsSync(path.join(process.env.CANGXIA_BACKUP_TEST_ORIGINAL,'library.sqlite')));
+  await call('syncBackup');data=await call('state');check('background sync confirms NAS state without removing local media',data.storage.phase==='synced'&&data.works[0].local&&data.works[0].backedUp);
+  const intent=await call('prepareDelete',['123'],'local');assert.equal(intent.backup,true);const local=data.works[0].localRecord;assert.ok(local.path.startsWith(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE)+path.sep));for(const a of local.assets)fs.unlinkSync(path.join(local.path,a.file));data=await call('refreshFiles');check('clearing local files retains NAS backup',!data.works[0].local&&data.works[0].backedUp);
+  await call('download',['123']);const end=Date.now()+15000;do{await new Promise(r=>setTimeout(r,100));data=await call('state');}while(data.queue.running&&Date.now()<end);
+  check('download restores from NAS without a Douyin login',data.works[0].local&&data.works[0].downloaded);while((await call('state')).storage.syncing)await new Promise(r=>setTimeout(r,100));
+  await call('setTags','123',['desktop-tag']);data=await call('state');check('local tag edit does not wait for NAS upload',data.works[0].localTags.includes('desktop-tag')&&data.storage.pending);
+  await call('syncBackup');await win.webContents.executeJavaScript(`document.querySelector('[aria-label="设置"]').click()`);await new Promise(r=>setTimeout(r,300));const text=await win.webContents.executeJavaScript(`document.querySelector('.backup-connection').open=true;document.querySelector('.modal').innerText`);
+  check('settings display sync time, device and connection controls',text.includes('上次同步')&&text.includes('最近提交电脑')&&text.includes('NAS 服务地址'));
+  fs.mkdirSync('.test-output',{recursive:true});fs.writeFileSync('.test-output/backup-desktop.png',(await win.webContents.capturePage()).toPNG());await call('setTags','123',['pending-on-exit']);win.close();await new Promise(r=>setTimeout(r,250));check('closing with unsynced changes prompts instead of silently discarding',await win.webContents.executeJavaScript(`!!document.querySelector('[aria-label="还有内容未同步"]')`));fs.writeFileSync('.test-output/backup-desktop-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});clearTimeout(timeout);await call('finishBackupExit','keep');
+ }catch(e){console.error(e);fs.mkdirSync('.test-output',{recursive:true});fs.writeFileSync('.test-output/backup-desktop-result.json',JSON.stringify({ok:false,error:e.stack,checks},null,2));clearTimeout(timeout);app.exit(1);}
+})();});});
+await import(process.env.CANGXIA_BACKUP_TEST_MAIN?pathToFileURL(path.resolve(process.env.CANGXIA_BACKUP_TEST_MAIN)).href:'../electron/main.mjs');

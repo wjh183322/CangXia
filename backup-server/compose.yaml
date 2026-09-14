@@ -1,0 +1,13 @@
+services:
+  cangxia-backup:
+    image: cangxia-backup-server:0.1.0
+    container_name: cangxia-backup-server
+    restart: unless-stopped
+    ports:
+      - "${BACKUP_BIND_IP:-127.0.0.1}:18443:8443"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: Asia/Shanghai
+    security_opt:
+      - no-new-privileges:true

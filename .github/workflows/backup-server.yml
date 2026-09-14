@@ -1,0 +1,40 @@
+name: Build backup server
+on:
+  push:
+    branches: [codex/backup]
+    paths:
+      - 'backup-server/**'
+      - 'shared/**'
+      - '.github/workflows/backup-server.yml'
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build and smoke-test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./backup-server/package.json').version")
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          docker build -f backup-server/Dockerfile -t "cangxia-backup-server:$version" .
+          docker run -d --name backup-smoke -p 127.0.0.1:18443:8443 "cangxia-backup-server:$version"
+          trap 'docker rm -fv backup-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 1' >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 1'
+          mkdir -p server-release
+          docker save "cangxia-backup-server:$version" | gzip > "server-release/CangXia-Backup-Server-$version.tar.gz"
+          cp backup-server/compose.yaml backup-server/README.md server-release/
+          cp backup-server/.env.example server-release/.env.example
+          sha256sum server-release/*.tar.gz > server-release/SHA256-server.txt
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cangxia-backup-server
+          path: server-release/
+          include-hidden-files: true
+          retention-days: 14

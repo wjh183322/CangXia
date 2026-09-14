@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
 import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
+import {findDeletedDownloads} from './deleted-downloads.mjs';
 const require = createRequire(import.meta.url);
 
 export class Store {
@@ -19,6 +20,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members (collection_id TEXT, work_id TEXT, rank INTEGER, PRIMARY KEY(collection_id, work_id));
       CREATE TABLE IF NOT EXISTS downloads (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS backup_downloads (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_tags (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS members_order ON members(collection_id,rank);`);
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
@@ -31,11 +33,11 @@ export class Store {
     try { stmt.bind(args); while (stmt.step()) out.push(stmt.getAsObject()); } finally { stmt.free(); }
     return out;
   }
-  put(table, id, body) { this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]); }
+  put(table, id, body) { this.backup?.assertWritable();this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]); }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
   all(table) { return this.rows(`SELECT body FROM ${table}`).map(r => JSON.parse(r.body)); }
   getSetting(key) { const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
-  setSetting(key, value) { this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]); }
+  setSetting(key, value) { if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;if(this.backup&&!this.backup.localKey(key))this.backup.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]); }
   get root() { return this.getSetting('root'); }
   collection(id) { return this.get('collections', id); }
   work(id) { return this.get('works', id); }
@@ -48,11 +50,27 @@ export class Store {
     this.save();
   }
   download(id) { return this.get('downloads', id); }
+  forgetDownloads(ids){
+    this.backup?.assertWritable();
+    const removed=new Set(ids),jobs=this.getSetting('downloadJobs')||[];
+    let changed=false;this.db.run('BEGIN');try{
+      for(const id of removed)this.db.run('DELETE FROM downloads WHERE id=?',[id]);
+      const kept=jobs.filter(j=>!((j.state==='complete'&&!this.download(j.id))||(j.state==='failed'&&removed.has(j.id))));
+      if(kept.length!==jobs.length)this.setSetting('downloadJobs',kept);
+      this.db.run('COMMIT');changed=removed.size||kept.length!==jobs.length;
+    }catch(e){this.db.run('ROLLBACK');throw e;}
+    if(changed)this.save();
+    return [...removed];
+  }
+  async pruneDeletedDownloads(){
+    try{const removed=await findDeletedDownloads(this.all('downloads'),{probe:()=>fs.promises.stat(path.parse(path.resolve(this.root)).root),validate:dir=>this.assertDirectory(dir)});return this.forgetDownloads(removed);}catch{return [];}
+  }
   save() {
     const temp = this.file + '.tmp';
     fs.writeFileSync(temp, this.db.export());
     if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.file + '.bak');
     fs.renameSync(temp, this.file);
+    this.backup?.changed();
   }
   close() { this.save(); this.db.close(); }
   upsertWork(raw) {
@@ -232,7 +250,7 @@ export class Store {
     this.save();return target;
   }
   snapshot() {
-    for(const d of this.all('downloads')){
+    for(const d of (this.backup&&!this.backup.canWrite())?[]:this.all('downloads')){
       let changed=false;
       for(const a of d.assets||[])if(a.kind==='image'&&a.width===undefined&&this.assetExists(d,a)){
         if(a.size>50000000)continue;
@@ -244,10 +262,11 @@ export class Store {
       if(changed)this.put('downloads',d.id,d);
     }
     const downloads = new Map(this.all('downloads').map(d => [d.id, d]));
+    const backups = new Map(this.all('backup_downloads').map(d=>[d.id,d]));
     const localTags = new Map(this.all('local_tags').map(t => [t.id, t.tags]));
     const works = this.all('works').map(w => {
       const d = downloads.get(w.id);
-      return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:backups.has(w.id),backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
     const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
@@ -259,6 +278,6 @@ export class Store {
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.7' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.0' };
   }
 }
