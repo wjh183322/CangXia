@@ -2,12 +2,13 @@ name: Build backup server
 on:
   push:
     branches: [codex/backup]
+    tags: ['backup-v*']
     paths:
       - 'backup-server/**'
       - 'shared/**'
       - '.github/workflows/backup-server.yml'
 permissions:
-  contents: read
+  contents: write
 jobs:
   image:
     runs-on: ubuntu-24.04
@@ -38,3 +39,17 @@ jobs:
           path: server-release/
           include-hidden-files: true
           retention-days: 14
+      - name: Attach verified server files to release draft
+        if: startsWith(github.ref, 'refs/tags/backup-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version=$(node -p "require('./backup-server/package.json').version")
+          if ! gh release view "$tag" --json isDraft >/dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --draft --prerelease --title "藏匣备份版 ${tag#backup-v} 预览" --notes-file "docs/releases/$tag.md"
+          fi
+          test "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = true
+          gh release upload "$tag" "server-release/CangXia-Backup-Server-$version.tar.gz" server-release/SHA256-server.txt
