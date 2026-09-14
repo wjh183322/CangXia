@@ -1,7 +1,8 @@
 import {parentPort} from 'node:worker_threads';
-import fs from 'node:fs/promises';import syncFs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawn} from 'node:child_process';import {randomUUID,createHash} from 'node:crypto';import {pipeline} from 'node:stream/promises';
+import fs from 'node:fs/promises';import path from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';
 import {child,digest,headFromLog} from './nas-format.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
+import {copyVerified} from './nas-transfer.mjs';
 let root,meta,manifest,broker,writeable=false,revision=0;const replies=new Map();
 const post=value=>parentPort.postMessage(value);
 async function safe(file,base=root){
@@ -38,11 +39,9 @@ async function acquire(device){
     broker.on('exit',()=>{const was=writeable;writeable=false;if(was)post({event:'lost',message:'NAS 写入锁已断开'});for(const p of replies.values()){clearTimeout(p.timer);p.reject(new Error('NAS 写入锁已关闭'));}replies.clear();if(!done){done=true;clearTimeout(timeout);reject(new Error('无法取得 NAS 写入锁'));}});
   });
 }
-async function copyChecked(from,to,size){
-  await safe(to);await fs.mkdir(path.dirname(to),{recursive:true});const hash=createHash('sha256');
-  const input=syncFs.createReadStream(from);input.on('data',b=>hash.update(b));
-  await pipeline(input,syncFs.createWriteStream(to,{flags:'wx',flush:true}));const actual=await fs.stat(to);if(actual.size===0||(size&&actual.size!==size))throw new Error('NAS 文件大小校验失败');
-  const sha=hash.digest('hex'),verify=createHash('sha256');for await(const b of syncFs.createReadStream(to))verify.update(b);if(verify.digest('hex')!==sha)throw new Error('NAS 文件内容校验失败');return sha;
+async function copyChecked(from,to,size,options={}){
+  await safe(to);await fs.mkdir(path.dirname(to),{recursive:true});
+  return copyVerified(from,to,{size,...options});
 }
 async function scan(records){
   await fs.stat(root);await safe(root);const results={};
@@ -66,9 +65,9 @@ const actions={
   scan:({records})=>scan(records),
   async findDeleted({records}){return findDeletedDownloads(records.map(d=>({...d,path:child(root,d.relative)})),{probe:async()=>{await callBroker('ping');const current=JSON.parse(await fs.readFile(path.join(meta,'library.json'),'utf8'));if(current.id!==manifest.id)throw new Error('NAS 媒体库已变化，未清理记录');},validate:dir=>safe(dir)});},
   async copyOut({source,destination,size}){const file=child(root,source);await safe(file);const stat=await fs.stat(file);if(stat.size!==size)throw new Error('NAS 原文件已变化，请重新检查');await fs.mkdir(path.dirname(destination),{recursive:true});await fs.copyFile(file,destination);return true;},
-  async publishFiles({relative,assets}){
+  async publishFiles({relative,assets},context){
     await callBroker('ping');const target=child(root,relative);await safe(target);const output=[];
-    for(const a of assets){await callBroker('ping');const extension=path.extname(a.file);const name=path.basename(a.file,extension).replace(/-[a-f0-9]{32}$/,'')+'-'+randomUUID().replaceAll('-','')+extension;const destination=child(root,relative+'/'+name);const sha=await copyChecked(a.inputPath,destination,a.size);output.push({...a,inputPath:undefined,file:name,sha256:sha});}
+    for(const [index,a] of assets.entries()){context.signal.throwIfAborted();await callBroker('ping');const extension=path.extname(a.file);const name=path.basename(a.file,extension).replace(/-[a-f0-9]{32}$/,'')+'-'+randomUUID().replaceAll('-','')+extension;const destination=child(root,relative+'/'+name);const sha=await copyChecked(a.inputPath,destination,a.size,{signal:context.signal,onProgress:progress=>post({event:'transfer',id:context.id,...progress,file:index+1,files:assets.length})});output.push({...a,inputPath:undefined,file:name,sha256:sha});}
     return output;
   },
   async writeInfo({relative,text}){await callBroker('ping');const name='作品信息-'+randomUUID().replaceAll('-','')+'.json',file=child(root,relative+'/'+name);await safe(file);await fs.mkdir(path.dirname(file),{recursive:true});const bytes=Buffer.from(text);await fs.writeFile(file,bytes,{flag:'wx'});return {key:'metadata',kind:'metadata',file:name,size:bytes.length,sha256:digest(bytes)};},
@@ -83,5 +82,5 @@ const actions={
   async discardFiles({files}){for(const relative of files){await callBroker('ping');const file=child(root,relative);await safe(file);try{await fs.unlink(file);}catch(e){if(e.code!=='ENOENT')throw e;}}return true;},
   async disconnect(){await closeBroker();return true;}
 };
-let chain=Promise.resolve();
-parentPort.on('message',({id,action,args})=>{chain=chain.then(async()=>{try{if(!actions[action])throw new Error('NAS 操作无效');post({id,ok:true,data:await actions[action](args||{})});}catch(e){post({id,ok:false,error:e.message});}});});
+let chain=Promise.resolve();const controllers=new Map();
+parentPort.on('message',({id,action,args,targetId})=>{if(action==='abort'){controllers.get(targetId)?.abort();return;}const controller=new AbortController();controllers.set(id,controller);chain=chain.then(async()=>{post({event:'started',id});try{controller.signal.throwIfAborted();if(!actions[action])throw new Error('NAS 操作无效');post({id,ok:true,data:await actions[action](args||{},{id,signal:controller.signal})});}catch(e){post({id,ok:false,error:e.message});}finally{controllers.delete(id);}});});
