@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const methods = ['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','checkQrLogin','setQrPageBounds','showQrExternalPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted','confirmLegacyAccount','openDiagnostics'];
+const methods = ['state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','checkQrLogin','setQrPageBounds','showQrExternalPage','finishLogin','logout','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted','confirmLegacyAccount','openDiagnostics'];
 const api = {};
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
@@ -13,4 +13,5 @@ api.state=()=>{
   return statePending;
 };
 api.onChange = callback => { const listener = (_event, data) => callback(data); ipcRenderer.on('cangxia:change', listener); return () => ipcRenderer.removeListener('cangxia:change', listener); };
+api.onNotice = callback => {const listener=(_event,message)=>callback(message);ipcRenderer.on('cangxia:notice',listener);return()=>ipcRenderer.removeListener('cangxia:notice',listener);};
 contextBridge.exposeInMainWorld('cangxia', Object.freeze(api));

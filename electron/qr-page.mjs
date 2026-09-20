@@ -15,9 +15,10 @@ export function readQrPage({openLogin=false,refresh=false}={}){
   const verificationTitle=[...document.querySelectorAll('h1,h2,h3,[role="heading"],div,span')].some(e=>visible(e)&&(e.children?.length||0)<3&&/^(身份验证|安全验证)$/.test(text(e)));
   // The ordinary login dialog displays a phone/code form beside its QR code.
   // A code field alone is not evidence that scanning requires an extra challenge.
-  if((codeInput&&verificationTitle)||/接收短信验证码|发送短信验证|请输入.{0,16}短信验证码|短信验证码已发送|验证码已发送至|发送至.{0,20}手机|请使用绑定手机号.{0,12}验证/.test(compact))return {phase:'verification',kind:'sms',message:'抖音需要短信或手机身份验证，请在原登录页完成；不要刷新二维码'};
-  if(verificationFrame||verificationTitle||/请(?:先)?完成.{0,8}验证|拖动.{0,8}滑块|按住.{0,8}滑块|请依次点击/.test(compact))return {phase:'verification',kind:'challenge',message:'抖音需要进一步验证，请在原登录页完成'};
-  const scanned=body.split(/\r?\n/).some(line=>/^(?:扫码成功|扫描成功)(?:[，,！!。\s].*)?$/.test(line.trim())||/^请在手机(?:抖音)?(?:上)?确认登录[！!。]?$/.test(line.trim())||/^已确认[，,].{0,8}正在登录/.test(line.trim()));
+  if((codeInput&&verificationTitle)||/接收短信验证码|发送短信验证|请输入.{0,16}短信验证码|短信验证码已发送|验证码已发送至|发送至.{0,20}手机|请使用绑定手机号.{0,12}验证/.test(compact))return {phase:'verification',kind:'sms',message:'抖音需要短信或手机身份验证，请完成下方验证，软件会自动继续'};
+  if(verificationFrame||verificationTitle||/请(?:先)?完成.{0,8}验证|拖动.{0,8}滑块|按住.{0,8}滑块|请依次点击/.test(compact))return {phase:'verification',kind:'challenge',message:'请完成下方身份验证，软件会自动继续'};
+  if(body.split(/\r?\n/).some(line=>/^已确认[，,].{0,8}正在登录/.test(line.trim())))return {phase:'connecting',message:'手机已确认，正在连接账号'};
+  const scanned=body.split(/\r?\n/).some(line=>/^(?:扫码成功|扫描成功)(?:[，,！!。\s].*)?$/.test(line.trim())||/^请在手机(?:抖音)?(?:上)?确认登录[！!。]?$/.test(line.trim()));
   if(scanned)return {phase:'scanned',message:'已扫码，请在手机确认；若已确认，请打开原登录页检查后续验证'};
   const candidates=[...document.querySelectorAll('img,canvas,svg')].filter(e=>{
     if(!visible(e))return false;const r=e.getBoundingClientRect();if(r.width<100||r.height<100||r.width>450||r.height>450||Math.abs(r.width/r.height-1)>.12)return false;

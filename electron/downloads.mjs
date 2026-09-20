@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import {transferAsset} from './resumable-transfer.mjs';
 import { isMediaURL, requireInside } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import { randomUUID, createHash } from 'node:crypto';
@@ -37,6 +36,7 @@ export class DownloadQueue {
   }
   pause() { this.paused = true; this.controller?.abort(); if(this.controller)this.collector.cancelResolve?.('下载已暂停'); this.emit(); this.store.save(); }
   resume() { this.paused = false; this.emit(); void this.run(); }
+  waitForIdle(){if(!this.running)return Promise.resolve();return new Promise(resolve=>(this.idleWaiters??=[]).push(resolve));}
   async run() {
     if (this.running) return; this.running = true;
     try {
@@ -48,7 +48,7 @@ export class DownloadQueue {
         catch (e) { job.state = this.paused ? 'waiting' : 'failed'; job.message = this.paused ? '已暂停，继续时补齐' : e.message; }
         this.controller = null; this.emit(); this.store.save();
       }
-    } finally { this.running = false; this.emit(); }
+    } finally { this.running = false; this.emit();for(const resolve of this.idleWaiters||[])resolve();this.idleWaiters=[]; }
   }
   async saveWork(job, signal) {
     const { store } = this;
@@ -106,24 +106,12 @@ export class DownloadQueue {
     let lastError;
     for (const url of target.urls.slice(0, 9)) {
       if (!isMediaURL(url)) continue;
-      let partial;
       try {
-        const response = await this.fetchMedia(url, { signal:AbortSignal.any([signal,AbortSignal.timeout(120000)]) });
-        if (!response.ok) throw new Error(`资源请求失败（${response.status}）`);
-        const ext = extension(response.headers.get('content-type'), target.kind);
-        const file = requireInside(dir, path.join(dir, target.name + ext)); partial = file + '.part';
-        const expected = Number(response.headers.get('content-length') || 0);
-        let bytes = 0, lastProgress = 0;
-        const input = Readable.fromWeb(response.body);
-        input.on('data', chunk => { bytes += chunk.length; if(target.kind==='image'&&bytes>50000000)input.destroy(new Error('图片文件过大，已停止')); if (Date.now() - lastProgress > 500) { lastProgress = Date.now(); progress(bytes); } });
-        await pipeline(input, fs.createWriteStream(partial, { flags: 'w' }), { signal });
-        if (!bytes || (expected && bytes !== expected)) throw new Error('文件未下载完整，请重试');
-        fs.renameSync(partial, file);
+        let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,fetchMedia:this.fetchMedia,extension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
         const dimensions=target.kind==='image'?imageDimensions(fs.readFileSync(file)):{};
-        return { key: target.key, kind: target.kind, file: path.basename(file), size: bytes, ...dimensions };
+        return { key: target.key, kind: target.kind, file: path.basename(file), size,sha256,resumedBytes,...dimensions };
       } catch (e) {
-        if (partial && fs.existsSync(partial)) fs.unlinkSync(partial);
-        if (signal.aborted) throw e; lastError = e;
+        if (signal.aborted||e.httpStatus===429) throw e; lastError = e;
       }
     }
     throw lastError || new Error('没有可用的媒体地址');

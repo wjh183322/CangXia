@@ -71,7 +71,7 @@ export class SystemBrowser extends EventEmitter {
           this.connection=connection;this.userAgent=(await connection.send('Browser.getVersion')).userAgent;
           connection.on('event',(...event)=>this.emit('event',...event));
           connection.on('closed',()=>{if(this.connection===connection){this.connection=null;this.readerTarget=null;this.loginTarget=null;this.pageSessions.clear();this.api?.reset();this.emit('closed');}});
-          if(this.background){try{await this.readerPage(url);}catch{await this.close();throw Object.assign(new Error('当前浏览器未能创建后台读取页面，请更新 Chrome 或 Edge 后重试'),{code:'BACKGROUND_UNAVAILABLE'});}}
+          if(this.background){try{await this.readerPage(url);}catch{await this.closeNow();throw Object.assign(new Error('当前浏览器未能创建后台读取页面，请更新 Chrome 或 Edge 后重试'),{code:'BACKGROUND_UNAVAILABLE'});}}
           return connection;
         }
       }catch(e){if(e.code==='BACKGROUND_UNAVAILABLE')throw e;}
@@ -152,6 +152,13 @@ export class SystemBrowser extends EventEmitter {
     if(!canClose()||targetInfos.some(t=>t.type==='page'))return false;
     await this.close();return true;
   }
+  async clearLoginData(){
+    await this.close();const root=path.resolve(this.profileRoot);if(!fs.existsSync(root))return;
+    if(fs.lstatSync(root).isSymbolicLink())throw new Error('专用浏览器目录为链接，未自动清理');
+    const realRoot=fs.realpathSync(root),targets=[];
+    for(const name of ['chrome','edge']){const target=path.resolve(root,name);if(path.relative(root,target)!==name)throw new Error('登录目录范围无效');if(!fs.existsSync(target))continue;if(fs.lstatSync(target).isSymbolicLink()||path.relative(realRoot,fs.realpathSync(target))!==name)throw new Error('专用浏览器登录目录超出范围，未清理');targets.push(target);}
+    for(const target of targets)await fs.promises.rm(target,{recursive:true,force:true,maxRetries:5,retryDelay:200});
+  }
   async open(url){
     if(!isDouyinURL(url))throw new Error('作品链接不是抖音地址');await this.launch(url);
     const {targetId}=await this.connection.send('Target.createTarget',{url});await this.connection.send('Target.activateTarget',{targetId});return targetId;
@@ -171,6 +178,6 @@ export class SystemBrowser extends EventEmitter {
     await this.connection.send('Page.navigate',{url:`https://www.douyin.com/video/${id}`},sid);
     return async()=>{this.removeListener('event',listener);this.pageSessions.delete(targetId);if(this.connection)await this.connection.send('Target.closeTarget',{targetId}).catch(()=>{});};
   }
-  async close(){if(this.closing)return this.closing;this.closing=this.closeNow().finally(()=>{this.closing=null;});return this.closing;}
+  async close(){if(this.closing)return this.closing;const launching=this.launching;this.closing=(async()=>{if(launching)await launching.catch(()=>{});await this.closeNow();})().finally(()=>{this.closing=null;});return this.closing;}
   async closeNow(){const connection=this.connection,child=this.process;this.connection=null;this.readerTarget=null;this.loginTarget=null;this.api?.reset();this.pageSessions.clear();if(connection){await connection.send('Browser.close').catch(()=>{});connection.close();if(child&&child.exitCode===null)await Promise.race([new Promise(resolve=>child.once('exit',resolve)),sleep(2000)]);}}
 }

@@ -7,17 +7,19 @@ import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs
 const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/']);
 export class Collector{
   constructor(store,notify,{profile,vault,browser,delay=()=>sleep(1100),verifyIdentity,onDiagnostic=()=>{}}){
-    Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity,onDiagnostic});this.busy=false;this.cancelled=false;this.waiters=new Map();this.diagnostics=[];
+    Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity,onDiagnostic});this.busy=false;this.cancelled=false;this.cancelEpoch=0;this.waiters=new Map();this.diagnostics=[];
     this.status={phase:'idle',message:'通过系统 Chrome / Edge 连接抖音账号',count:0,connected:false,browserOpened:false};
     this.ready=this.restore();
     browser.on?.('closed',()=>{this.browserBinding=null;this.status.browserOpened=false;if(this.requestMode==='browser'&&!this.closed){this.cancelled=true;this.syncController?.abort();this.cancelResolve();this.onBrowserStop?.();this.update('attention','后台读取环境已退出，已保留进度；点击继续读取可重新启动');}else this.notify();});
   }
   update(phase,message,count=this.status.count){this.status={...this.status,phase,message,count};this.notify();}
-  async restore(){if(this.store.getSetting('authNeedsRefresh')){this.status.needsLogin=true;this.update('attention','需要重新登录或完成抖音验证，已有收藏保留');return;}const auth=this.vault.load();if(auth)try{await this.applyAuth(auth,false);}catch{this.update('attention','保存的登录信息不可用，请重新连接浏览器或导入配置');}}
+  async restore(){if(this.store.getSetting('loggedOut')){this.update('idle','已退出登录，本地资料保留');return;}if(this.store.getSetting('authNeedsRefresh')){this.status.needsLogin=true;this.update('attention','需要重新登录或完成抖音验证，已有收藏保留');return;}const auth=this.vault.load();if(auth)try{await this.applyAuth(auth,false);}catch{this.update('attention','保存的登录信息不可用，请重新连接浏览器或导入配置');}}
   async applyAuth(input,persist=true,options={}){
     if(this.authenticating)throw new Error('正在核对登录账号，请稍候');
     this.authenticating=true;clearTimeout(this.browserIdle);
-    try{return await this.applyAuthInternal(input,persist,options);}finally{this.authenticating=false;this.scheduleBrowserIdle();}
+    this.authController=new AbortController();const signal=options.signal?AbortSignal.any([options.signal,this.authController.signal]):this.authController.signal;
+    this.authTask=this.applyAuthInternal(input,persist,{...options,signal});
+    try{return await this.authTask;}finally{this.authenticating=false;this.authTask=null;this.scheduleBrowserIdle();}
   }
   async applyAuthInternal(input,persist=true,{signal,confirmLegacy=false}={}){
     signal?.throwIfAborted();
@@ -60,15 +62,26 @@ export class Collector{
         if(previous&&key!==previous)throw Object.assign(new Error('旧版账号绑定需要重新扫码验证，已保留原资料'),{code:'ACCOUNT_UNVERIFIED'});
         if(key)this.store.setSetting('browserAccountKey',key);
       }
-      this.store.setSetting('sessionConnected',true);this.store.save();
+      signal?.throwIfAborted();this.store.setSetting('sessionConnected',true);this.store.save();
       if(persist)this.vault.save(auth);
-      this.store.setSetting('authNeedsRefresh',false);this.store.save();this.pendingAuth=null;this.status.pendingAccount=null;this.status.needsLogin=false;this.status.connected=true;this.status.source=auth.source;
+      this.store.setSetting('authNeedsRefresh',false);this.store.setSetting('loggedOut',false);this.store.save();this.pendingAuth=null;this.status.pendingAccount=null;this.status.needsLogin=false;this.status.logoutIncomplete=false;this.status.connected=true;this.status.source=auth.source;
       this.requestMode=this.browser.api?'browser':'direct';this.status.requestMode=this.requestMode;this.browserBinding=null;this.pendingBrowserAuth=persist?null:auth;if(['chrome','edge'].includes(auth.source))this.browser.preferred=auth.source;
     }catch(e){await this.profile.clearStorageData({storages:['cookies']});this.store.setSetting('sessionConnected',false);throw e;}
     if(persist)await this.browser.hideLogin?.();this.status.browserOpened=false;this.scheduleBrowserIdle();
     this.update('ready',this.requestMode==='browser'?'登录已连接，可后台读取收藏，无需保留浏览器窗口':auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
   }
   async isAuthenticated(){await this.ready;if(this.requestMode==='browser')return this.status.connected;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
+  async cancelAuthentication(){this.authController?.abort();await this.authTask?.catch(()=>{});}
+  async logout(){
+    if(this.busy)throw new Error('请先停止读取，再退出登录');
+    await this.cancelAuthentication();clearTimeout(this.browserIdle);this.cancelResolve();
+    this.pendingAuth=null;this.pendingBrowserAuth=null;this.browserBinding=null;this.requestMode=null;this.userAgent='';
+    this.status={...this.status,connected:false,needsLogin:false,source:null,requestMode:null,pendingAccount:null,browserOpened:false};
+    const results=await Promise.allSettled([Promise.resolve().then(()=>{this.store.setSetting('loggedOut',true);this.store.setSetting('sessionConnected',false);this.store.setSetting('authNeedsRefresh',true);this.store.save();}),Promise.resolve().then(()=>this.vault.clear()),this.profile.clearStorageData(),this.browser.clearLoginData()]);
+    this.status.logoutIncomplete=results.some(r=>r.status==='rejected');
+    this.update('idle',this.status.logoutIncomplete?'已断开登录，但部分登录信息未能清理，请重试':'已退出登录，本地资料和读取进度已保留');
+    if(this.status.logoutIncomplete)throw new Error(this.status.message);
+  }
   scheduleBrowserIdle(){
     clearTimeout(this.browserIdle);if(!this.browser.background||this.closed)return;
     this.browserIdle=setTimeout(async()=>{const idle=()=>!this.closed&&!this.busy&&!this.waiters.size&&!this.authenticating&&!this.verifyingIdentity&&!this.status.browserOpened;if(!idle())return;if(this.browser.connection)try{const released=await this.browser.releaseIdle?.(idle);if(released)this.browserBinding=null;else this.scheduleBrowserIdle();}catch{}},60000);this.browserIdle.unref();
@@ -132,20 +145,24 @@ export class Collector{
     }
     return data;
   }
-  stop(){this.cancelled=true;this.syncController?.abort();this.update('idle','已停止，保留已读取内容');}
+  stop(){this.cancelEpoch++;this.stopRequested=true;this.cancelled=true;this.syncController?.abort();if(this.busy)this.readProgress({stage:'stopping'});this.update('idle',this.busy?'正在停止并保存已读取内容…':'已停止，保留已读取内容');}
+  readProgress(change){this.status.readProgress={...this.status.readProgress,...change};this.notify();}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
-  async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.browser.close();}
+  async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.cancelAuthentication();await this.browser.close();}
   async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false}={}){
+    const epoch=this.cancelEpoch;
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');
     if(!discoverOnly){
       const c=this.store.collection(collectionId);
       if(!c?.added||c.remoteMissing)throw new Error('请先添加有效的收藏夹');
       if(!Number.isSafeInteger(maxNew)||maxNew<1||maxNew>100000)throw new Error('最大读取数须为 1 到 100000 的整数');
-      this.store.setSetting('readLimit',maxNew);this.store.save();
+      if(!readAll)this.store.setSetting('readLimit',maxNew);this.store.save();
     }
     await this.ready;
     try{this.assertNotCoolingDown();if(!(await this.isAuthenticated())){this.update('attention','请先点击“连接抖音账号”，使用系统浏览器或导入配置完成连接');return;}}catch(e){this.update('attention',e.message);return;}
-    this.busy=true;this.cancelled=false;this.syncController=new AbortController();const signal=this.syncController.signal;
+    if(epoch!==this.cancelEpoch){this.update('idle','已取消读取，原资料保留');return;}
+    this.busy=true;this.cancelled=false;this.stopRequested=false;this.syncController=new AbortController();const signal=this.syncController.signal;
+    this.status.readProgress={mode:discoverOnly?'folders':readAll?'all':'partial',name:discoverOnly?'收藏夹目录':this.store.collection(collectionId)?.name||'收藏',goal:!discoverOnly&&!readAll?maxNew:null,checked:0,added:0,startedAt:Date.now(),stage:'preparing'};this.notify();
     let needsReconcile=false,run;
     const delay=async()=>{await this.delay();if(signal.aborted)throw new Error('读取已停止');};
     try{
@@ -153,10 +170,12 @@ export class Collector{
         this.update('syncing','正在读取账号的自建收藏夹',0);
         const result=await paginate(async cursor=>pageResult(await this.request('/aweme/v1/web/collects/list/',{params:{count:30,cursor},signal}),'collects_list'),async(items,complete)=>{
           const normalized=normalizeCollections(items);this.store.discoverCollections(normalized,complete);this.update('syncing',`已发现 ${normalized.length} 个收藏夹`,normalized.length);
+          this.readProgress({stage:'reading',checked:normalized.length});
         },{signal,delay});
         this.update(result.complete?'done':'attention',result.complete?'收藏夹目录已读取，请选择添加':'已保留发现的收藏夹，但接口未提供完整分页结束依据');return;
       }
       const c=this.store.collection(collectionId);run=this.store.sync.start(c.id,{resume,readAll});
+      this.readProgress({checked:run.count});
       let added=0,complete=false,limited=false;
       this.update('syncing',`正在读取「${c.name}」`,run.count);
       for(let page=0;page<10000&&!this.cancelled;page++){
@@ -165,24 +184,26 @@ export class Collector{
         const data=c.id===TOTAL?await this.request('/aweme/v1/web/aweme/listcollection/',{method:'POST',form:{cursor,count:'30'},signal}):await this.request('/aweme/v1/web/collects/video/list/',{params:{collects_id:c.id,cursor,count:30},signal});
         const result=pageResult(data,'aweme_list');const pageState=this.store.sync.applyPage(run,result.items,result,{maxNew:readAll?Infinity:maxNew-added,signal});
         added+=pageState.added;complete=pageState.complete;limited=!readAll&&added>=maxNew;
+        this.readProgress({stage:'reading',checked:run.count,added});
         needsReconcile=true;
         this.update('syncing',`「${c.name}」 · 已检查 ${run.count} 个，新增 ${added} 个`,run.count);
         if(complete||limited||run.nextCursor===null||!result.items.length)break;
         await delay();
       }
-      const errors=this.store.reconcile();
+      this.readProgress({stage:'saving'});const errors=this.store.reconcile();
       needsReconcile=false;
       if(this.cancelled)return;
       this.update((complete||limited)&&!errors.length?'done':'attention',errors.length?errors.join('；'):`「${c.name}」${complete?(run.resumed?'续读到列表末尾；如收藏有变化，请再从头核对':'已读完'):limited?'部分读取完成':'读取未完整结束'} · 已检查 ${run.count} 个，新增 ${added} 个`,run.count);
     }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{
-      if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);
-      if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}
-      this.busy=false;this.syncController=null;this.scheduleBrowserIdle();this.notify();
+      let saveFailed=false;
+      try{if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}}
+      catch{saveFailed=true;this.update('attention','读取已停止，但进度保存未完成，请检查磁盘空间或目录权限');}
+      finally{this.busy=false;this.syncController=null;if(!saveFailed&&this.cancelled&&this.stopRequested)this.update('idle','已停止，已读取内容和进度已保留');this.readProgress({stage:'finished',finishedAt:Date.now(),stopped:this.cancelled,saveFailed});this.scheduleBrowserIdle();this.notify();}
     }
   }
   markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
   async resolveWork(id){
-    await this.ready;this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
+    await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){
       const controller=new AbortController();this.waiters.set(id,{reject:()=>controller.abort()});
       try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:controller.signal});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');const w=this.store.upsertWork(raw);this.store.save();this.notify();return w;}
@@ -203,6 +224,7 @@ export class Collector{
     }finally{const p=this.waiters.get(id);if(p){clearTimeout(p.timer);this.waiters.delete(id);}if(cleanup)await cleanup();}
   }
   async importLink(text){
+    if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再导入在线作品');
     this.assertNotCoolingDown();const match=String(text).match(/https:\/\/[^\s<>\]]+/);if(!match||!isDouyinURL(match[0]))throw new Error('请粘贴抖音作品链接或分享文案');
     let url=match[0];
     for(let i=0;i<4;i++){
@@ -214,7 +236,7 @@ export class Collector{
   }
   async openOriginal(url){if(!isDouyinURL(url))throw new Error('作品链接无效');return this.browser.open(url);}
   async fetchMedia(url,options={}){
-    await this.ready;let next=url;
+    await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('已退出登录，请登录后查看尚未保存的媒体');let next=url;
     for(let i=0;i<6;i++){
       if(!isMediaURL(next))throw new Error('媒体来源不受支持');
       const response=await this.profile.fetch(next,{...options,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),...(options.headers||{})}});

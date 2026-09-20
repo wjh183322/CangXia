@@ -4,7 +4,7 @@ import { qrPageScript, validQrRect, webUserAgent } from './qr-page.mjs';
 export class QrLogin{
   constructor({createWindow,profile,chromiumVersion,onChange,onAuthenticated,onLimit}){Object.assign(this,{createWindow,profile,onChange,onAuthenticated,onLimit});this.userAgent=webUserAgent(chromiumVersion);this.current={phase:'idle',image:null,message:''};this.generation=0;this.active=false;}
   state(){return {...this.current,active:this.active};}
-  update(change){if(Object.entries(change).every(([k,v])=>this.current[k]===v))return;this.current={...this.current,...change};this.onChange();}
+  update(change){if(Object.entries(change).every(([k,v])=>this.current[k]===v))return;const phaseSince=change.phase&&change.phase!==this.current.phase?Date.now():this.current.phaseSince;this.current={...this.current,...change,phaseSince};this.onChange();}
   async start({forcePage=false}={}){
     if(this.active)return;
     this.authController?.abort();this.authController=new AbortController();
@@ -57,11 +57,11 @@ export class QrLogin{
         if(page.phase==='ready'&&validQrRect(page.rect,win.getContentBounds())){
           const image=await this.qrImage(page);
           if(this.active&&generation===this.generation)this.update(image?{phase:'ready',message:page.message,image}:{phase:'loading',message:'正在读取二维码图片'});
-        }else this.update({phase:page.phase,message:page.message,...(['expired','verification','scanned'].includes(page.phase)?{image:null}:{})});
+        }else this.update({phase:page.phase,message:page.message,...(['expired','verification','scanned','connecting'].includes(page.phase)?{image:null}:{})});
       }catch(e){if(this.active&&generation===this.generation&&!win.isDestroyed())this.update({message:'正在等待抖音页面就绪'});}
       await sleep(1000);
     }
-    if(this.active&&generation===this.generation){this.active=false;this.update(this.manualPage?{phase:'verification',image:null,message:'原登录页已保留，完成验证后点击“手机已确认 / 检查登录”'}:{phase:'expired',image:null,message:'登录等待已结束，请手动重新获取二维码'});}
+    if(this.active&&generation===this.generation){this.active=false;this.update(this.manualPage?{phase:'verification',image:null,message:'验证页面已保留，完成后可点击“重新检查”'}:{phase:'expired',image:null,message:'登录等待已结束，请刷新二维码'});}
   }
   async qrImage(page){
     if(typeof page.image==='string'&&/^data:image\/(png|jpeg|webp);base64,/i.test(page.image)&&page.image.length<2*1024*1024)return page.image;
@@ -87,7 +87,7 @@ export class QrLogin{
   async check(){
     const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
     if(this.loggedIn(cookies)){if(!this.authController||this.authController.signal.aborted)this.authController=new AbortController();await this.complete(cookies,this.generation);return;}
-    await this.showPage();this.update({phase:'verification',image:null,message:'尚未收到登录会话，请在弹出的原登录页检查短信、滑块或手机确认；完成后再检查'});
+    await this.showPage();this.update({phase:'verification',image:null,message:'尚未检测到登录完成，请按页面提示完成验证后重试'});
   }
   cancel(){this.authController?.abort();this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,inline:false,pageId:null,message:''});if(win&&!win.isDestroyed())win.close();}
 }
