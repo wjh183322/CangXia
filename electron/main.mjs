@@ -117,7 +117,7 @@ try {
     const token=randomUUID(),{works,...head}=state;stateTransfers.set(token,{works,expires:Date.now()+120000});return {chunkedState:true,token,head,total:works.length};
   });
   handler('stateChunk',(token,offset)=>{const transfer=stateTransfers.get(token);if(!transfer||transfer.expires<Date.now()||!Number.isSafeInteger(offset)||offset<0||offset>=transfer.works.length)throw new Error('界面状态已更新，请重新加载');const works=transfer.works.slice(offset,offset+250),done=offset+works.length>=transfer.works.length;if(done)stateTransfers.delete(token);return {works,done};});
-  handler('openAccount', preferred => {ensureIdle();return collector.open(preferred);});
+  handler('openAccount', preferred => {ensureIdle();qrLogin.cancel();return collector.open(preferred);});
   handler('startQrLogin',async()=>{ensureIdle();collector.assertNotCoolingDown();if(collector.status.needsLogin){qrLogin.cancel();await qrProfile.clearStorageData({storages:['cookies']});}return qrLogin.start();});
   handler('confirmLegacyAccount',async token=>{ensureIdle();await collector.confirmLegacyAccount(token);qrLogin.cancel();notify();return snapshot();});
   handler('openDiagnostics',()=>shell.openPath(diagnostics.dir));
@@ -127,7 +127,7 @@ try {
   handler('setQrPageBounds',(id,bounds)=>{const page=qrLogin.window;if(page?.webContents.id===id&&qrLogin.state().inline)page.setInlineBounds?.(bounds);return true;});
   handler('showQrExternalPage',async()=>{await qrLogin.showPage();qrLogin.window?.openExternal?.();return true;});
   handler('checkQrLogin',()=>{ensureIdle();collector.assertNotCoolingDown();return qrLogin.check();});
-  handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
+  handler('finishLogin', () => {ensureIdle();qrLogin.cancel();return collector.finishLogin();});
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
   handler('listDirectory',(value,mode)=>listDirectory(value,mode));
   handler('makeDirectory',(parent,name)=>makeDirectory(parent,name));

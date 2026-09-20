@@ -10,7 +10,7 @@ export class Collector{
     Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity,onDiagnostic});this.busy=false;this.cancelled=false;this.waiters=new Map();this.diagnostics=[];
     this.status={phase:'idle',message:'通过系统 Chrome / Edge 连接抖音账号',count:0,connected:false,browserOpened:false};
     this.ready=this.restore();
-    browser.on?.('closed',()=>{this.status.browserOpened=false;this.notify();});
+    browser.on?.('closed',()=>{this.browserBinding=null;this.status.browserOpened=false;if(this.requestMode==='browser'&&!this.closed){this.browserNeedsOpen=true;this.cancelled=true;this.syncController?.abort();this.cancelResolve();this.status.connected=false;this.status.needsLogin=true;this.update('attention','专用浏览器已关闭，读取已停止并保留进度。请重新打开专用浏览器并连接后续读');}else this.notify();});
   }
   update(phase,message,count=this.status.count){this.status={...this.status,phase,message,count};this.notify();}
   async restore(){if(this.store.getSetting('authNeedsRefresh')){this.status.needsLogin=true;this.update('attention','需要重新登录或完成抖音验证，已有收藏保留');return;}const auth=this.vault.load();if(auth)try{await this.applyAuth(auth,false);}catch{this.update('attention','保存的登录信息不可用，请重新连接浏览器或导入配置');}}
@@ -39,7 +39,7 @@ export class Collector{
       if(this.verifyIdentity&&(persist||auth.identity)){
         const needsLegacyCheck=!!previous&&!boundUid&&key!==previous;
         let verified;this.verifyingIdentity=true;
-        try{verified=persist?await this.verifyIdentity(this.profile,auth.userAgent,{signal,legacyCollections:needsLegacyCheck?this.store.all('collections').filter(c=>c.id!==TOTAL&&c.added).map(c=>c.id):[]}):auth.identity;}finally{this.verifyingIdentity=false;}
+        try{const verificationProfile=persist&&['chrome','edge'].includes(auth.source)&&this.browser.api?this.browserProfile(await this.browser.api.prepare(signal)):this.profile;verified=persist?await this.verifyIdentity(verificationProfile,auth.userAgent,{signal,onLimited:seconds=>this.holdAccess(seconds),legacyCollections:needsLegacyCheck?this.store.all('collections').filter(c=>c.id!==TOTAL&&c.added).map(c=>c.id):[]}):auth.identity;}finally{this.verifyingIdentity=false;}
         signal?.throwIfAborted();
         if(this.store.getSetting('browserAccountKey')!==previous)throw new Error('资料库账号信息刚发生变化，请重新检查连接后登录');
         if(confirmLegacy&&verified.uid!==confirmLegacy)throw new Error('扫码账号已变化，请重新确认');
@@ -57,10 +57,35 @@ export class Collector{
       this.store.setSetting('sessionConnected',true);this.store.save();
       if(persist)this.vault.save(auth);
       this.store.setSetting('authNeedsRefresh',false);this.store.save();this.pendingAuth=null;this.status.pendingAccount=null;this.status.needsLogin=false;this.status.connected=true;this.status.source=auth.source;
+      this.requestMode=['chrome','edge'].includes(auth.source)&&this.browser.api?'browser':'direct';this.status.requestMode=this.requestMode;this.browserBinding=null;this.browserNeedsOpen=false;if(['chrome','edge'].includes(auth.source))this.browser.preferred=auth.source;
     }catch(e){await this.profile.clearStorageData({storages:['cookies']});this.store.setSetting('sessionConnected',false);throw e;}
-    this.update('ready',auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
+    this.update('ready',this.requestMode==='browser'?'已连接专用浏览器，可以同步收藏；读取时请保持浏览器开启':auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
   }
-  async isAuthenticated(){await this.ready;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
+  async isAuthenticated(){await this.ready;if(this.requestMode==='browser')return this.status.connected&&!this.browserNeedsOpen;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
+  browserProfile(page){return {fetch:async(url,options={})=>{
+    const u=new URL(url);if(u.origin!=='https://www.douyin.com')throw new Error('不支持的账号核验地址');
+    const response=await this.browser.api.request(u.pathname,{params:Object.fromEntries(u.searchParams),method:options.method||'GET',signal:options.signal,page});
+    if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw new Error('平台限制访问频率，已暂停');}
+    return response;
+  }};}
+  browserFingerprint(cookies){return createHash('sha256').update(JSON.stringify(cookies.filter(c=>['sessionid','sessionid_ss','uid_tt'].includes(c.name)).map(c=>[c.name,c.domain,c.path,c.value]).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))))).digest('hex');}
+  async requestBrowser(path,options){
+    if(this.browserNeedsOpen)throw new Error('请重新打开专用浏览器并连接后续读');
+    const {signal}=options,page=await this.browser.api.prepare(signal),cookies=await this.browser.api.credentials(page,signal);
+    if(!cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expires||c.expires<0||c.expires>Date.now()/1000))){this.needsLogin('专用浏览器需要重新登录或验证，已有进度保留');throw new Error('请在专用浏览器完成登录并重新连接');}
+    const fingerprint=this.browserFingerprint(cookies),key=this.store.getSetting('browserAccountKey'),uid=typeof key==='string'&&key.startsWith('uid:')?key.slice(4):null;
+    if(!uid||!this.verifyIdentity){this.needsLogin('请在专用浏览器重新连接并确认原账号，已有资料保留');throw new Error('请在专用浏览器重新连接并确认原账号，已有资料保留');}
+    if(this.browserBinding?.page!==page||this.browserBinding?.fingerprint!==fingerprint||this.browserBinding?.uid!==uid){
+      const identity=await this.verifyIdentity(this.browserProfile(page),this.browser.userAgent,{signal,onLimited:seconds=>this.holdAccess(seconds)});
+      if(!validAccountIdentity(identity)||identity.uid!==uid){this.needsLogin('专用浏览器登录的是另一个账号，已停止读取并保留原资料');throw new Error('专用浏览器账号与资料库不一致，请切回原账号后重新连接');}
+      this.browserBinding={page,fingerprint,uid};
+    }
+    const response=await this.browser.api.request(path,{...options,page});
+    if(response.status===429)return response;
+    const after=await this.browser.api.credentials(page,signal);
+    if(this.browserFingerprint(after)!==fingerprint||this.store.getSetting('browserAccountKey')!==key){this.browserBinding=null;throw new Error('读取期间浏览器登录会话发生变化，本页未写入，请检查账号后重试');}
+    return response;
+  }
   async confirmLegacyAccount(token){const p=this.pendingAuth;if(!p||p.token!==token||p.expires<Date.now()||this.store.getSetting('browserAccountKey')!==p.previous)throw new Error('账号确认已过期，请重新扫码');await this.applyAuth(p.auth,true,{confirmLegacy:p.identity.uid});}
   needsLogin(message){this.status.connected=false;this.status.needsLogin=true;this.store.setSetting('authNeedsRefresh',true);this.store.setSetting('sessionConnected',false);this.store.save();this.update('attention',message);}
   assertNotCoolingDown(){const ms=Number(this.store.getSetting('accessHoldUntil')||0)-Date.now();if(ms>0)throw new Error(`已暂停自动请求，请至少等待 ${Math.ceil(ms/1000)} 秒后再手动尝试。平台恢复时间无法确定。`);}
@@ -68,7 +93,7 @@ export class Collector{
   async open(preferred='chrome'){
     await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前读取或下载任务');
     this.browser.preferred=['chrome','edge'].includes(preferred)?preferred:'chrome';
-    const name=await this.browser.openLogin();this.status.browserOpened=true;
+    const name=await this.browser.openLogin();this.browserBinding=null;this.status.browserOpened=true;
     this.update('login',`已打开藏匣专用 ${name==='edge'?'Edge':'Chrome'}。完成登录后回到这里点击“我已登录，连接”。`);return name;
   }
   async finishLogin(){await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前任务');await this.applyAuth(await this.browser.credentials());return true;}
@@ -77,10 +102,10 @@ export class Collector{
     await this.ready;this.assertNotCoolingDown();if(!API_PATHS.has(path))throw new Error('不支持的读取接口');
     if(!allowGuest&&!(await this.isAuthenticated())){this.needsLogin('登录会话需要更新，请重新扫码或在专用浏览器完成验证');throw new Error('登录会话需要更新，请重新扫码或完成验证');}
     const url=new URL(path,'https://www.douyin.com');for(const [key,value] of Object.entries({device_platform:'webapp',aid:'6383',channel:'channel_pc_web',...params}))url.searchParams.set(key,String(value));
-    const response=await this.profile.fetch(url.href,{method,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),Accept:'application/json',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000)});
+    const response=this.requestMode==='browser'&&!allowGuest?await this.requestBrowser(path,{params,method,form,signal}):await this.profile.fetch(url.href,{method,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),Accept:'application/json',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000)});
     this.diagnostics.push({path,status:response.status});if(this.diagnostics.length>40)this.diagnostics.shift();
     if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw new Error('平台限制访问频率，已暂停');}
-    if(!response.ok){const message=`抖音接口未接受请求（HTTP ${response.status}），请重新登录或完成验证`;this.onDiagnostic({event:'api-error',httpStatus:response.status,path});if([401,403].includes(response.status))this.needsLogin(message);throw new Error(message);}
+    if(!response.ok){const message=response.status===403&&this.requestMode!=='browser'?'读取被拒绝（HTTP 403），请通过“专用浏览器”登录并连接后重试，已有进度保留':`抖音接口未接受请求（HTTP ${response.status}），请在${this.requestMode==='browser'?'专用浏览器':'登录窗口'}检查账号和验证状态`;this.onDiagnostic({event:'api-error',httpStatus:response.status,path});if([401,403].includes(response.status))this.needsLogin(message);throw new Error(message);}
     const text=await response.text();if(text.length>32*1024*1024)throw new Error('响应过大，已停止读取');
     let data;try{data=parsePlatformJSON(text);}catch{this.needsLogin('抖音未返回有效数据，请在验证窗口检查登录状态');this.onDiagnostic({event:'api-format',path});throw new Error('接口未返回有效数据，请重新登录或完成验证');}
     const message=String(data.status_msg||data.message||data.data?.status_msg||data.data?.message||'');

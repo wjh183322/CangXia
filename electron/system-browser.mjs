@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { isDouyinURL, sleep } from './model.mjs';
+import {BrowserAPI} from './browser-api.mjs';
 
 export function findSystemBrowser(preferred = 'chrome', env = process.env) {
   const roots=[env.PROGRAMFILES,env['PROGRAMFILES(X86)'],env.LOCALAPPDATA].filter(Boolean);
@@ -44,7 +45,7 @@ export class CDPConnection extends EventEmitter {
 
 // Only starts an app-owned profile. Never connects to the user's regular profile or scans ports.
 export class SystemBrowser extends EventEmitter {
-  constructor(profileRoot,{headless=false,preferred='chrome'}={}){super();this.profileRoot=profileRoot;this.headless=headless;this.preferred=preferred;this.connection=null;this.launching=null;this.pageSessions=new Map();}
+  constructor(profileRoot,{headless=false,preferred='chrome'}={}){super();this.profileRoot=profileRoot;this.headless=headless;this.preferred=preferred;this.connection=null;this.launching=null;this.pageSessions=new Map();this.api=new BrowserAPI(this);}
   async launch(url='https://www.douyin.com/'){
     if(url!=='about:blank'&&!isDouyinURL(url))throw new Error('只允许打开抖音页面');
     if(this.connection)return this.connection;
@@ -67,7 +68,7 @@ export class SystemBrowser extends EventEmitter {
         if(response.ok){const info=await response.json();const connection=await CDPConnection.connect(validateDebugURL(info.webSocketDebuggerUrl,this.port));
           this.connection=connection;this.userAgent=(await connection.send('Browser.getVersion')).userAgent;
           connection.on('event',(...event)=>this.emit('event',...event));
-          connection.on('closed',()=>{if(this.connection===connection){this.connection=null;this.pageSessions.clear();this.emit('closed');}});
+          connection.on('closed',()=>{if(this.connection===connection){this.connection=null;this.pageSessions.clear();this.api.reset();this.emit('closed');}});
           return connection;
         }
       }catch{}
@@ -86,6 +87,7 @@ export class SystemBrowser extends EventEmitter {
     const {sessionId}=await this.connection.send('Target.attachToTarget',{targetId,flatten:true});this.pageSessions.set(targetId,sessionId);return sessionId;
   }
   async openLogin(){
+    this.api.reset();
     await this.launch();
     let target;try{target=await this.target();}catch{const r=await this.connection.send('Target.createTarget',{url:'https://www.douyin.com/'});target={targetId:r.targetId};}
     await this.connection.send('Target.activateTarget',{targetId:target.targetId});
@@ -117,5 +119,5 @@ export class SystemBrowser extends EventEmitter {
     await this.connection.send('Page.navigate',{url:`https://www.douyin.com/video/${id}`},sid);
     return async()=>{this.removeListener('event',listener);this.pageSessions.delete(targetId);if(this.connection)await this.connection.send('Target.closeTarget',{targetId}).catch(()=>{});};
   }
-  async close(){const connection=this.connection;this.connection=null;this.pageSessions.clear();if(connection){await connection.send('Browser.close').catch(()=>{});connection.close();}}
+  async close(){const connection=this.connection;this.connection=null;this.api.reset();this.pageSessions.clear();if(connection){await connection.send('Browser.close').catch(()=>{});connection.close();}}
 }
