@@ -120,9 +120,10 @@ try {
   handler('startQrLogin',async()=>{ensureIdle();collector.assertNotCoolingDown();if(collector.status.needsLogin){qrLogin.cancel();await qrProfile.clearStorageData({storages:['cookies']});}return qrLogin.start();});
   handler('confirmLegacyAccount',async token=>{ensureIdle();await collector.confirmLegacyAccount(token);qrLogin.cancel();notify();return snapshot();});
   handler('openDiagnostics',()=>shell.openPath(diagnostics.dir));
-  handler('refreshQrLogin',()=>{collector.assertNotCoolingDown();return qrLogin.refresh();});
+  handler('refreshQrLogin',()=>{ensureIdle();collector.assertNotCoolingDown();collector.pendingAuth=null;collector.status.pendingAccount=null;return qrLogin.refresh();});
   handler('cancelQrLogin',()=>{qrLogin.cancel();collector.pendingAuth=null;collector.status.pendingAccount=null;notify();});
   handler('showQrLoginPage',()=>qrLogin.showPage());
+  handler('checkQrLogin',()=>{ensureIdle();collector.assertNotCoolingDown();return qrLogin.check();});
   handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
   handler('listDirectory',(value,mode)=>listDirectory(value,mode));
