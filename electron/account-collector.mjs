@@ -10,11 +10,16 @@ export class Collector{
     Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity,onDiagnostic});this.busy=false;this.cancelled=false;this.waiters=new Map();this.diagnostics=[];
     this.status={phase:'idle',message:'通过系统 Chrome / Edge 连接抖音账号',count:0,connected:false,browserOpened:false};
     this.ready=this.restore();
-    browser.on?.('closed',()=>{this.browserBinding=null;this.status.browserOpened=false;if(this.requestMode==='browser'&&!this.closed){this.browserNeedsOpen=true;this.cancelled=true;this.syncController?.abort();this.cancelResolve();this.status.connected=false;this.status.needsLogin=true;this.update('attention','专用浏览器已关闭，读取已停止并保留进度。请重新打开专用浏览器并连接后续读');}else this.notify();});
+    browser.on?.('closed',()=>{this.browserBinding=null;this.status.browserOpened=false;if(this.requestMode==='browser'&&!this.closed){this.cancelled=true;this.syncController?.abort();this.cancelResolve();this.onBrowserStop?.();this.update('attention','后台读取环境已退出，已保留进度；点击继续读取可重新启动');}else this.notify();});
   }
   update(phase,message,count=this.status.count){this.status={...this.status,phase,message,count};this.notify();}
   async restore(){if(this.store.getSetting('authNeedsRefresh')){this.status.needsLogin=true;this.update('attention','需要重新登录或完成抖音验证，已有收藏保留');return;}const auth=this.vault.load();if(auth)try{await this.applyAuth(auth,false);}catch{this.update('attention','保存的登录信息不可用，请重新连接浏览器或导入配置');}}
-  async applyAuth(input,persist=true,{signal,confirmLegacy=false}={}){
+  async applyAuth(input,persist=true,options={}){
+    if(this.authenticating)throw new Error('正在核对登录账号，请稍候');
+    this.authenticating=true;clearTimeout(this.browserIdle);
+    try{return await this.applyAuthInternal(input,persist,options);}finally{this.authenticating=false;this.scheduleBrowserIdle();}
+  }
+  async applyAuthInternal(input,persist=true,{signal,confirmLegacy=false}={}){
     signal?.throwIfAborted();
     if(persist)this.store.backup?.assertWritable();
     const auth=validateAuth(input);
@@ -36,10 +41,11 @@ export class Collector{
       await this.profile.cookies.set(cookie);
     }
     try{
+      if(persist&&this.browser.api&&this.browser.prepareSession)await this.browser.prepareSession(auth,{signal,replace:!['chrome','edge'].includes(auth.source)});
       if(this.verifyIdentity&&(persist||auth.identity)){
         const needsLegacyCheck=!!previous&&!boundUid&&key!==previous;
         let verified;this.verifyingIdentity=true;
-        try{const verificationProfile=persist&&['chrome','edge'].includes(auth.source)&&this.browser.api?this.browserProfile(await this.browser.api.prepare(signal)):this.profile;verified=persist?await this.verifyIdentity(verificationProfile,auth.userAgent,{signal,onLimited:seconds=>this.holdAccess(seconds),legacyCollections:needsLegacyCheck?this.store.all('collections').filter(c=>c.id!==TOTAL&&c.added).map(c=>c.id):[]}):auth.identity;}finally{this.verifyingIdentity=false;}
+        try{const verificationProfile=persist&&this.browser.api?this.browserProfile(await this.browser.api.prepare(signal)):this.profile;verified=persist?await this.verifyIdentity(verificationProfile,auth.userAgent,{signal,onLimited:seconds=>this.holdAccess(seconds),legacyCollections:needsLegacyCheck?this.store.all('collections').filter(c=>c.id!==TOTAL&&c.added).map(c=>c.id):[]}):auth.identity;}finally{this.verifyingIdentity=false;}
         signal?.throwIfAborted();
         if(this.store.getSetting('browserAccountKey')!==previous)throw new Error('资料库账号信息刚发生变化，请重新检查连接后登录');
         if(confirmLegacy&&verified.uid!==confirmLegacy)throw new Error('扫码账号已变化，请重新确认');
@@ -57,11 +63,16 @@ export class Collector{
       this.store.setSetting('sessionConnected',true);this.store.save();
       if(persist)this.vault.save(auth);
       this.store.setSetting('authNeedsRefresh',false);this.store.save();this.pendingAuth=null;this.status.pendingAccount=null;this.status.needsLogin=false;this.status.connected=true;this.status.source=auth.source;
-      this.requestMode=['chrome','edge'].includes(auth.source)&&this.browser.api?'browser':'direct';this.status.requestMode=this.requestMode;this.browserBinding=null;this.browserNeedsOpen=false;if(['chrome','edge'].includes(auth.source))this.browser.preferred=auth.source;
+      this.requestMode=this.browser.api?'browser':'direct';this.status.requestMode=this.requestMode;this.browserBinding=null;this.pendingBrowserAuth=persist?null:auth;if(['chrome','edge'].includes(auth.source))this.browser.preferred=auth.source;
     }catch(e){await this.profile.clearStorageData({storages:['cookies']});this.store.setSetting('sessionConnected',false);throw e;}
-    this.update('ready',this.requestMode==='browser'?'已连接专用浏览器，可以同步收藏；读取时请保持浏览器开启':auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
+    if(persist)await this.browser.hideLogin?.();this.status.browserOpened=false;this.scheduleBrowserIdle();
+    this.update('ready',this.requestMode==='browser'?'登录已连接，可后台读取收藏，无需保留浏览器窗口':auth.source==='config'?'已导入参考工具的登录会话，可以同步并预览收藏':auth.source==='popup'?'扫码登录成功，可以同步并预览收藏':'已连接系统浏览器，可以同步并预览收藏');
   }
-  async isAuthenticated(){await this.ready;if(this.requestMode==='browser')return this.status.connected&&!this.browserNeedsOpen;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
+  async isAuthenticated(){await this.ready;if(this.requestMode==='browser')return this.status.connected;const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});return this.status.connected&&cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
+  scheduleBrowserIdle(){
+    clearTimeout(this.browserIdle);if(!this.browser.background||this.closed)return;
+    this.browserIdle=setTimeout(async()=>{const idle=()=>!this.closed&&!this.busy&&!this.waiters.size&&!this.authenticating&&!this.verifyingIdentity&&!this.status.browserOpened;if(!idle())return;if(this.browser.connection)try{const released=await this.browser.releaseIdle?.(idle);if(released)this.browserBinding=null;else this.scheduleBrowserIdle();}catch{}},60000);this.browserIdle.unref();
+  }
   browserProfile(page){return {fetch:async(url,options={})=>{
     const u=new URL(url);if(u.origin!=='https://www.douyin.com')throw new Error('不支持的账号核验地址');
     const response=await this.browser.api.request(u.pathname,{params:Object.fromEntries(u.searchParams),method:options.method||'GET',signal:options.signal,page});
@@ -70,8 +81,11 @@ export class Collector{
   }};}
   browserFingerprint(cookies){return createHash('sha256').update(JSON.stringify(cookies.filter(c=>['sessionid','sessionid_ss','uid_tt'].includes(c.name)).map(c=>[c.name,c.domain,c.path,c.value]).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))))).digest('hex');}
   async requestBrowser(path,options){
-    if(this.browserNeedsOpen)throw new Error('请重新打开专用浏览器并连接后续读');
-    const {signal}=options,page=await this.browser.api.prepare(signal),cookies=await this.browser.api.credentials(page,signal);
+    clearTimeout(this.browserIdle);
+    const {signal}=options;let page=await this.browser.api.prepare(signal),cookies=await this.browser.api.credentials(page,signal);
+    const logged=values=>values.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!(c.expires??c.expirationDate)||(c.expires??c.expirationDate)<0||(c.expires??c.expirationDate)>Date.now()/1000));
+    if(!logged(cookies)&&this.pendingBrowserAuth&&this.browser.prepareSession){const auth=this.pendingBrowserAuth;this.pendingBrowserAuth=null;if(logged(auth.cookies)){await this.browser.prepareSession(auth,{signal});page=await this.browser.api.prepare(signal);cookies=await this.browser.api.credentials(page,signal);}}
+    this.pendingBrowserAuth=null;
     if(!cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expires||c.expires<0||c.expires>Date.now()/1000))){this.needsLogin('专用浏览器需要重新登录或验证，已有进度保留');throw new Error('请在专用浏览器完成登录并重新连接');}
     const fingerprint=this.browserFingerprint(cookies),key=this.store.getSetting('browserAccountKey'),uid=typeof key==='string'&&key.startsWith('uid:')?key.slice(4):null;
     if(!uid||!this.verifyIdentity){this.needsLogin('请在专用浏览器重新连接并确认原账号，已有资料保留');throw new Error('请在专用浏览器重新连接并确认原账号，已有资料保留');}
@@ -92,6 +106,7 @@ export class Collector{
   holdAccess(retryAfter=60){this.cancelled=true;this.store.setSetting('accessHoldUntil',Date.now()+Math.max(60,retryAfter)*1000);this.store.save();this.onAccessHold?.();this.update('attention','抖音提示访问频繁，读取与下载已暂停，请稍后手动重试');}
   async open(preferred='chrome'){
     await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前读取或下载任务');
+    clearTimeout(this.browserIdle);
     this.browser.preferred=['chrome','edge'].includes(preferred)?preferred:'chrome';
     const name=await this.browser.openLogin();this.browserBinding=null;this.status.browserOpened=true;
     this.update('login',`已打开藏匣专用 ${name==='edge'?'Edge':'Chrome'}。完成登录后回到这里点击“我已登录，连接”。`);return name;
@@ -119,7 +134,7 @@ export class Collector{
   }
   stop(){this.cancelled=true;this.syncController?.abort();this.update('idle','已停止，保留已读取内容');}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
-  async dispose(){this.closed=true;this.stop();this.cancelResolve();await this.browser.close();}
+  async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.browser.close();}
   async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false}={}){
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');
     if(!discoverOnly){
@@ -162,7 +177,7 @@ export class Collector{
     }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{
       if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);
       if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}
-      this.busy=false;this.syncController=null;this.notify();
+      this.busy=false;this.syncController=null;this.scheduleBrowserIdle();this.notify();
     }
   }
   markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
@@ -172,7 +187,7 @@ export class Collector{
       const controller=new AbortController();this.waiters.set(id,{reject:()=>controller.abort()});
       try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:controller.signal});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');const w=this.store.upsertWork(raw);this.store.save();this.notify();return w;}
       catch(e){if(e.sourceDeleted)this.markUnavailable(id);throw e;}
-      finally{this.waiters.delete(id);}
+      finally{this.waiters.delete(id);this.scheduleBrowserIdle();}
     }
     // Public-link fallback only: observe the normal page's own detail response, never synthesize a signature.
     let cleanup;

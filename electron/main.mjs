@@ -49,7 +49,7 @@ function handler(name, action) {
     } catch (error) { notify();return { ok: false, error: error.message || '操作未完成' }; }
   });
 }
-function ensureIdle() { if (collector.busy || collector.verifyingIdentity || queue.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
+function ensureIdle() { if (collector.busy || collector.authenticating || collector.verifyingIdentity || queue.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
 
 app.whenReady().then(async () => {
 try {
@@ -61,11 +61,12 @@ try {
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
   feed=new SnapshotFeed(store);
   const httpProfile=session.fromPartition('cangxia-http');
-  const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe});
+  const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe,background:!smoke&&!sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
   await collector.ready;
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   collector.onAccessHold=()=>queue.pause();
+  collector.onBrowserStop=()=>queue.pause();
   const qrProfile=session.fromPartition('persist:cangxia-popup-login');
   qrProfile.on('will-download',event=>event.preventDefault());
   qrProfile.setPermissionRequestHandler((_wc,permission,callback,details)=>callback(permission==='storage-access'&&isDouyinURL(details?.requestingUrl||'')));

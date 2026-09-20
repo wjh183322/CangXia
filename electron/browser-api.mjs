@@ -45,12 +45,14 @@ export class BrowserAPI{
  async preparePage(signal){
   const b=this.browser;await abortable(b.launch('https://www.douyin.com/user/self'),signal);signal?.throwIfAborted();
   const connection=b.connection;if(!connection)throw failure('BROWSER_CLOSED','专用浏览器已关闭，已保存读取进度');
+  if(b.background)await abortable(b.readerPage('about:blank'),signal);
   const {targetInfos}=await abortable(connection.send('Target.getTargets'),signal);
   let target=this.page?.connection===connection?targetInfos.find(t=>t.targetId===this.page.targetId):null;
   if(this.page?.connection===connection&&!target)throw failure('BROWSER_PAGE_CLOSED','用于读取的浏览器页面已关闭，请重新打开专用浏览器并连接');
-  if(!target)target=targetInfos.find(t=>t.type==='page'&&t.url.startsWith('https://www.douyin.com/'));
+  if(!target)target=b.background?targetInfos.find(t=>t.targetId===b.readerTarget):targetInfos.find(t=>t.type==='page'&&t.url.startsWith('https://www.douyin.com/'));
   if(!target)throw failure('BROWSER_PAGE','请在专用浏览器打开抖音网页并完成登录');
   const sid=await abortable(b.attach(target.targetId),signal);const page=this.page?.connection===connection&&this.page.targetId===target.targetId?this.page:{connection,targetId:target.targetId,sid};
+  if(b.background&&target.url==='about:blank')await abortable(connection.send('Page.navigate',{url:'https://www.douyin.com/user/self'},sid),signal);
   for(let i=0;i<40;i++){
    signal?.throwIfAborted();if(b.connection!==connection)throw failure('BROWSER_CLOSED','专用浏览器已关闭，已保存读取进度');
    const r=await abortable(connection.send('Runtime.evaluate',{expression:`({origin:location.origin,ready:document.readyState})`,returnByValue:true},sid),signal);

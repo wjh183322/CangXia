@@ -3,7 +3,7 @@ app.disableHardwareAcceleration();const profile=process.env.CANGXIA_LOCAL_TEST_P
 app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.once('did-finish-load',()=>{void(async()=>{
  const check=(name,value)=>{assert.ok(value,name);checks.push(name);};const call=(name,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(name)}](...${JSON.stringify(args)})`);const raw=id=>({aweme_id:id,desc:'native '+id,author:{nickname:'fixture'},video:{play_addr:{url_list:[]}}});
  try{
- let state=await call('state');check('native SQLite opens existing records in an isolated profile',state.works.length===1200&&app.getPath('userData')===profile);const title=await win.webContents.executeJavaScript('document.title');check('title and settings identify local edition 0.2.5',state.version==='0.2.5'&&title.includes('本地版 v0.2.5')&&title===win.getTitle());
+ let state=await call('state');check('native SQLite opens existing records in an isolated profile',state.works.length===1200&&app.getPath('userData')===profile);const title=await win.webContents.executeJavaScript('document.title');check('title and settings identify local edition 0.2.6',state.version==='0.2.6'&&title.includes('本地版 v0.2.6')&&title===win.getTitle());
  const http=session.fromPartition('cangxia-http'),original=http.fetch,cursors=[];let blocked=true;
  http.fetch=async(url,options)=>{const route=new URL(url).pathname;if(route==='/aweme/v1/web/user/profile/self/')return new Response(JSON.stringify({status_code:0,user:{uid:'123',nickname:'fixture'}}));if(route==='/aweme/v1/web/aweme/listcollection/'){const cursor=new URLSearchParams(options.body).get('cursor');cursors.push(cursor);if(cursor==='0')return new Response(JSON.stringify({status_code:0,aweme_list:[raw('9001'),raw('9002')],has_more:1,cursor:'30'}));if(blocked)return new Response('expired',{status:401});return new Response(JSON.stringify({status_code:0,aweme_list:[raw('9003')],has_more:0,cursor:'60'}));}throw new Error('Unexpected network call');};
  const login=path.join(path.dirname(profile),'login.json');await assert.rejects(call('importLoginConfig',login));state=await call('state');check('legacy library requests explicit original-account confirmation',state.collector.pendingAccount?.uid==='123'&&!state.collector.connected);await call('confirmLegacyAccount',state.collector.pendingAccount.token);
@@ -38,4 +38,9 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
  fs.mkdirSync('.test-output',{recursive:true});try{fs.writeFileSync('.test-output/local-desktop.png',(await win.webContents.capturePage()).toPNG());}catch{}fs.writeFileSync('.test-output/local-desktop-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});clearTimeout(deadline);app.quit();
  }catch(e){console.error(e);fs.writeFileSync('.test-output/local-desktop-result.json',JSON.stringify({ok:false,error:e.stack,checks},null,2));clearTimeout(deadline);app.exit(1);}
 })();});});
-await import(process.env.CANGXIA_LOCAL_TEST_MAIN?pathToFileURL(path.resolve(process.env.CANGXIA_LOCAL_TEST_MAIN)).href:'../electron/main.mjs');
+// This suite owns the synthetic Electron HTTP responses. Real system-browser transport
+// and QR-session handoff are exercised separately by browser-reading-desktop.mjs.
+const testMainURL=process.env.CANGXIA_LOCAL_TEST_MAIN?pathToFileURL(path.resolve(process.env.CANGXIA_LOCAL_TEST_MAIN)):new URL('../electron/main.mjs',import.meta.url);
+const {SystemBrowser:FixtureBrowser}=await import(new URL('system-browser.mjs',testMainURL));
+Object.defineProperty(FixtureBrowser.prototype,'api',{configurable:true,get(){return null;},set(){}});
+await import(testMainURL.href);
