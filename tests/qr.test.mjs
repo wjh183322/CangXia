@@ -17,9 +17,20 @@ function controller({cookieRead=async()=>[],authenticated=async()=>{}}={}){
 test('SMS identity choices are recognized before the QR and never clicked automatically',()=>{
  const result=vm.runInNewContext(qrPageScript({openLogin:true,refresh:true}),{document:{body:{innerText:'身份验证 为保障账号安全，请先完成身份验证 接收短信验证码 发送短信验证'},querySelectorAll:()=>[]}});assert.equal(result.phase,'verification');assert.equal(result.kind,'sms');
 });
-test('visible one-time-code input is detected without reading its value',()=>{
+test('identity challenge with code input is detected without reading its value',()=>{
  const input={tagName:'INPUT',getAttribute:k=>k==='autocomplete'?'one-time-code':'',getBoundingClientRect:()=>({width:200,height:30,top:10,bottom:40}),get value(){throw new Error('must not read verification code');}};
- const result=vm.runInNewContext(qrPageScript(),{document:{body:{innerText:'验证登录'},querySelectorAll:s=>s==='input,textarea'?[input]:[]},innerHeight:800,getComputedStyle:()=>({display:'block',visibility:'visible'})});assert.equal(result.kind,'sms');
+ const heading={children:[],innerText:'身份验证',getBoundingClientRect:()=>({width:200,height:30,top:10,bottom:40})};
+ const result=vm.runInNewContext(qrPageScript(),{document:{body:{innerText:'身份验证'},querySelectorAll:s=>s==='input,textarea'?[input]:s.startsWith('h1,')?[heading]:[]},innerHeight:800,getComputedStyle:()=>({display:'block',visibility:'visible'})});assert.equal(result.kind,'sms');
+});
+
+test('ordinary side-by-side QR and SMS login form keeps the compact QR flow',()=>{
+ const rect={x:100,y:100,width:180,height:180,top:100,bottom:280};
+ const qr={tagName:'IMG',children:[],id:'',parentElement:null,currentSrc:'data:image/png;base64,TEST_ONLY',getBoundingClientRect:()=>rect,getAttribute:k=>k==='alt'?'登录二维码':''};
+ const input={tagName:'INPUT',getBoundingClientRect:()=>({...rect,width:200,height:30}),getAttribute:k=>k==='placeholder'?'请输入验证码':k==='autocomplete'?'one-time-code':'',get value(){throw Error('must not read input');}};
+ const context={document:{body:{innerText:'登录后即可观看喜欢、收藏的视频\n扫码登录\n验证码登录\n密码登录\n获取验证码'},querySelectorAll:s=>s==='input,textarea'?[input]:s==='img,canvas,svg'?[qr]:[]},innerHeight:800,getComputedStyle:()=>({display:'block',visibility:'visible'})};
+ assert.equal(vm.runInNewContext(qrPageScript(),context).phase,'ready');
+ context.document.querySelectorAll=s=>s==='input,textarea'?[input]:[];
+ assert.equal(vm.runInNewContext(qrPageScript(),context).phase,'loading');
 });
 test('ordinary SMS login tab alone is not classified as a verification challenge',()=>{
  const result=vm.runInNewContext(qrPageScript(),{document:{body:{innerText:'扫码登录 短信验证码登录'},querySelectorAll:()=>[]}});assert.equal(result.phase,'loading');
