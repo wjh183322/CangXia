@@ -8,7 +8,7 @@ export class QrLogin{
   async start({forcePage=false}={}){
     if(this.active)return;
     this.authController?.abort();this.authController=new AbortController();
-    this.active=true;this.manualPage=false;this.lastImageUrl=null;this.lastImage=null;const generation=++this.generation;this.update({phase:'loading',image:null,message:'正在获取抖音登录二维码'});
+    this.active=true;this.manualPage=false;this.lastImageUrl=null;this.lastImage=null;const generation=++this.generation;this.update({phase:'loading',image:null,inline:false,pageId:null,message:'正在获取抖音登录二维码'});
     try{
       const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
       if(!this.active||generation!==this.generation)return;
@@ -32,7 +32,7 @@ export class QrLogin{
   async complete(cookies,generation){
     if(generation!==this.generation||this.current.phase==='verifying')return;
     this.update({phase:'verifying',image:null,message:'扫码已完成，正在核对抖音账号'});
-    try{await this.onAuthenticated({cookies,userAgent:this.userAgent,source:'popup'},{signal:this.authController?.signal});}catch(e){if(generation!==this.generation)return;if(['ACCOUNT_MISMATCH','ACCOUNT_UNVERIFIED'].includes(e.code)){const win=this.window;this.window=null;if(win&&!win.isDestroyed())win.close();await this.profile.clearStorageData({storages:['cookies']});}this.active=false;this.update({phase:e.code==='LEGACY_CONFIRM_REQUIRED'?'confirm-account':'error',image:null,message:e.message});return;}
+    try{await this.onAuthenticated({cookies,userAgent:this.userAgent,source:'popup'},{signal:this.authController?.signal});}catch(e){if(generation!==this.generation)return;if(['ACCOUNT_MISMATCH','ACCOUNT_UNVERIFIED'].includes(e.code)){const win=this.window;this.window=null;if(win&&!win.isDestroyed())win.close();await this.profile.clearStorageData({storages:['cookies']});}if(e.code==='LEGACY_CONFIRM_REQUIRED')this.window?.hide();this.active=false;this.update({phase:e.code==='LEGACY_CONFIRM_REQUIRED'?'confirm-account':'error',image:null,message:e.message});return;}
     if(generation!==this.generation)return;
     this.active=false;this.update({phase:'success',image:null,message:'登录成功，已连接账号'});
     const win=this.window;this.window=null;if(win&&!win.isDestroyed())win.close();
@@ -89,5 +89,5 @@ export class QrLogin{
     if(this.loggedIn(cookies)){if(!this.authController||this.authController.signal.aborted)this.authController=new AbortController();await this.complete(cookies,this.generation);return;}
     await this.showPage();this.update({phase:'verification',image:null,message:'尚未收到登录会话，请在弹出的原登录页检查短信、滑块或手机确认；完成后再检查'});
   }
-  cancel(){this.authController?.abort();this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,message:''});if(win&&!win.isDestroyed())win.close();}
+  cancel(){this.authController?.abort();this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,inline:false,pageId:null,message:''});if(win&&!win.isDestroyed())win.close();}
 }
