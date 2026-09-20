@@ -1,6 +1,8 @@
 # 藏匣 CangXia
 
-稳定版本：**v0.1.7** · Windows 10/11 64位 · 分支 `main`
+本地版优化预览：**[0.2.0](https://github.com/wjh183322/CangXia/releases/tag/local-v0.2.0)**，在 `codex/local` 分支开发。加入 SQLite 增量保存、界面差量更新、读取进度恢复和登录验证引导。升级前先退出 0.1.7，保留原数据目录；见[升级与验证说明](docs/releases/local-v0.2.0.md)。NAS 版和备份版保持独立。
+
+稳定基线：**v0.1.7** · Windows 10/11 64位；本地版后续开发使用 `codex/local` 分支。
 
 [下载 v0.1.7](https://github.com/wjh183322/CangXia/releases/tag/v0.1.7) · [历史 v0.1.0](https://github.com/wjh183322/CangXia/releases/tag/v0.1.0) · [变更记录](CHANGELOG.md)
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {validAccountIdentity} from './account-identity.mjs';
 
 export function validateAuth(input){
   if(!input||!Array.isArray(input.cookies)||input.cookies.length>300)throw new Error('登录配置格式无效');
@@ -12,7 +13,7 @@ export function validateAuth(input){
   }
   if(!cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value))throw new Error('配置文件不含有效登录会话，请使用已登录的参考工具配置');
   if(typeof input.userAgent!=='string'||!input.userAgent||input.userAgent.length>1500||/[\r\n\0]/.test(input.userAgent))throw new Error('配置文件缺少有效浏览器信息');
-  return {cookies,userAgent:input.userAgent,source:['chrome','edge','config','popup'].includes(input.source)?input.source:'config',ignoredCookies};
+  return {cookies,userAgent:input.userAgent,source:['chrome','edge','config','popup'].includes(input.source)?input.source:'config',ignoredCookies,...(validAccountIdentity(input.identity)?{identity:{uid:input.identity.uid,nickname:typeof input.identity.nickname==='string'?input.identity.nickname.slice(0,100):''}}:{})};
 }
 export function parseReferenceConfig(text){
   if(text.length>2*1024*1024)throw new Error('配置文件过大');

@@ -6,6 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Store } from './store.mjs';
+import {SnapshotFeed} from './snapshot-feed.mjs';
+import {createDiagnostics} from './diagnostics.mjs';
+import {verifyAccountIdentity} from './account-identity.mjs';
 import { Collector } from './account-collector.mjs';
 import { AuthVault } from './auth-data.mjs';
 import { SystemBrowser } from './system-browser.mjs';
@@ -19,14 +22,19 @@ const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
 if (smoke || sampleProbe || qrProbe) app.setPath('userData', path.resolve('.test-output', qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
 app.setName('藏匣');
+if(process.env.CANGXIA_LOCAL_TEST_PROFILE)app.setPath('userData',process.env.CANGXIA_LOCAL_TEST_PROFILE);
+else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getPath('appData'),'藏匣'));
+fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let window, store, collector, queue, qrLogin, timer, quitting=false;
+let window, store, collector, queue, qrLogin, timer, quitting=false,feed,diagnostics;
 const deleteIntents=new Map();
-function snapshot() { return { ...store.snapshot(), collector: { ...collector.status, busy: collector.busy }, queue: queue.state(), qr:qrLogin?.state() }; }
+const stateTransfers=new Map();
+function runtimeState(){return {collector:{...collector.status,busy:collector.busy},queue:queue.state(),qr:qrLogin?.state(),syncProgress:store.syncProgress?.()||[]};}
+function snapshot() { return feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
-  clearTimeout(timer); timer = setTimeout(() => { if (window && !window.isDestroyed()) window.webContents.send('cangxia:change', snapshot()); }, 120);
+  clearTimeout(timer); timer = setTimeout(() => { if (window && !window.isDestroyed()) window.webContents.send('cangxia:change', feed.frame(runtimeState())); }, 250);
 }
 function ids(value) {
   if (!Array.isArray(value) || value.length > 100000 || value.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('作品选择无效');
@@ -37,18 +45,23 @@ function handler(name, action) {
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
       return { ok: true, data: await action(...args) };
-    } catch (error) { return { ok: false, error: error.message || '操作未完成' }; }
+    } catch (error) { notify();return { ok: false, error: error.message || '操作未完成' }; }
   });
 }
-function ensureIdle() { if (collector.busy || queue.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取结束，再进行此操作'); }
+function ensureIdle() { if (collector.busy || collector.verifyingIdentity || queue.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
 
 app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
+  diagnostics=createDiagnostics(profile);
+  diagnostics.record({event:'startup',version:app.getVersion()});
+  process.on('uncaughtExceptionMonitor',error=>diagnostics.record({event:'uncaught',name:error.name,code:error.code}));
+  app.on('child-process-gone',(_event,details)=>diagnostics.record({event:'child-process-gone',reason:details.reason,exitCode:details.exitCode}));
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣'));
+  feed=new SnapshotFeed(store);
   const httpProfile=session.fromPartition('cangxia-http');
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe});
-  collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser});
+  collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
   await collector.ready;
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   collector.onAccessHold=()=>queue.pause();
@@ -56,7 +69,7 @@ try {
   qrProfile.on('will-download',event=>event.preventDefault());
   qrProfile.setPermissionRequestHandler((_wc,permission,callback,details)=>callback(permission==='storage-access'&&isDouyinURL(details?.requestingUrl||'')));
   qrProfile.setPermissionCheckHandler((_wc,permission,origin)=>permission==='storage-access'&&isDouyinURL(origin||''));
-  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:auth=>collector.applyAuth(auth),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
+  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:(auth,options)=>collector.applyAuth(auth,true,options),onLimit:()=>collector.holdAccess(),createWindow:()=>new BrowserWindow({width:1000,height:800,parent:window,title:'藏匣 · 抖音登录验证',show:false,skipTaskbar:true,autoHideMenuBar:true,backgroundColor:'#ffffff',webPreferences:{partition:'persist:cangxia-popup-login',contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}})});
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
   const cachePending = new Map();
   protocol.handle('app-media', async request => {
@@ -96,11 +109,19 @@ try {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  handler('state', () => snapshot());
+  handler('state', () => {
+    const state=snapshot();if(state.works.length<=1000)return state;
+    for(const [id,transfer]of stateTransfers)if(transfer.expires<Date.now())stateTransfers.delete(id);
+    if(stateTransfers.size>=2)stateTransfers.delete(stateTransfers.keys().next().value);
+    const token=randomUUID(),{works,...head}=state;stateTransfers.set(token,{works,expires:Date.now()+120000});return {chunkedState:true,token,head,total:works.length};
+  });
+  handler('stateChunk',(token,offset)=>{const transfer=stateTransfers.get(token);if(!transfer||transfer.expires<Date.now()||!Number.isSafeInteger(offset)||offset<0||offset>=transfer.works.length)throw new Error('界面状态已更新，请重新加载');const works=transfer.works.slice(offset,offset+250),done=offset+works.length>=transfer.works.length;if(done)stateTransfers.delete(token);return {works,done};});
   handler('openAccount', preferred => {ensureIdle();return collector.open(preferred);});
-  handler('startQrLogin',()=>{ensureIdle();collector.assertNotCoolingDown();return qrLogin.start();});
+  handler('startQrLogin',async()=>{ensureIdle();collector.assertNotCoolingDown();if(collector.status.needsLogin){qrLogin.cancel();await qrProfile.clearStorageData({storages:['cookies']});}return qrLogin.start();});
+  handler('confirmLegacyAccount',async token=>{ensureIdle();await collector.confirmLegacyAccount(token);qrLogin.cancel();notify();return snapshot();});
+  handler('openDiagnostics',()=>shell.openPath(diagnostics.dir));
   handler('refreshQrLogin',()=>{collector.assertNotCoolingDown();return qrLogin.refresh();});
-  handler('cancelQrLogin',()=>qrLogin.cancel());
+  handler('cancelQrLogin',()=>{qrLogin.cancel();collector.pendingAuth=null;collector.status.pendingAccount=null;notify();});
   handler('showQrLoginPage',()=>qrLogin.showPage());
   handler('finishLogin', () => {ensureIdle();return collector.finishLogin();});
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
@@ -120,7 +141,7 @@ try {
   handler('download', selected => { if (collector.busy || collector.waiters.size) throw new Error('请等待读取完成再下载'); queue.enqueue(ids(selected)); return true; });
   handler('pause', () => queue.pause());
   handler('resume', () => { if (collector.busy) throw new Error('请等待同步完成'); queue.resume(); });
-  handler('refreshFiles', () => { notify(); return snapshot(); });
+  handler('refreshFiles', () => { store.invalidateViews();notify(); return snapshot(); });
   handler('chooseRoot', async value => {
     ensureIdle();
     if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
@@ -164,12 +185,14 @@ try {
       store.assertDirectory(d.path);
       if (fs.existsSync(d.path)) await shell.trashItem(d.path);
       store.db.run('DELETE FROM downloads WHERE id=?', [d.id]);
+      store.viewCache.delete(d.id);
     } catch (e) { failed.push(e.message); }
     store.save(); notify(); if (failed.length) throw new Error(`部分文件删除失败：${failed.join('；')}`); return true;
   });
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
   window.on('focus', notify);
+  window.webContents.on('render-process-gone',(_event,details)=>{diagnostics.record({event:'render-process-gone',reason:details.reason,exitCode:details.exitCode});collector.stop();queue.pause();void dialog.showMessageBox(window,{type:'warning',message:'界面进程已退出，已提交的读取进度仍保留',detail:'可以重新加载界面后继续。诊断记录保存在本机 diagnostics 目录。',buttons:['重新加载','退出'],defaultId:0,cancelId:1}).then(({response})=>{if(response===0)window.reload();else app.quit();});});
   window.on('closed',()=>{if(!quitting)app.quit();});
   if(qrProbe){
     await qrLogin.start();const deadline=Date.now()+35000;
@@ -222,8 +245,8 @@ app.on('before-quit', event => {
   if(quitting)return;
   event.preventDefault();quitting=true;qrLogin?.cancel();queue?.pause();const browserClose=collector?.dispose();clearTimeout(timer);
   void (async()=>{
-    for(let i=0;i<30&&queue?.running;i++)await new Promise(r=>setTimeout(r,100));
+    for(let i=0;i<50&&(queue?.running||collector?.busy);i++)await new Promise(r=>setTimeout(r,100));
     await Promise.race([browserClose||Promise.resolve(),new Promise(r=>setTimeout(r,3000))]);
-    store?.close();app.exit(0);
+    diagnostics?.record({event:'shutdown',reason:collector?.busy?'pending-request':'normal'});diagnostics?.close();if(!collector?.busy)store?.close();app.exit(0);
   })();
 });

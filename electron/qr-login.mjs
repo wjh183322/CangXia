@@ -7,6 +7,7 @@ export class QrLogin{
   update(change){if(Object.entries(change).every(([k,v])=>this.current[k]===v))return;this.current={...this.current,...change};this.onChange();}
   async start(){
     if(this.active)return;
+    this.authController?.abort();this.authController=new AbortController();
     this.active=true;this.manualPage=false;this.lastImageUrl=null;this.lastImage=null;const generation=++this.generation;this.update({phase:'loading',image:null,message:'正在获取抖音登录二维码'});
     try{
       const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
@@ -27,10 +28,11 @@ export class QrLogin{
       void this.watch(generation);
     }catch(e){if(generation===this.generation){this.active=false;this.update({phase:'error',message:e.message});}}
   }
-  loggedIn(cookies){return cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value);}
+  loggedIn(cookies){return cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value&&(!c.expirationDate||c.expirationDate>Date.now()/1000));}
   async complete(cookies,generation){
     if(generation!==this.generation)return;
-    try{await this.onAuthenticated({cookies,userAgent:this.userAgent,source:'popup'});}catch(e){this.active=false;this.update({phase:'error',image:null,message:e.message});return;}
+    this.update({phase:'verifying',image:null,message:'扫码已完成，正在核对抖音账号'});
+    try{await this.onAuthenticated({cookies,userAgent:this.userAgent,source:'popup'},{signal:this.authController?.signal});}catch(e){if(generation!==this.generation)return;if(['ACCOUNT_MISMATCH','ACCOUNT_UNVERIFIED'].includes(e.code)){const win=this.window;this.window=null;if(win&&!win.isDestroyed())win.close();await this.profile.clearStorageData({storages:['cookies']});}this.active=false;this.update({phase:'error',image:null,message:e.message});return;}
     if(generation!==this.generation)return;
     this.active=false;this.update({phase:'success',image:null,message:'登录成功，已连接账号'});
     const win=this.window;this.window=null;if(win&&!win.isDestroyed())win.close();
@@ -68,10 +70,11 @@ export class QrLogin{
   async refresh(){
     if(Date.now()-(this.lastRefresh||0)<5000)throw new Error('请稍候再刷新二维码');this.lastRefresh=Date.now();
     this.lastImageUrl=null;this.lastImage=null;
+    if(this.current.phase==='error'){this.cancel();await this.profile.clearStorageData({storages:['cookies']});return this.start();}
     if(!this.active)return this.start();
     if(!this.window||this.window.isDestroyed())return this.start();
     const result=await this.window.webContents.executeJavaScript(qrPageScript({refresh:true}));this.update({...result,image:null});
   }
   showPage(){this.manualPage=true;if(this.window&&!this.window.isDestroyed()){this.window.setSkipTaskbar(false);this.window.show();this.window.focus();}}
-  cancel(){this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,message:''});if(win&&!win.isDestroyed())win.close();}
+  cancel(){this.authController?.abort();this.active=false;this.generation++;const win=this.window;this.window=null;this.update({phase:'idle',image:null,message:''});if(win&&!win.isDestroyed())win.close();}
 }
