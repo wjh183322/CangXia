@@ -70,7 +70,7 @@ try {
   qrProfile.on('will-download',event=>event.preventDefault());
   qrProfile.setPermissionRequestHandler((_wc,permission,callback,details)=>callback(permission==='storage-access'&&isDouyinURL(details?.requestingUrl||'')));
   qrProfile.setPermissionCheckHandler((_wc,permission,origin)=>permission==='storage-access'&&isDouyinURL(origin||''));
-  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:(auth,options)=>collector.applyAuth(auth,true,options),onLimit:()=>collector.holdAccess(),createWindow:()=>new VerificationView({parent:()=>window,partition:'persist:cangxia-popup-login',onVisibility:(inline,pageId)=>qrLogin.update({inline,pageId,pageRevision:(qrLogin.state().pageRevision||0)+1})})});
+  qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:(auth,options)=>collector.applyAuth(auth,true,options),onLimit:()=>collector.holdAccess(),createWindow:()=>new VerificationView({parent:()=>window,partition:'persist:cangxia-popup-login',onVisibility:(inline,pageId,panelFound=false)=>qrLogin.update({inline,pageId,panelFound,pageRevision:(qrLogin.state().pageRevision||0)+1})})});
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
   const cachePending = new Map();
   protocol.handle('app-media', async request => {

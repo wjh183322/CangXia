@@ -82,7 +82,7 @@ export class QrLogin{
   }
   async showPage(){
     if(!this.window||this.window.isDestroyed()){if(this.active&&this.current.phase==='verifying')throw new Error('正在核对账号，请等待结果后再打开验证页');this.active=false;await this.start({forcePage:true});}
-    this.manualPage=true;if(this.window&&!this.window.isDestroyed()){this.window.setSkipTaskbar(false);this.window.show();this.window.focus();}
+    this.manualPage=true;if(this.window&&!this.window.isDestroyed()){this.window.setSkipTaskbar(false);await this.window.show();this.window?.focus();}
   }
   async check(){
     const cookies=await this.profile.cookies.get({url:'https://www.douyin.com/'});
