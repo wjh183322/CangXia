@@ -1,8 +1,9 @@
+import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import os from 'node:os';import {Worker} from 'node:worker_threads';import {randomUUID} from 'node:crypto';
-import {Store} from './store.mjs';import {DownloadQueue} from './downloads.mjs';import {serializeShared,digest,child,headFromLog} from './nas-format.mjs';import {requireInside,TOTAL} from './model.mjs';
+import {Store} from './store.mjs';import {SqliteStore} from './sqlite-store.mjs';import {DownloadQueue} from './downloads.mjs';import {serializeShared,digest,child,headFromLog} from './nas-format.mjs';import {requireInside,TOTAL} from './model.mjs';
 
 export class NasLibrary{
- constructor(profile,onChange,onLost){this.profile=profile;this.onChange=onChange;this.onLost=onLost;this.pending=new Map();this.status={mode:'local',backupDeferred:true};this.dirty=false;this.writable=false;this.assetStates={};this.serial=Promise.resolve();
+ constructor(profile,onChange,onLost){this.profile=profile;this.onChange=onChange;this.onLost=onLost;this.pending=new Map();this.stores=new Set();this.status={mode:'local',backupDeferred:true};this.dirty=false;this.writable=false;this.assetStates={};this.serial=Promise.resolve();
   this.configFile=path.join(profile,'library-location.json');this.deviceFile=path.join(profile,'library-device-id');
   fs.mkdirSync(profile,{recursive:true});if(!fs.existsSync(this.deviceFile))fs.writeFileSync(this.deviceFile,randomUUID());this.deviceId=fs.readFileSync(this.deviceFile,'utf8').trim();
  }
@@ -26,26 +27,34 @@ export class NasLibrary{
   this.pending.set(id,p);p.arm(action==='disconnect'?5000:2100000);options.signal?.addEventListener('abort',abort,{once:true});worker.postMessage({id,action,args});
  });}
  assertWritable(){if(!this.writable||!this.status.connected)throw new Error(this.status.message||'NAS 媒体库当前只读');}
- context(){return {mediaRoot:path.join(this.root,'媒体'),deviceSettings:{},assets:this.assetStates,relocations:new Set(),canWrite:()=>this.writable&&this.status.connected,assertWritable:()=>this.assertWritable(),changed:()=>this.changed()};}
+ context(){const file=path.join(this.profile,'nas-device-settings.json');let settings={};try{settings=JSON.parse(fs.readFileSync(file,'utf8'));}catch{}const id=this.libraryId;settings[id]||={};return {mediaRoot:path.join(this.root,'媒体'),deviceSettings:settings[id],getDeviceSetting:key=>settings[id][key]??null,setDeviceSetting:(key,value)=>{settings[id][key]=value;fs.writeFileSync(file+'.tmp',JSON.stringify(settings));fs.renameSync(file+'.tmp',file);},assets:this.assetStates,relocations:new Set(),canWrite:()=>this.writable&&this.status.connected,assertWritable:()=>this.assertWritable(),changed:()=>this.changed()};}
+ cacheFile(id){const base=path.join(this.profile,'nas-cache');let name=id+'.sqlite';try{const candidate=fs.readFileSync(path.join(base,id+'.active'),'utf8').trim();if(candidate.startsWith(id+'-')&&/^[a-f0-9-]+\.sqlite$/.test(candidate))name=candidate;}catch{}return path.join(base,name);}
+ rememberCache(id,file){const pointer=path.join(this.profile,'nas-cache',id+'.active');fs.writeFileSync(pointer+'.tmp',path.basename(file));fs.renameSync(pointer+'.tmp',pointer);}
  async loadStore(bytes,id){
-  const file=path.join(this.profile,'nas-cache',id+'.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});
-  if(bytes){if(fs.existsSync(file+'.pending')&&fs.existsSync(file)){const recovery=file+'.recovery-'+Date.now();fs.copyFileSync(file,recovery);this.status.recovery=recovery;fs.unlinkSync(file+'.pending');}
-    fs.writeFileSync(file,Buffer.from(bytes));}
+  const previous=this.cacheFile(id);let file=previous;fs.mkdirSync(path.dirname(file),{recursive:true});
+  let same=false;if(bytes)try{same=fs.existsSync(previous)&&fs.readFileSync(previous+'.remotehash','utf8')===digest(Buffer.from(bytes));}catch{}
+  if(bytes&&fs.existsSync(previous+'.pending')){
+    let reading=false;if(same&&this.writable){let check;try{check=new DatabaseSync(previous,{readOnly:true});if(check.prepare("SELECT 1 FROM sqlite_master WHERE name='sync_runs'").get())reading=check.prepare('SELECT body FROM sync_runs').all().some(r=>JSON.parse(r.body).status!=='complete');}catch{}finally{check?.close();}}
+    if(reading){const recovery=previous+'.recovery-'+Date.now();await SqliteStore.copyFile(previous,recovery);this.status.recovery=recovery;}else same=false;
+  }
+  if(bytes&&!same){if(fs.existsSync(previous+'.pending')&&fs.existsSync(previous)){const recovery=previous+'.recovery-'+Date.now();await SqliteStore.copyFile(previous,recovery);this.status.recovery=recovery;}
+    file=path.join(path.dirname(previous),id+'-'+randomUUID()+'.sqlite');fs.writeFileSync(file,Buffer.from(bytes));}
   if(!fs.existsSync(file))throw new Error('没有可离线浏览的本机缓存');
-  const s=await Store.open(file,path.join(this.root,'媒体'));
+  const s=await Store.open(file,path.join(this.root,'媒体'));this.stores.add(s);s.onClose=()=>this.stores.delete(s);
   for(const d of s.all('downloads')){const relative=path.isAbsolute(d.path)?path.relative(s.getSetting('root')||path.join(this.root,'媒体'),d.path):d.path;d.path=child(path.join(this.root,'媒体'),relative);s.put('downloads',d.id,d);}
   s.setSetting('root',path.join(this.root,'媒体'));s.save();this.store=s;s.nas=this.context();
   try{this.assetStates=JSON.parse(fs.readFileSync(file+'.assets','utf8'));s.nas.assets=this.assetStates;}catch{}
-  this.dirty=false;this.lastHash=digest(serializeShared(s));if(!bytes&&fs.existsSync(file+'.pending')){this.status.pending=true;this.status.recovery=file;}return s;
+  if(bytes)fs.writeFileSync(file+'.remotehash',digest(Buffer.from(bytes)));this.rememberCache(id,file);
+  this.dirty=false;this.lastHash=bytes?digest(Buffer.from(bytes)):digest(serializeShared(s));if(fs.existsSync(file+'.pending')){this.status.pending=true;this.status.recovery=file;}return s;
  }
  async open(root,{create=false}={}){
-  await this.close();this.store=null;this.dirty=false;this.lastHash=null;this.assetStates={};this.root=path.resolve(root);this.startWorker();this.status={mode:'nas',root:this.root,connected:false,writable:false,message:'正在连接 NAS…',backupDeferred:true};this.emit();
+  await this.close({keepStores:true});this.store=null;this.dirty=false;this.lastHash=null;this.assetStates={};this.root=path.resolve(root);this.startWorker();this.status={mode:'nas',root:this.root,connected:false,writable:false,message:'正在连接 NAS…',backupDeferred:true};this.emit();
   try{
    const info=await this.call('connect',{root:this.root,create,deviceId:this.deviceId,device:os.hostname().slice(0,40)});this.libraryId=info.manifest.id;this.writable=info.writable;this.revision=info.head?.revision||0;
    this.status={...this.status,libraryId:this.libraryId,connected:true,writable:this.writable,message:this.writable?'NAS 已连接 · 当前电脑可写':'其他电脑占用写入锁 · 当前只读'};
    if(!create){await this.loadStore(info.bytes,this.libraryId);await this.pruneDeletedDownloads();await this.refreshFiles();}
    this.dirty=false;this.installPoll();this.emit();return info;
-  }catch(e){this.fail(e.message);await this.close();throw e;}
+  }catch(e){this.fail(e.message);await this.close({keepStores:true});throw e;}
  }
  remember(){fs.writeFileSync(this.configFile,JSON.stringify({mode:'nas',root:this.root,id:this.libraryId}));}
  async restore(){const c=this.selection;if(c?.mode!=='nas')return null;try{await this.open(c.root);return this.store;}catch{this.root=c.root;this.libraryId=c.id;await this.loadStore(null,c.id);this.status={...this.status,mode:'nas',root:c.root,message:'NAS 无法连接，显示本机缓存；修改操作已停用',connected:false,writable:false};return this.store;}}
@@ -56,7 +65,7 @@ export class NasLibrary{
    if(!this.dirty)return;this.assertWritable();const bytes=serializeShared(this.store),hash=digest(bytes);
    if(hash===this.lastHash){this.dirty=false;this.status.pending=false;try{fs.unlinkSync(this.store.file+'.pending');}catch{}return;}
    this.status.saving=true;this.emit();
-   try{const head=await this.call('commit',{bytes});this.lastHeartbeat=Date.now();this.revision=head.revision;this.lastHash=hash;
+   try{const head=await this.call('commit',{bytes});this.lastHeartbeat=Date.now();this.revision=head.revision;this.lastHash=hash;fs.writeFileSync(this.store.file+'.remotehash',hash);
     if(digest(serializeShared(this.store))===hash){this.dirty=false;this.status.pending=false;try{fs.unlinkSync(this.store.file+'.pending');}catch{}}
     this.status.lastSaved=head.time;if(this.writable&&!this.status.migrating)this.status.message='NAS 已连接 · 当前电脑可写';
    }finally{this.status.saving=false;this.emit();}
@@ -64,7 +73,7 @@ export class NasLibrary{
  }
  records(){return this.store.all('downloads').map(d=>({...d,relative:path.relative(this.root,d.path).split(path.sep).join('/')}));}
  async pruneDeletedDownloads(){if(!this.writable||!this.status.connected)return [];let removed;try{removed=await this.call('findDeleted',{records:this.records()});this.assertWritable();this.store.forgetDownloads(removed);await this.flush();this.onPruned?.(removed);return removed;}catch(e){this.fail(e.message);throw e;}}
- async refreshFiles(ids){if(!this.status.connected)throw new Error('NAS 离线，不能据此判断文件已删除');const records=this.records().filter(d=>!ids||ids.includes(d.id));let states;try{states=await this.call('scan',{records});}catch(e){this.fail(e.message);throw e;}for(const [key,state]of Object.entries(states)){if(state.error)this.assetStates[key]={...this.assetStates[key],error:state.error};else this.assetStates[key]=state;}if(this.store.nas)this.store.nas.assets=this.assetStates;fs.writeFileSync(this.store.file+'.assets',JSON.stringify(this.assetStates));this.emit();return states;}
+ async refreshFiles(ids){if(!this.status.connected)throw new Error('NAS 离线，不能据此判断文件已删除');const records=this.records().filter(d=>!ids||ids.includes(d.id));let states;try{states=await this.call('scan',{records});}catch(e){this.fail(e.message);throw e;}for(const [key,state]of Object.entries(states)){if(state.error)this.assetStates[key]={...this.assetStates[key],error:state.error};else this.assetStates[key]=state;}if(this.store.nas)this.store.nas.assets=this.assetStates;this.store.invalidateViews();fs.writeFileSync(this.store.file+'.assets',JSON.stringify(this.assetStates));this.emit();return states;}
  async checkRepairs(ids){await this.refreshFiles(ids);const items=ids.map(id=>{const w=this.store.work(id),d=this.store.download(id);if(!w)return {id,name:id,status:'error',error:'作品不存在',missing:[]};const targets=w.type==='video'?[['video','视频'],['cover','高清单图']]:w.images.map(i=>['image-'+i.index,'图片 '+(i.index+1)]);targets.push(['metadata','作品信息']);const missing=[],errors=[];for(const [key,label]of targets){const state=this.assetStates[id+':'+key];if(state?.error)errors.push(state.error);else if(!d?.assets?.some(a=>a.key===key)||!state?.exists)missing.push({key,label,reason:'尚未保存或文件缺失/大小异常'});}return {id,name:w.name,status:errors.length?'error':missing.length?'missing':'complete',missing,error:errors.join('；')};});return {items,complete:items.filter(i=>i.status==='complete').length,missing:items.filter(i=>i.status==='missing').length,errors:items.filter(i=>i.status==='error').length};}
  async uploadRecord(record,sourcePath,options={}){
   const previousProgress=this.commitProgress;this.commitProgress=options.onProgress;try{
@@ -84,12 +93,12 @@ export class NasLibrary{
  async saveWork(job,signal,collector,fetchMedia,notify){
   this.deferCommits=(this.deferCommits||0)+1;clearTimeout(this.saveTimer);try{
   this.assertWritable();const report=await this.checkRepairs([job.id]);if(report.errors)throw new Error(report.items[0].error);if(!report.missing){job.message='文件完整，无需补齐';return;}
-  const stagingRoot=path.join(this.profile,'nas-staging');fs.mkdirSync(stagingRoot,{recursive:true});const dir=fs.mkdtempSync(path.join(stagingRoot,'work-'));let scratch;
+  const stagingRoot=path.join(this.profile,'nas-staging');fs.mkdirSync(stagingRoot,{recursive:true});if(!/^\d+$/.test(job.id)||!/^[a-f0-9-]+$/.test(this.libraryId))throw new Error('暂存任务标识无效');const dir=requireInside(stagingRoot,path.join(stagingRoot,this.libraryId,job.id));fs.mkdirSync(dir,{recursive:true});let scratch;
   try{
     scratch=await Store.open(path.join(dir,'work.sqlite'),path.join(dir,'媒体'));const w=this.store.work(job.id);scratch.put('works',w.id,w);scratch.put('local_tags',w.id,{id:w.id,tags:this.store.get('local_tags',w.id)?.tags||[]});
-    const original=this.store.download(w.id),destination=scratch.destination(w.id).dir;fs.mkdirSync(destination,{recursive:true});const existing=[];
-    if(original)for(const a of original.assets||[])if(this.assetStates[w.id+':'+a.key]?.exists){if(signal.aborted)throw new Error('已暂停');await this.call('copyOut',{source:path.relative(this.root,path.join(original.path,a.file)).split(path.sep).join('/'),destination:path.join(destination,a.file),size:a.size});existing.push(a);}
-    if(original)scratch.put('downloads',w.id,{...original,path:destination,collectionId:TOTAL,assets:existing});
+    const original=this.store.download(w.id),destination=scratch.destination(w.id).dir;fs.mkdirSync(destination,{recursive:true});const existing=[...(scratch.download(w.id)?.assets||[])];
+    if(original)for(const a of original.assets||[])if(this.assetStates[w.id+':'+a.key]?.exists){if(existing.some(saved=>saved.key===a.key&&scratch.assetExists({path:destination},saved)))continue;if(signal.aborted)throw new Error('已暂停');await this.call('copyOut',{source:path.relative(this.root,path.join(original.path,a.file)).split(path.sep).join('/'),destination:path.join(destination,a.file),size:a.size});existing.push(a);}
+    if(original||existing.length)scratch.put('downloads',w.id,{...original,...scratch.download(w.id),id:w.id,path:destination,collectionId:TOTAL,assets:existing});
     const q=new DownloadQueue(scratch,{resolveWork:async id=>{const fresh=await collector.resolveWork(id);if(fresh)scratch.put('works',id,fresh);return fresh;}},fetchMedia,notify);
     let failure;try{await q.saveWork(job,signal);}catch(e){failure=e;}
     if(signal.aborted)throw failure||new Error('已暂停，临时文件保留');
@@ -101,15 +110,15 @@ export class NasLibrary{
  }
  async migrate(source,target){
   await this.open(target,{create:true});if(!this.writable)throw new Error('NAS 媒体库正在被使用，不能迁移');
-  const id=this.libraryId,file=path.join(this.profile,'nas-cache',id+'.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,source.db.export());
-  const s=await Store.open(file,path.join(target,'媒体'));const originals=s.all('downloads');s.db.run('DELETE FROM downloads');s.setSetting('root',path.join(target,'媒体'));this.store=s;s.nas=this.context();this.status.migrating=true;this.suppress=true;this.emit();
+  const id=this.libraryId,file=path.join(this.profile,'nas-cache',id+'-'+randomUUID()+'.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,source.db.export());
+  const s=await Store.open(file,path.join(target,'媒体'));this.stores.add(s);s.onClose=()=>this.stores.delete(s);const originals=s.all('downloads');s.db.run('DELETE FROM downloads');s.setSetting('root',path.join(target,'媒体'));this.store=s;s.nas=this.context();this.status.migrating=true;this.suppress=true;this.emit();
   try{
     let count=0;
     for(const d of originals){const valid=d.assets.filter(a=>source.assetExists(d,a));if(!valid.length)continue;
       this.status.message=`正在复制 ${++count}/${originals.length}：${source.work(d.id)?.name||d.id}`;this.emit();
       await this.uploadRecord({...d,assets:valid,state:valid.length===d.assets.length?d.state:'partial'},d.path);
     }
-    this.suppress=false;this.dirty=true;s.save();await this.flush();this.remember();this.status.migrating=false;this.status.message='迁移完成，原本机文件已保留';this.emit();return s;
+    this.suppress=false;this.dirty=true;s.save();await this.flush();this.rememberCache(id,file);this.remember();this.status.migrating=false;this.status.message='迁移完成，原本机文件已保留';this.emit();return s;
   }catch(e){this.suppress=false;this.status.migrating=false;this.fail('迁移未完成，原本机库未改变：'+e.message);await this.close();throw e;}
  }
  async deleteFiles(ids){
@@ -140,7 +149,7 @@ export class NasLibrary{
   if(free!==null&&free<bytes+source.db.export().length*3)throw new Error('目标可用空间不足，无法复制当前媒体库');
   return {root,works:source.all('works').length,files,bytes,missing,free};
  }
- installPoll(){clearInterval(this.poll);this.lastHeartbeat=Date.now();this.poll=setInterval(async()=>{if(this.polling||!this.store||!this.status.connected||this.status.migrating)return;if(this.writable&&Date.now()-this.lastHeartbeat>((this.status.saving||this.status.transferring)?330000:15000)){this.fail('NAS 写入锁心跳超时，修改已停用，请重新连接');return;}this.polling=true;try{if(!this.writable){const latest=await this.call('refresh');if(latest.head&&latest.head.revision!==this.revision){const old=this.store;await this.loadStore(latest.bytes,this.libraryId);this.revision=latest.head.revision;await this.refreshFiles();this.onReload?.(this.store);old.db.close();this.emit();}}}catch(e){this.fail(e.message);}finally{this.polling=false;}},5000);this.poll.unref?.();}
- async close(){clearTimeout(this.saveTimer);clearInterval(this.poll);if(this.worker){await this.call('disconnect').catch(()=>{});await this.worker.terminate();this.worker=null;}this.writable=false;}
+ installPoll(){clearInterval(this.poll);this.lastHeartbeat=Date.now();this.poll=setInterval(async()=>{if(this.polling||!this.store||!this.status.connected||this.status.migrating)return;if(this.writable&&Date.now()-this.lastHeartbeat>((this.status.saving||this.status.transferring)?330000:15000)){this.fail('NAS 写入锁心跳超时，修改已停用，请重新连接');return;}this.polling=true;try{if(!this.writable){const latest=await this.call('refresh');if(latest.head&&latest.head.revision!==this.revision){const old=this.store;await this.loadStore(latest.bytes,this.libraryId);this.revision=latest.head.revision;await this.refreshFiles();this.onReload?.(this.store);old.close();this.emit();}}}catch(e){this.fail(e.message);}finally{this.polling=false;}},5000);this.poll.unref?.();}
+ async close({keepStores=false}={}){clearTimeout(this.saveTimer);clearInterval(this.poll);if(this.worker){await this.call('disconnect').catch(()=>{});await this.worker.terminate();this.worker=null;}this.writable=false;if(!keepStores){for(const s of this.stores)s.close();this.stores.clear();}}
  async leave(){await this.close();fs.writeFileSync(this.configFile,JSON.stringify({mode:'local'}));this.store=null;this.status={mode:'local',backupDeferred:true};this.dirty=false;this.emit();}
 }

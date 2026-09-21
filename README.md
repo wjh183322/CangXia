@@ -1,5 +1,6 @@
 # 藏匣 CangXia
 
+当前预览：**[藏匣NAS 版 0.2.0](https://github.com/wjh183322/CangXia/releases/tag/v0.2.0)**。已合入本地版 0.2.0–0.2.9 的客户端更新，原 NAS 服务无需重新部署。见 [版本说明](docs/releases/v0.2.0.md)。
 本地稳定版本：**v0.1.7** · Windows 10/11 64位 · 分支 `codex/local`
 
 NAS 预览版：**[v0.1.12](https://github.com/wjh183322/CangXia/releases/tag/v0.1.12)** · 分支 `codex/nas`。使用独立的“藏匣NAS版”数据目录，支持复制迁移、另一台电脑打开同一共享库、单写入者锁与删除恢复；见[升级说明和验证边界](docs/releases/v0.1.12.md)。独立备份已列为[后续事项](docs/后续事项.md)。

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { isDouyinURL, sleep } from './model.mjs';
+import {BrowserAPI,abortable} from './browser-api.mjs';
 
 export function findSystemBrowser(preferred = 'chrome', env = process.env) {
   const roots=[env.PROGRAMFILES,env['PROGRAMFILES(X86)'],env.LOCALAPPDATA].filter(Boolean);
@@ -13,7 +14,7 @@ export function findSystemBrowser(preferred = 'chrome', env = process.env) {
     const file=path.join(root,...(name==='chrome'?['Google','Chrome','Application','chrome.exe']:['Microsoft','Edge','Application','msedge.exe']));
     if(fs.existsSync(file))return {name,executable:file};
   }
-  throw new Error('未找到系统 Chrome 或 Edge，请先安装浏览器，或导入参考工具的配置文件');
+  throw new Error('未找到系统 Chrome 或 Edge，后台读取需要其中一种浏览器，请安装或启用后重试');
 }
 export function validateDebugURL(value, port) {
   const u=new URL(value);
@@ -44,12 +45,14 @@ export class CDPConnection extends EventEmitter {
 
 // Only starts an app-owned profile. Never connects to the user's regular profile or scans ports.
 export class SystemBrowser extends EventEmitter {
-  constructor(profileRoot,{headless=false,preferred='chrome'}={}){super();this.profileRoot=profileRoot;this.headless=headless;this.preferred=preferred;this.connection=null;this.launching=null;this.pageSessions=new Map();}
+  constructor(profileRoot,{headless=false,background=false,preferred='chrome'}={}){super();this.profileRoot=profileRoot;this.headless=headless;this.background=background;this.preferred=preferred;this.connection=null;this.launching=null;this.pageSessions=new Map();this.api=new BrowserAPI(this);this.readerTarget=null;this.loginTarget=null;}
   async launch(url='https://www.douyin.com/'){
     if(url!=='about:blank'&&!isDouyinURL(url))throw new Error('只允许打开抖音页面');
+    if(this.closing)await this.closing;
+    if(this.connection&&this.connection.ws.readyState!==WebSocket.OPEN){this.connection=null;this.readerTarget=null;this.loginTarget=null;this.pageSessions.clear();this.api?.reset();}
     if(this.connection)return this.connection;
     if(this.launching)return this.launching;
-    this.launching=this.start(url).finally(()=>{this.launching=null;});return this.launching;
+    this.launching=(async()=>{const previous=this.process;if(previous&&previous.exitCode===null&&previous.signalCode===null)await Promise.race([new Promise(resolve=>previous.once('exit',resolve)),sleep(2000)]);return this.start(url);})().finally(()=>{this.launching=null;});return this.launching;
   }
   async start(url){
     const browser=findSystemBrowser(this.preferred);this.name=browser.name;
@@ -57,7 +60,7 @@ export class SystemBrowser extends EventEmitter {
     if(fs.lstatSync(directory).isSymbolicLink())throw new Error('专用浏览器目录不能为符号链接');
     const reservation=net.createServer();await new Promise((resolve,reject)=>{reservation.once('error',reject);reservation.listen(0,'127.0.0.1',resolve);});
     this.port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve));
-    const args=[`--remote-debugging-port=${this.port}`,'--remote-debugging-address=127.0.0.1',`--user-data-dir=${directory}`,'--no-first-run','--no-default-browser-check',...(this.headless?['--headless=new']:['--new-window']),url];
+    const args=[`--remote-debugging-port=${this.port}`,'--remote-debugging-address=127.0.0.1',`--user-data-dir=${directory}`,'--no-first-run','--no-default-browser-check',...(this.background?['--no-startup-window']:[...(this.headless?['--headless=new']:['--new-window']),url])];
     this.process=spawn(browser.executable,args,{stdio:'ignore',windowsHide:true});
     let launchError=false;this.process.once('error',()=>{launchError=true;});
     for(let i=0;i<40;i++){
@@ -67,10 +70,11 @@ export class SystemBrowser extends EventEmitter {
         if(response.ok){const info=await response.json();const connection=await CDPConnection.connect(validateDebugURL(info.webSocketDebuggerUrl,this.port));
           this.connection=connection;this.userAgent=(await connection.send('Browser.getVersion')).userAgent;
           connection.on('event',(...event)=>this.emit('event',...event));
-          connection.on('closed',()=>{if(this.connection===connection){this.connection=null;this.pageSessions.clear();this.emit('closed');}});
+          connection.on('closed',()=>{if(this.connection===connection){this.connection=null;this.readerTarget=null;this.loginTarget=null;this.pageSessions.clear();this.api?.reset();this.emit('closed');}});
+          if(this.background){try{await this.readerPage(url);}catch{await this.closeNow();throw Object.assign(new Error('当前浏览器未能创建后台读取页面，请更新 Chrome 或 Edge 后重试'),{code:'BACKGROUND_UNAVAILABLE'});}}
           return connection;
         }
-      }catch{}
+      }catch(e){if(e.code==='BACKGROUND_UNAVAILABLE')throw e;}
       await sleep(400);
     }
     throw new Error('专用浏览器连接未就绪。请关闭此前由藏匣打开的专用窗口后重试，或导入参考工具配置。');
@@ -78,7 +82,7 @@ export class SystemBrowser extends EventEmitter {
   async target(){
     if(!this.connection)throw new Error('请先打开系统浏览器登录');
     const {targetInfos}=await this.connection.send('Target.getTargets');
-    const target=targetInfos.find(t=>t.type==='page'&&isDouyinURL(t.url));
+    const target=targetInfos.find(t=>t.targetId===this.loginTarget&&isDouyinURL(t.url))||targetInfos.find(t=>t.targetId===this.readerTarget&&isDouyinURL(t.url))||targetInfos.find(t=>t.type==='page'&&isDouyinURL(t.url));
     if(!target)throw new Error('专用浏览器中没有抖音页面，请先打开抖音');return target;
   }
   async attach(targetId){
@@ -86,7 +90,13 @@ export class SystemBrowser extends EventEmitter {
     const {sessionId}=await this.connection.send('Target.attachToTarget',{targetId,flatten:true});this.pageSessions.set(targetId,sessionId);return sessionId;
   }
   async openLogin(){
-    await this.launch();
+    this.api?.reset();
+    await this.launch('about:blank');
+    if(this.background){
+      const {targetInfos}=await this.connection.send('Target.getTargets');let target=targetInfos.find(t=>t.targetId===this.loginTarget&&isDouyinURL(t.url));
+      if(!target){const r=await this.connection.send('Target.createTarget',{url:'https://www.douyin.com/user/self',newWindow:true});this.loginTarget=r.targetId;target=r;}
+      await this.connection.send('Target.activateTarget',{targetId:target.targetId});return this.name;
+    }
     let target;try{target=await this.target();}catch{const r=await this.connection.send('Target.createTarget',{url:'https://www.douyin.com/'});target={targetId:r.targetId};}
     await this.connection.send('Target.activateTarget',{targetId:target.targetId});
     return this.name;
@@ -97,6 +107,57 @@ export class SystemBrowser extends EventEmitter {
     const filtered=cookies.filter(c=>c.domain.replace(/^\./,'')==='douyin.com'||c.domain.replace(/^\./,'')==='www.douyin.com');
     if(!filtered.some(c=>['sessionid','sessionid_ss'].includes(c.name)&&c.value))throw new Error('还未检测到登录成功。请在专用 Chrome/Edge 窗口完成登录后，再点击“我已登录，连接”。');
     return {cookies:filtered,userAgent:this.userAgent,source:this.name};
+  }
+  async readerPage(url='https://www.douyin.com/user/self'){
+    if(url!=='about:blank'&&!isDouyinURL(url))throw new Error('只允许读取抖音页面');
+    if(!this.connection)await this.launch('about:blank');
+    if(!this.readerTarget){
+      let r,bootstrap=null;
+      const create=()=>this.connection.send('Target.createTarget',{url:'about:blank',hidden:true,background:true});
+      try{
+        for(let attempt=0;attempt<3;attempt++)try{r=await create();break;}catch(error){if(!error.message.includes('Hidden target can be created only when remote debugging is enabled'))throw error;if(attempt<2)await sleep(100*(attempt+1));}
+        // Some Chromium builds require an initial frame before a hidden target.
+        // Bootstrap with a minimized blank window and immediately remove it.
+        if(!r){bootstrap=await this.connection.send('Target.createTarget',{url:'about:blank',newWindow:true,windowState:'minimized',background:true});r=await create();}
+      }finally{if(bootstrap)await this.connection?.send('Target.closeTarget',{targetId:bootstrap.targetId}).catch(()=>{});}
+      this.readerTarget=r.targetId;
+      const sid=await this.attach(r.targetId);await this.connection.send('Emulation.setDeviceMetricsOverride',{width:1000,height:760,deviceScaleFactor:1,mobile:false},sid);
+      if(url!=='about:blank')await this.connection.send('Page.navigate',{url},sid);
+    }
+    return this.readerTarget;
+  }
+  async prepareSession(auth,{signal,replace=true}={}){
+    signal?.throwIfAborted();await abortable(this.launch('about:blank'),signal);signal?.throwIfAborted();
+    const targetId=this.background?await this.readerPage('about:blank'):(await this.target()).targetId;
+    const sid=await this.attach(targetId),connection=this.connection;
+    if(replace){
+      const {cookies}=await abortable(connection.send('Network.getCookies',{urls:['https://www.douyin.com/']},sid),signal);
+      for(const c of cookies){signal?.throwIfAborted();if(['douyin.com','www.douyin.com'].includes(String(c.domain).replace(/^\./,'')))await abortable(connection.send('Network.deleteCookies',{name:c.name,domain:c.domain,path:c.path||'/'},sid),signal);}
+      for(const c of auth.cookies){
+        signal?.throwIfAborted();if(!['douyin.com','www.douyin.com'].includes(String(c.domain).replace(/^\./,'')))continue;
+        const expires=Number(c.expires??c.expirationDate),sameSite={strict:'Strict',lax:'Lax',no_restriction:'None',Strict:'Strict',Lax:'Lax',None:'None'}[c.sameSite];
+        const cookie={url:'https://www.douyin.com'+(c.path||'/'),name:c.name,value:c.value,domain:c.domain,path:c.path||'/',secure:c.secure!==false,httpOnly:!!c.httpOnly,...(expires>0?{expires}:{}),...(sameSite?{sameSite}:{})};
+        const result=await abortable(connection.send('Network.setCookie',cookie,sid),signal);if(result.success===false)throw new Error('未能传递当前登录会话，请重新扫码或完成验证');
+      }
+    }
+    signal?.throwIfAborted();this.api?.reset();await abortable(connection.send('Page.navigate',{url:'https://www.douyin.com/user/self'},sid),signal);
+  }
+  async hideLogin(){
+    if(!this.background||!this.connection||!this.loginTarget)return;
+    const targetId=this.loginTarget;this.loginTarget=null;this.pageSessions.delete(targetId);await this.connection.send('Target.closeTarget',{targetId}).catch(()=>{});
+  }
+  async releaseIdle(canClose=()=>true){
+    if(!this.background||!this.connection||!canClose())return false;
+    const {targetInfos}=await this.connection.send('Target.getTargets');
+    if(!canClose()||targetInfos.some(t=>t.type==='page'))return false;
+    await this.close();return true;
+  }
+  async clearLoginData(){
+    await this.close();const root=path.resolve(this.profileRoot);if(!fs.existsSync(root))return;
+    if(fs.lstatSync(root).isSymbolicLink())throw new Error('专用浏览器目录为链接，未自动清理');
+    const realRoot=fs.realpathSync(root),targets=[];
+    for(const name of ['chrome','edge']){const target=path.resolve(root,name);if(path.relative(root,target)!==name)throw new Error('登录目录范围无效');if(!fs.existsSync(target))continue;if(fs.lstatSync(target).isSymbolicLink()||path.relative(realRoot,fs.realpathSync(target))!==name)throw new Error('专用浏览器登录目录超出范围，未清理');targets.push(target);}
+    for(const target of targets)await fs.promises.rm(target,{recursive:true,force:true,maxRetries:5,retryDelay:200});
   }
   async open(url){
     if(!isDouyinURL(url))throw new Error('作品链接不是抖音地址');await this.launch(url);
@@ -117,5 +178,6 @@ export class SystemBrowser extends EventEmitter {
     await this.connection.send('Page.navigate',{url:`https://www.douyin.com/video/${id}`},sid);
     return async()=>{this.removeListener('event',listener);this.pageSessions.delete(targetId);if(this.connection)await this.connection.send('Target.closeTarget',{targetId}).catch(()=>{});};
   }
-  async close(){const connection=this.connection;this.connection=null;this.pageSessions.clear();if(connection){await connection.send('Browser.close').catch(()=>{});connection.close();}}
+  async close(){if(this.closing)return this.closing;const launching=this.launching;this.closing=(async()=>{if(launching)await launching.catch(()=>{});await this.closeNow();})().finally(()=>{this.closing=null;});return this.closing;}
+  async closeNow(){const connection=this.connection,child=this.process;this.connection=null;this.readerTarget=null;this.loginTarget=null;this.api?.reset();this.pageSessions.clear();if(connection){await connection.send('Browser.close').catch(()=>{});connection.close();if(child&&child.exitCode===null)await Promise.race([new Promise(resolve=>child.once('exit',resolve)),sleep(2000)]);}}
 }

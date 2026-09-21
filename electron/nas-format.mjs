@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 export const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
-export const deviceKeys=new Set(['sessionConnected','accessHoldUntil']);
+export const deviceKeys=new Set(['sessionConnected','accessHoldUntil','authNeedsRefresh','loggedOut']);
 export function child(root,relative){
   if(typeof relative!=='string'||/[\x00-\x1f:]/.test(relative)||path.isAbsolute(relative)||relative.split(/[\\/]/).some(p=>p==='..'||p==='.'||p===''||/[. ]$/.test(p)))throw new Error('NAS 相对路径无效');
   const full=path.resolve(root,relative),rel=path.relative(path.resolve(root),full);
@@ -15,6 +15,7 @@ export function headFromLog(bytes){
 export function serializeShared(store){
   const copy=new store.SQL.Database(store.db.export());
   try{
+    copy.run('DELETE FROM sync_runs; DELETE FROM sync_items; DELETE FROM sync_pages;');
     for(const key of deviceKeys)copy.run('DELETE FROM settings WHERE key=?',[key]);
     copy.run('DELETE FROM settings WHERE key=?',['root']);
     for(const d of store.all('downloads')){

@@ -14,6 +14,7 @@ export async function listDirectory(value,mode='directory'){
   const dir=absolutePath(value);const list=await fs.readdir(dir,{withFileTypes:true});
   const entries=list.filter(e=>!e.isSymbolicLink()&&(e.isDirectory()||(mode==='json'&&e.isFile()&&e.name.toLowerCase().endsWith('.json')))).map(e=>({name:e.name,path:path.join(dir,e.name),directory:e.isDirectory()}));
   entries.sort((a,b)=>Number(b.directory)-Number(a.directory)||a.name.localeCompare(b.name,'zh-CN',{numeric:true}));
+  let next=0;await Promise.all(Array.from({length:Math.min(12,entries.length)},async()=>{while(next<entries.length){const entry=entries[next++];try{entry.modified=(await fs.stat(entry.path)).mtime.toISOString();}catch{entry.modified=null;}}}));
   return {path:dir,parent:path.dirname(dir)===dir?'':path.dirname(dir),entries};
 }
 export async function makeDirectory(parent,name){

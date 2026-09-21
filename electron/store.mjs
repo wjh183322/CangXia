@@ -1,43 +1,47 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
-import initSqlJs from 'sql.js';
+import {SqliteStore} from './sqlite-store.mjs';
+import {SyncState} from './sync-state.mjs';
 import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
-const require = createRequire(import.meta.url);
+import {createRequire} from 'node:module';
+import initSqlJs from 'sql.js';
+import {deviceKeys} from './nas-format.mjs';
+const require=createRequire(import.meta.url);
 
 export class Store {
   static async open(file, defaultRoot) {
-    const SQL = await initSqlJs({ locateFile: () => require.resolve('sql.js/dist/sql-wasm.wasm') });
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    let bytes;
-    if (fs.existsSync(file)) bytes = fs.readFileSync(file);
-    const db = new SQL.Database(bytes);
+    const db = await SqliteStore.open(file);
     const s = new Store(db, file);
-    s.SQL=SQL;
+    s.SQL=await initSqlJs({locateFile:()=>require.resolve('sql.js/dist/sql-wasm.wasm')});
     db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS works (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members (collection_id TEXT, work_id TEXT, rank INTEGER, PRIMARY KEY(collection_id, work_id));
       CREATE TABLE IF NOT EXISTS downloads (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_tags (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS members_order ON members(collection_id,rank);`);
+      CREATE INDEX IF NOT EXISTS members_order ON members(collection_id,rank);
+      CREATE TABLE IF NOT EXISTS sync_runs(collection_id TEXT PRIMARY KEY,body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sync_items(collection_id TEXT NOT NULL,work_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(collection_id,work_id));
+      CREATE INDEX IF NOT EXISTS sync_items_order ON sync_items(collection_id,position);
+      CREATE TABLE IF NOT EXISTS sync_pages(collection_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(collection_id,cursor));`);
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
+    s.sync.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; }
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this); }
+  syncProgress(){return this.sync.list();}
   rows(sql, args = []) {
-    const stmt = this.db.prepare(sql); const out = [];
-    try { stmt.bind(args); while (stmt.step()) out.push(stmt.getAsObject()); } finally { stmt.free(); }
-    return out;
+    return this.db.all(sql,args);
   }
-  put(table, id, body) { this.nas?.assertWritable();this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]); }
+  put(table, id, body) { this.nas?.assertWritable();this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]);if(['works','downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++; }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
   all(table) { return this.rows(`SELECT body FROM ${table}`).map(r => JSON.parse(r.body)); }
-  getSetting(key) { if(this.nas&&['sessionConnected','accessHoldUntil'].includes(key))return this.nas.deviceSettings[key]??null;const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
-  setSetting(key, value) { if(this.nas&&['sessionConnected','accessHoldUntil'].includes(key)){this.nas.deviceSettings[key]=value;return;}if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;this.nas?.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]); }
+  getSetting(key) { if(this.nas&&deviceKeys.has(key))return this.nas.getDeviceSetting(key);const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
+  setSetting(key, value) { if(this.nas&&deviceKeys.has(key)){this.nas.setDeviceSetting(key,value);return;}if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;this.nas?.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]);if(key==='root')this.viewCache.clear();this.revision++; }
   get root() { return this.nas?.mediaRoot||this.getSetting('root'); }
   collection(id) { return this.get('collections', id); }
   work(id) { return this.get('works', id); }
@@ -53,7 +57,7 @@ export class Store {
   forgetDownloads(ids){
     this.nas?.assertWritable();const removed=new Set(ids),jobs=this.getSetting('downloadJobs')||[];
     let changed=false;this.db.run('BEGIN');try{
-      for(const id of removed)this.db.run('DELETE FROM downloads WHERE id=?',[id]);
+      for(const id of removed){this.db.run('DELETE FROM downloads WHERE id=?',[id]);this.viewCache.delete(id);}
       const kept=jobs.filter(j=>!((j.state==='complete'&&!this.download(j.id))||(j.state==='failed'&&removed.has(j.id))));
       if(kept.length!==jobs.length)this.setSetting('downloadJobs',kept);
       this.db.run('COMMIT');changed=removed.size||kept.length!==jobs.length;
@@ -66,13 +70,11 @@ export class Store {
     try{const removed=await findDeletedDownloads(this.all('downloads'),{probe:()=>fs.promises.stat(path.parse(path.resolve(this.root)).root),validate:dir=>this.assertDirectory(dir)});return this.forgetDownloads(removed);}catch{return [];}
   }
   save() {
-    const temp = this.file + '.tmp';
-    fs.writeFileSync(temp, this.db.export());
-    if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.file + '.bak');
-    fs.renameSync(temp, this.file);
-    this.nas?.changed();
+    // SQLite commits directly to WAL. Never rewrite or duplicate the full file here.
+    this.revision++;this.nas?.changed();
   }
-  close() { if(!this.nas)this.save(); this.db.close(); }
+  invalidateViews(){this.viewCache.clear();this.revision++;}
+  close() { if(this.closed)return;this.closed=true;if(!this.nas)this.save();this.db.close();this.viewCache.clear();this.onClose?.(); }
   upsertWork(raw) {
     const next = parseWork(raw); if (!next) return null;
     const old = this.work(next.id);
@@ -256,7 +258,8 @@ export class Store {
     }catch(e){this.db.run('ROLLBACK');throw e;}
     this.save();return target;
   }
-  snapshot() {
+  snapshot({cache=false}={}) {
+    if(!cache)this.viewCache.clear();
     for(const d of this.nas?[]:this.all('downloads')){
       let changed=false;
       for(const a of d.assets||[])if(a.kind==='image'&&a.width===undefined&&this.assetExists(d,a)){
@@ -270,20 +273,23 @@ export class Store {
     }
     const downloads = new Map(this.all('downloads').map(d => [d.id, d]));
     const localTags = new Map(this.all('local_tags').map(t => [t.id, t.tags]));
-    const works = this.all('works').map(w => {
+    const works = this.rows('SELECT id FROM works').map(({id}) => {
+      if(this.viewCache.has(id))return this.viewCache.get(id);
+      const w=this.work(id);
       const d = downloads.get(w.id);
-      return { ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      const view={ ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      this.viewCache.set(id,view);return view;
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
     const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
     const hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
     for (const c of collections) {
-      const rows = this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [c.id]);
+      const rows = this.sync.order(c.id,this.rows('SELECT work_id,rank FROM members WHERE collection_id=? ORDER BY rank IS NULL,rank', [c.id]));
       localMembers[c.id]=rows.map(r=>r.work_id);
       localPendingMembers[c.id]=rows.filter(r=>r.rank===null).map(r=>r.work_id);
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.1.12' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.2.0' };
   }
 }
