@@ -154,6 +154,7 @@ try {
   });
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
   handler('listDirectory',(value,mode)=>listDirectory(value,mode));
+  handler('pickerLocations',()=>({desktop:app.getPath('desktop'),shortcuts:[['desktop','桌面'],['downloads','下载'],['documents','文档'],['pictures','图片'],['videos','视频'],['music','音乐']].map(([id,name])=>({id,name,path:app.getPath(id)}))}));
   handler('makeDirectory',(parent,name)=>makeDirectory(parent,name));
   handler('flatPrepare',(directory,selected,includeCover)=>{if(queue.running||collector.waiters.size||collector.authenticating)throw new Error('请先暂停普通下载并等待当前操作结束');return flatQueue.prepare(absolutePath(directory),ids(selected),includeCover);});
   handler('flatStart',(token,allowNonempty)=>{if(queue.running||collector.busy||collector.authenticating||collector.verifyingIdentity)throw new Error('请等待当前操作结束');return flatQueue.start(token,allowNonempty===true);});
