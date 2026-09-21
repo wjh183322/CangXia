@@ -10,7 +10,7 @@ export class BackupCovers {
   }
   async get(id){
     const assets=this.client.store.get('backup_downloads',id)?.assets||[];
-    const candidates=[assets.find(a=>a.key==='cover'),assets.find(a=>a.key==='image-0'),...assets.filter(a=>a.kind==='image')];
+    const candidates=[this.client.store.work(id)?.backupCover,assets.find(a=>a.key==='cover'),assets.find(a=>a.key==='image-0'),...assets.filter(a=>a.kind==='image')];
     const asset=candidates.find(a=>a?.kind==='image'&&/^[a-f0-9]{64}$/.test(a.sha256)&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=20*1024*1024);
     if(!asset)return null;
     const extension=path.extname(asset.file||'').toLowerCase();

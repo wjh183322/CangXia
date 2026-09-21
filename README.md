@@ -1,6 +1,6 @@
 # 藏匣备份版 CangXia Backup
 
-当前预览：**[藏匣备份版 0.2.0](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.2.0)**。已合入本地版 0.2.0–0.2.9 的客户端更新，原 NAS 服务无需重新部署。见 [版本说明](docs/releases/backup-v0.2.0.md)。
+当前预览：**[藏匣备份版 0.2.1](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.2.1)**。已合入本地版 0.2.0–0.2.9 的客户端更新，原 NAS 服务无需重新部署。见 [版本说明](docs/releases/backup-v0.2.1.md)。
 **备份版 0.1.2 预览 · Windows 10/11 64 位 · `codex/backup`**
 
 日常在本机读取收藏、浏览和保存媒体；配套 NAS 服务负责后台同步、断点续传与 NAS 本机校验。启动先比对 NAS，无法连接时只读浏览本机已有资料。

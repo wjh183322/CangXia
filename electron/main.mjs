@@ -81,6 +81,7 @@ try {
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe,background:!smoke&&!sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
   await collector.ready;
+  backup.fetchCover=(url,options)=>collector.fetchMedia(url,options);
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
@@ -150,7 +151,7 @@ try {
       } else if (u.hostname === 'cover') {
         const d = store.download(id), cover = d?.assets.find(a => a.key === 'cover' || a.key === 'image-0');
         if (cover && store.assetExists(d, cover)) file = requireInside(d.path, path.join(d.path, cover.file));
-        else if(store.get('backup_downloads',id)?.assets?.some(a=>a.kind==='image')) {
+        else if(store.work(id)?.backupCover||store.get('backup_downloads',id)?.assets?.some(a=>a.kind==='image')) {
           file=await backup.covers.get(id);
           if(!file)return new Response('',{status:404,headers:{'cache-control':'no-store'}});
         } else {

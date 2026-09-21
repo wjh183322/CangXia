@@ -1,6 +1,6 @@
 {
   "name": "cangxia-backup",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "藏匣备份版 · 本地优先与 NAS 后台同步",
   "author": "CangXia",
   "private": true,
@@ -15,7 +15,8 @@
     "dist": "npm run build && electron-builder --win portable --x64",
     "test:ui": "vite build --ssr src/main.jsx --outDir .test-output/dom-build && node tests/workspace-ui.mjs",
     "test:layout": "npm run build && electron tests/layout-smoke.cjs",
-    "test:backup-desktop": "npm run build && node scripts/backup-desktop-test.mjs"
+    "test:backup-desktop": "npm run build && node scripts/backup-desktop-test.mjs",
+    "test:backup-preview": "npm run build && node scripts/backup-preview-desktop-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.577.0",

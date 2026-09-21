@@ -11,7 +11,7 @@ import { Pagination, Toast, FilePicker, DeleteConfirmation, RepairReport } from 
 import { SoundProvider, VolumeControl, MediaVideo, CoverAction, Viewer, TagRow, TagChoices, ChoiceList, TagEditor, DownloadManager } from './library-ui.jsx';
 
 const preview = !window.cangxia;
-const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.2.0', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
+const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.2.1', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
 const api = window.cangxia || Object.fromEntries(['flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'].map(k => [k, async () => { if (k === 'state' || k === 'refreshFiles') return blank; throw new Error('浏览器仅用于界面预览，请在 Windows 桌面程序中操作'); }]));
 const fmt = n => Number(n || 0).toLocaleString('zh-CN');
 const time = ms => `${Math.floor(ms / 60000).toString().padStart(2,'0')}:${Math.floor(ms / 1000 % 60).toString().padStart(2,'0')}`;
@@ -38,7 +38,7 @@ function App() {
   const storage=data.storage||{mode:'backup',writable:false},readOnly=!storage.writable;
   const [coverRefresh,setCoverRefresh]=useState(0);
   useEffect(()=>{if(storage.connected)setCoverRefresh(v=>v+1);},[storage.connected]);
-  const coverURL=w=>preview?w.thumbnail:`app-media://cover/${w.id}?revision=${encodeURIComponent(w.backupRecord?.assets?.map(a=>a.sha256).join('-')||'local')}&local=${w.local?1:0}&refresh=${coverRefresh}`;
+  const coverURL=w=>preview?w.thumbnail:`app-media://cover/${w.id}?revision=${encodeURIComponent(w.backupCover?.sha256||w.backupRecord?.assets?.map(a=>a.sha256).join('-')||'local')}&local=${w.local?1:0}&refresh=${coverRefresh}`;
   async function storageAction(fn){await fn();setData(await api.state());setSelected(new Set());setDetailId(null);setCollection(TOTAL);setModal('settings');}
   const [downloadTab,setDownloadTab]=useState('normal'),[flatDirectory,setFlatDirectory]=useState(''),[flatCover,setFlatCover]=useState(false),[flatIds,setFlatIds]=useState([]),[flatIntent,setFlatIntent]=useState(null);
   async function startFlat(allow=false){let intent=flatIntent;if(!allow){intent=await api.flatPrepare(flatDirectory,flatIds,flatCover);setFlatIntent(intent);if(intent.nonempty){setModal('flatConfirm');return;}}const result=await api.flatStart(intent.token,allow);if(result.needsConfirmation){setModal('flatConfirm');return;}setData(await api.state());setSelected(new Set());setDownloadTab('flat');setModal('downloads');}
