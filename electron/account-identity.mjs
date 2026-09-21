@@ -5,15 +5,18 @@ export function validAccountIdentity(value){return !!value&&typeof value.uid==='
 
 // Only the authenticated self endpoint identifies the signed-in account.
 // A rotating Cookie value or the author of a displayed work is not an account ID.
-export async function verifyAccountIdentity(profile,userAgent,{legacyCollections=[],signal}={}){
+export async function verifyAccountIdentity(profile,userAgent,{legacyCollections=[],signal,onLimited=()=>{}}={}){
   const read=async(route,params={})=>{
     const url=new URL(route,'https://www.douyin.com');
     for(const [key,value]of Object.entries({device_platform:'webapp',aid:'6383',channel:'channel_pc_web',...params}))url.searchParams.set(key,String(value));
     signal?.throwIfAborted();
     const response=await profile.fetch(url.href,{redirect:'manual',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(20000)]):AbortSignal.timeout(20000),headers:{Referer:'https://www.douyin.com/user/self','User-Agent':userAgent,Accept:'application/json'}});
+    if(response.status===429){onLimited(Number(response.headers.get('retry-after'))||60);throw new Error('平台限制访问频率，已暂停');}
     if(!response.ok)throw new Error('暂时无法核实抖音账号，请在登录窗口完成验证后重试');
     const text=await response.text();if(text.length>4*1024*1024)throw new Error('账号验证响应过大');
     let data;try{data=parsePlatformJSON(text);}catch{throw new Error('抖音未返回账号验证信息，请稍后重试');}
+    const message=String(data.status_msg||data.message||data.data?.status_msg||data.data?.message||'');
+    if(/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)){onLimited(60);throw new Error('平台限制访问频率，已暂停');}
     if(Number(data.status_code??data.data?.status_code??0)!==0)throw new Error('抖音暂未确认登录状态，请在登录窗口完成验证');return data;
   };
   const data=await read('/aweme/v1/web/user/profile/self/');const user=data.user??data.data?.user;

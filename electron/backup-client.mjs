@@ -2,12 +2,12 @@ import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'no
 import {BackupTransport,normalizeEndpoint,normalizeFingerprint} from './backup-transport.mjs';import {exportRecords,hashes,changesSince,applyChanges,recordId} from './backup-model.mjs';import {contentHash,PROTOCOL} from '../shared/backup-protocol.mjs';import {requireInside} from './model.mjs';
 import {BackupCovers} from './backup-covers.mjs';
 
-const localKeys=new Set(['root','sessionConnected','accessHoldUntil','downloadJobs']);
+const localKeys=new Set(['authNeedsRefresh','loggedOut','root','sessionConnected','accessHoldUntil','downloadJobs']);
 export class BackupClient{
  constructor(store,profile,{vault,onChange=()=>{},onUnavailable=()=>{},isIdle=()=>true,heartbeatMs=15000}={}){
   this.covers=new BackupCovers(this);
   Object.assign(this,{store,profile,vault,onChange,onUnavailable,isIdle,heartbeatMs});this.deviceId=this.read('device.json')?.id||randomUUID();this.write('device.json',{id:this.deviceId});this.config=this.read('backup-connection.json');this.meta=this.read('backup-state.json')||{baseRevision:null,baseline:{},files:{},dirty:false};this.status={mode:'backup',phase:'unconfigured',writable:false,connected:false,message:'请先连接 NAS 备份服务',deviceName:this.config?.deviceName||os.hostname(),pending:!!this.meta.dirty};
-  store.backup={assertWritable:()=>this.assertWritable(),canWrite:()=>this.status.writable||!!this.applying,changed:()=>this.changed(),localKey:key=>localKeys.has(key),applying:()=>!!this.applying};
+  store.backup={assertWritable:()=>this.assertWritable(),canWrite:()=>this.status.writable||!!this.applying,changed:()=>this.scheduleChanged(),localKey:key=>localKeys.has(key),applying:()=>!!this.applying};
  }
  read(name){try{return JSON.parse(fs.readFileSync(path.join(this.profile,name),'utf8'));}catch{return null;}}
  write(name,value){fs.mkdirSync(this.profile,{recursive:true});const file=path.join(this.profile,name);fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);}
@@ -18,7 +18,8 @@ export class BackupClient{
  unavailable(message,phase='offline'){this.status={...this.status,connected:false,writable:false,phase,message,pending:!!this.meta.dirty};this.onUnavailable();this.emit();}
  mediaSignature(){const parts=[];for(const d of this.store.all('downloads'))for(const a of d.assets||[]){if(a.kind==='metadata')continue;try{const file=requireInside(d.path,path.join(d.path,a.file));this.store.assertDirectory(d.path);const s=fs.lstatSync(file);parts.push([d.id,a.key,file,s.size,s.mtimeMs,s.ctimeMs]);}catch{parts.push([d.id,a.key,'missing']);}}return contentHash(parts);}
  mediaDirty(){for(const d of this.store.all('downloads'))for(const a of d.assets||[]){if(a.kind==='metadata'||!this.store.assetExists(d,a))continue;try{const file=requireInside(d.path,path.join(d.path,a.file)),s=fs.statSync(file),stamp=[s.size,s.mtimeMs,s.ctimeMs].join(':'),cached=this.meta.files?.[file],remote=this.store.get('backup_downloads',d.id)?.assets?.find(v=>v.key===a.key);if(!cached||cached.stamp!==stamp||!remote||remote.sha256!==cached.sha)return true;}catch{return true;}}return false;}
- changed(){if(this.applying)return;const entries=exportRecords(this.store),changes=changesSince(entries,this.meta.baseline||{});this.meta.dirty=changes.length>0||this.mediaDirty();this.status.pending=this.meta.dirty;this.status.pendingRecords=changes.filter(e=>e.table!=='downloads').length;this.persist();if(this.status.writable&&!this.syncing){this.status.phase=this.meta.dirty?'pending':'synced';this.status.message=this.meta.dirty?'本机有更新，等待同步到 NAS':'本机记录与 NAS 已同步';}this.emit();}
+ scheduleChanged(){if(this.applying||this.closed)return;if(this.isIdle())return this.changed();clearTimeout(this.changeTimer);this.status.pending=true;this.changeTimer=setTimeout(()=>{if(!this.isIdle())return this.scheduleChanged();this.changed();},500);this.changeTimer.unref?.();}
+ changed(){clearTimeout(this.changeTimer);if(this.applying)return;const entries=exportRecords(this.store),changes=changesSince(entries,this.meta.baseline||{});this.meta.dirty=changes.length>0||this.mediaDirty();this.status.pending=this.meta.dirty;this.status.pendingRecords=changes.filter(e=>e.table!=='downloads').length;this.persist();if(this.status.writable&&!this.syncing){this.status.phase=this.meta.dirty?'pending':'synced';this.status.message=this.meta.dirty?'本机有更新，等待同步到 NAS':'本机记录与 NAS 已同步';}this.emit();}
  makeTransport(){if(!this.config)return null;const token=this.vault.open(this.config.sealedToken);return new BackupTransport({...this.config,token,deviceId:this.deviceId});}
  async configure(input){
   if(this.syncing)throw new Error('请先结束正在进行的备份同步');const url=normalizeEndpoint(String(input.url||'').trim()),fingerprint=normalizeFingerprint(String(input.fingerprint||'')),name=String(input.deviceName||os.hostname()).trim();if(!name||name.length>80)throw new Error('设备名称无效');const interval=Number(input.intervalMinutes||5);if(!Number.isInteger(interval)||interval<1||interval>1440)throw new Error('同步间隔应为 1 至 1440 分钟');
@@ -83,5 +84,5 @@ export class BackupClient{
   this.applying=true;try{applyChanges(this.store,update.changes,{replace:true});}finally{this.applying=false;}this.meta={libraryId:update.libraryId,baseRevision:update.revision,baseline:hashes(update.changes.filter(e=>e.body!==null)),files:{},dirty:false,mediaSignature:this.mediaSignature()};this.persist();this.status={...this.status,recovery:file,connected:true,writable:true,phase:'synced',message:'已保留本机恢复副本，并更新为 NAS 的记录',lastSync:update.lastSync,pending:false};this.installTimers();this.emit();return this.status;
  }
  async release(){clearInterval(this.heartbeat);clearInterval(this.schedule);if(this.transport?.leaseToken)try{await this.transport.json('DELETE','/v1/lease',{timeout:4000});}catch{}if(this.transport)this.transport.leaseToken='';this.status.writable=false;}
- async close(){this.cancel();await this.covers.close();if(this.syncing)await this.syncing.catch(()=>{});await this.release();this.transport?.close();this.persist();}
+ async close(){clearTimeout(this.changeTimer);this.changed();this.closed=true;this.cancel();await this.covers.close();if(this.syncing)await this.syncing.catch(()=>{});await this.release();this.transport?.close();this.persist();}
 }

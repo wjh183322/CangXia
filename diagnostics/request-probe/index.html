@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'"><title>藏匣读取诊断</title><link rel="stylesheet" href="style.css"></head><body><main>
+<span class="badge">独立诊断工具 · v0.1.0</span><h1>网页能读，软件报 403？</h1><p class="intro">用同一份登录会话，对比两种方式读取一页收藏的结果。</p>
+<section><h2>1. 在专用浏览器确认收藏可读</h2><p>这里会打开诊断工具自己的浏览器。请登录抖音、完成需要的验证，进入“我的 → 收藏”并确认能继续加载。</p><div class="actions"><select id="browser" aria-label="浏览器"><option value="chrome">Chrome</option><option value="edge">Edge</option></select><button id="open">打开专用浏览器</button></div></section>
+<section><h2>2. 返回这里，只对比一页</h2><label class="confirm"><input id="confirmed" type="checkbox">我已在刚打开的专用浏览器里确认收藏能正常加载</label><p>每种方式最多请求一次，每页 10 条。测试期间请保持浏览器停留在收藏页面，不要操作网页。</p><div class="actions"><button id="run" disabled>开始对比</button><button id="stop" class="secondary" disabled>停止</button></div></section>
+<section><h2>诊断结果</h2><p id="status" role="status">正在准备…</p><table><thead><tr><th>请求方式</th><th>HTTP</th><th>作品数</th><th>结果</th><th>签名参数</th></tr></thead><tbody id="results"></tbody></table><button id="save" class="secondary" disabled>保存诊断报告</button><p id="save-status" role="status"></p></section>
+<footer>独立目录：%APPDATA%\藏匣读取诊断。不会修改已有藏匣资料库或下载媒体。报告不包含 Cookie、验证码、签名值或作品内容。仅有签名参数不代表签名有效。</footer>
+</main><script type="module" src="ui.js"></script></body></html>

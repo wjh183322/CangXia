@@ -118,3 +118,7 @@ test('largest single image is selected by downloaded pixels, preserving bytes an
   const variants=['origin_cover','cover_original_scale','cover'].map((source,i)=>({source,width:9999-i,height:9999-i,urls:['https://p3.douyinpic.com/'+['a','b','c'][i]]}));
   const asset=await q.saveBestCover(dir,variants,new AbortController().signal,()=>{});assert.equal(asset.source,'cover');assert.equal(asset.width,1080);assert.equal(asset.comparisons.length,3);assert.deepEqual(fs.readFileSync(path.join(dir,asset.file)),bodies.c);assert.ok(!fs.readdirSync(dir).some(n=>n.startsWith('.cangxia-')));
 });
+
+test('one-off media resolution reads resources without storing works, history or diagnostic requests',async t=>{
+ const {store}=await setup(t);const a=adapter(store,async()=>new Response(JSON.stringify({status_code:0,aweme_detail:raw('999')})));await a.collector.importConfig(config());const revision=store.revision;const events=[];a.collector.onDiagnostic=e=>events.push(e);const work=await a.collector.resolveMediaOnly('999',new AbortController().signal);assert.equal(work.id,'999');assert.equal(store.work('999'),null);assert.equal(store.revision,revision);assert.equal(store.all('downloads').length,0);assert.deepEqual(events,[]);assert.deepEqual(a.collector.diagnostics,[]);await a.collector.dispose();
+});

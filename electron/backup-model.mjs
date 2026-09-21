@@ -13,9 +13,9 @@ export function exportRecords(store){
 export function hashes(entries){return Object.fromEntries(entries.map(e=>[recordId(e),contentHash(e.body)]));}
 export function changesSince(entries,previous={}){const map=new Map(entries.map(e=>[recordId(e),e]));const changes=entries.filter(e=>previous[recordId(e)]!==contentHash(e.body));for(const key of Object.keys(previous))if(!map.has(key)){const colon=key.indexOf(':');changes.push({table:key.slice(0,colon),key:key.slice(colon+1),body:null});}return changes;}
 export function applyChanges(store,changes,{replace=false}={}){
- store.db.run('BEGIN');try{if(replace){store.db.run('DELETE FROM works; DELETE FROM collections; DELETE FROM members; DELETE FROM local_tags; DELETE FROM downloads; DELETE FROM backup_downloads;');for(const key of SHARED_SETTINGS)store.db.run('DELETE FROM settings WHERE key=?',[key]);}for(const entry of changes){validateEntry(entry);const {table,key,body}=entry;
+ store.db.run('BEGIN');try{if(changes.length)store.db.run('DELETE FROM sync_runs; DELETE FROM sync_items; DELETE FROM sync_pages;');if(replace){store.db.run('DELETE FROM works; DELETE FROM collections; DELETE FROM members; DELETE FROM local_tags; DELETE FROM downloads; DELETE FROM backup_downloads;');for(const key of SHARED_SETTINGS)store.db.run('DELETE FROM settings WHERE key=?',[key]);}for(const entry of changes){validateEntry(entry);const {table,key,body}=entry;
   if(table==='members'){const [collection,id]=key.split(':');store.db.run('DELETE FROM members WHERE collection_id=? AND work_id=?',[collection,id]);if(body)store.db.run('INSERT INTO members VALUES(?,?,?)',[body.collectionId,body.workId,body.rank]);}
   else if(table==='settings'){if(body)store.setSetting(key,body.value);else store.db.run('DELETE FROM settings WHERE key=?',[key]);}
   else{const target=table==='downloads'?'backup_downloads':table;if(body)store.put(target,key,{...body,id:key});else if(table==='works'&&store.download(key)){const w=store.work(key);if(w)store.put('works',key,{...w,readHidden:true});}else store.db.run(`DELETE FROM ${target} WHERE id=?`,[key]);}
- }store.db.run('COMMIT');}catch(e){store.db.run('ROLLBACK');throw e;}store.save();
+ }store.db.run('COMMIT');}catch(e){store.db.run('ROLLBACK');throw e;}store.invalidateViews();store.save();
 }

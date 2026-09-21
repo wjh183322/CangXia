@@ -1,0 +1,11 @@
+{
+  "appId": "local.cangxia.request-probe",
+  "productName": "藏匣读取诊断",
+  "extraMetadata": {"name": "cangxia-request-probe", "version": "0.1.0", "main": "diagnostics/request-probe/main.mjs", "description": "藏匣独立读取诊断工具"},
+  "directories": {"output": "release/request-probe"},
+  "files": ["diagnostics/request-probe/**/*", "electron/system-browser.mjs", "electron/browser-api.mjs", "electron/model.mjs", "electron/filter.mjs", "assets/icon.ico", "package.json"],
+  "asar": true,
+  "electronDist": "node_modules/electron/dist",
+  "win": {"target": "portable", "icon": "assets/icon.ico"},
+  "portable": {"artifactName": "CangXia-Request-Probe-${version}-Windows-x64.exe"}
+}

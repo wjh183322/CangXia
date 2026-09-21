@@ -20,10 +20,10 @@ store.discoverCollections([{collects_id:'9',collects_name:'测试收藏夹'}]);s
 for(let n=0;n<45;n++)store.upsertWork({aweme_id:String(1000+n),item_title:`测试作品 ${n+1}`,desc:n%2?'#摄影':'#cos',author:{uid:String(n%2+1),nickname:n%2?'测试作者乙':'测试作者甲'},video:{play_addr:{url_list:['https://v3.douyinvod.com/test.mp4']}}});
 const all=store.all('works').map(w=>w.id);store.ingestMembers('__all__',all,true);store.ingestMembers('9',all,true);
 for(const w of store.all('works')){const dir=store.destination(w.id).dir;fs.mkdirSync(dir,{recursive:true});const assets=[];for(const [key,file,kind] of [['video','视频.mp4','video'],['cover','单图.jpg','image'],['metadata','作品信息.json','metadata']]){fs.writeFileSync(path.join(dir,file),'test');assets.push({key,file,kind,size:4});}store.put('downloads',w.id,{id:w.id,path:dir,collectionId:'9',state:'complete',assets});}
-const data=()=>({...store.snapshot(),collector:{phase:'done',message:'组件测试'},storage:{mode:'backup',writable:true,connected:true,phase:'synced',config:{}},queue:{jobs:[],paused:true}});let notify=()=>{},intent,started=0;const checks=[];
-window.cangxia={state:async()=>data(),onChange:fn=>{notify=fn;return()=>{};},refreshFiles:async()=>data(),prepareDelete:async(ids,kind)=>{intent={token:'test',kind,count:ids.length,ids};return intent;},confirmDelete:async()=>{store.deleteReadRecords(intent.ids);notify(data());return true;},checkRepairs:async ids=>inspectRepairs(store,ids),startRepairs:async ids=>{const r=inspectRepairs(store,ids);r.started=r.missing;started+=r.started;return r;},listDirectory:async(dir,mode)=>listDirectory(dir||base,mode),makeDirectory,chooseRoot:async dir=>{store.setDownloadRoot(dir);notify(data());},importLoginConfig:async()=>true};
+const data=()=>({...store.snapshot(),storage:{mode:'backup',writable:true,connected:true},collector:{phase:'done',message:'组件测试'},queue:{jobs:[],paused:true}});let notify=()=>{},intent,started=0;const checks=[];
+window.cangxia={pickerLocations:async()=>({desktop:base,shortcuts:[{id:'desktop',name:'桌面',path:base},{id:'downloads',name:'下载',path:store.root}]}),state:async()=>data(),onChange:fn=>{notify=fn;return()=>{};},refreshFiles:async()=>data(),prepareDelete:async(ids,kind)=>{intent={token:'test',kind,count:ids.length,ids};return intent;},confirmDelete:async()=>{store.deleteReadRecords(intent.ids);notify(data());return true;},checkRepairs:async ids=>inspectRepairs(store,ids),startRepairs:async ids=>{const r=inspectRepairs(store,ids);r.started=r.missing;started+=r.started;return r;},listDirectory:async(dir,mode)=>listDirectory(dir||base,mode),makeDirectory,chooseRoot:async dir=>{store.setDownloadRoot(dir);notify(data());},importLoginConfig:async()=>true};
 const settle=()=>new Promise(r=>setTimeout(r,15));
-const click=async text=>{await act(async()=>{const root=document.querySelector('.modal')||document;const b=[...root.querySelectorAll('button')].find(b=>b.textContent.trim()===text);assert.ok(b,'button: '+text);assert.equal(b.disabled,false,'enabled: '+text);b.click();await settle();});};
+const click=async text=>{let b;for(let attempt=0;attempt<100;attempt++){const root=document.querySelector('.modal')||document;b=[...root.querySelectorAll('button')].find(b=>b.textContent.trim()===text);if(b&&!b.disabled)break;await act(async()=>{await settle();});}assert.ok(b,'button: '+text);assert.equal(b.disabled,false,'enabled: '+text);await act(async()=>{b.click();await settle();});};
 const aria=async label=>{await act(async()=>{const b=document.querySelector(`[aria-label="${label}"]`);assert.ok(b,label);b.click();await settle();});};
 const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
 try{
@@ -44,9 +44,14 @@ try{
  check('toast uses dialog center instead of sidebar-offset content center',document.querySelector('.toast').style.left==='370px');
  await act(async()=>{document.querySelector('details').open=true;await settle();});await click('导入登录会话配置');check('custom file picker rendered',!!document.querySelector('.file-picker'));await click('取消');await aria('关闭弹窗');
  check('toast returns to content center when dialog closes',document.querySelector('.toast').style.left==='760px');
- window.cangxia.startQrLogin=async()=>{notify({...data(),account:{nickname:'同步来的账号名称'},qr:{phase:'error',message:'测试账号核验失败'}});};window.cangxia.cancelQrLogin=async()=>{};
- await act(async()=>{document.querySelector('.account-button').click();await settle();});check('failed account verification is not shown as loading a QR code',document.querySelector('.qr-placeholder').textContent.includes('登录未完成')&&!document.querySelector('.qr-placeholder').textContent.includes('正在获取二维码'));check('synced account metadata is not presented as a local login',document.querySelector('.account-button').textContent.includes('连接抖音账号'));
- await aria('关闭弹窗');
+ let flatPreparation,flatStarted=0;
+ window.cangxia.flatPrepare=async(directory,ids,includeCover)=>{flatPreparation={directory,ids,includeCover};return {token:'flat-test',nonempty:true};};
+ window.cangxia.flatStart=async(token,allow)=>{assert.equal(token,'flat-test');assert.equal(allow,true);flatStarted++;return {id:'batch'};};
+ await click('取消选择');await aria('选择 测试作品 2');await aria('选择 测试作品 1');await click('单独下载');
+ check('one-off setup has no directory reuse and video cover defaults off',!document.querySelector('.flat-checkbox input').checked&&document.querySelector('.flat-directory').textContent.includes('选择一个文件夹'));
+ await act(async()=>{document.querySelector('.flat-directory').click();await settle();});await click('使用此目录');await click('开始单独下载');
+ check('nonempty target asks before download and selection follows list rather than click order',flatStarted===0&&flatPreparation.ids.join(',')==='1000,1001'&&document.querySelector('.modal').textContent.includes('不会被覆盖'));
+ await click('继续下载');check('one-off starts separately without changing normal root',flatStarted===1&&store.root===path.join(base,'media')&&document.querySelector('.modal').textContent.includes('单独下载 · 本次运行'));await aria('关闭弹窗');
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

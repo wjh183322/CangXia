@@ -26,4 +26,5 @@ export class AuthVault{
   constructor(file,storage){this.file=file;this.storage=storage;}
   save(auth){if(!this.storage.isEncryptionAvailable())throw new Error('Windows 登录信息加密暂不可用，未保存登录配置');const body=this.storage.encryptString(JSON.stringify(validateAuth(auth)));fs.mkdirSync(path.dirname(this.file),{recursive:true});fs.writeFileSync(this.file+'.tmp',body);fs.renameSync(this.file+'.tmp',this.file);}
   load(){if(!fs.existsSync(this.file))return null;if(!this.storage.isEncryptionAvailable())return null;try{return validateAuth(JSON.parse(this.storage.decryptString(fs.readFileSync(this.file))));}catch{return null;}}
+  clear(){for(const file of [this.file,this.file+'.tmp'])try{fs.unlinkSync(file);}catch(e){if(e.code!=='ENOENT')throw e;}}
 }

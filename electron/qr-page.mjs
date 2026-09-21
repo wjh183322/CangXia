@@ -5,10 +5,21 @@ export function webUserAgent(chromiumVersion){
 
 // Reads the normal login page. It never generates a QR code or solves a verification challenge.
 export function readQrPage({openLogin=false,refresh=false}={}){
-  const visible=e=>{const r=e.getBoundingClientRect();return r.width>5&&r.height>5&&r.bottom>0&&r.top<innerHeight&&getComputedStyle(e).visibility!=='hidden';};
+  const visible=e=>{const r=e.getBoundingClientRect(),style=getComputedStyle(e);return r.width>5&&r.height>5&&r.bottom>0&&r.top<innerHeight&&style.visibility!=='hidden'&&style.display!=='none';};
   const text=e=>(e.innerText||e.textContent||'').replace(/\s+/g,'');
   const body=document.body?.innerText||'';
   if(/访问太频繁|访问过于频繁|操作过于频繁|请求过于频繁/.test(body))return {phase:'limited',message:'抖音提示访问频繁，请稍后手动重试'};
+  const compact=body.replace(/\s+/g,'');
+  const codeInput=[...document.querySelectorAll('input,textarea')].some(e=>['INPUT','TEXTAREA'].includes(e.tagName)&&visible(e)&&/验证码|短信码|短信验证|one-time-code/i.test([e.getAttribute('placeholder'),e.getAttribute('aria-label'),e.getAttribute('autocomplete')].join(' ')));
+  const verificationFrame=[...document.querySelectorAll('iframe')].some(e=>e.tagName==='IFRAME'&&visible(e)&&/captcha|verify|验证/i.test([e.getAttribute('src'),e.getAttribute('title')].join(' ')));
+  const verificationTitle=[...document.querySelectorAll('h1,h2,h3,[role="heading"],div,span')].some(e=>visible(e)&&(e.children?.length||0)<3&&/^(身份验证|安全验证)$/.test(text(e)));
+  // The ordinary login dialog displays a phone/code form beside its QR code.
+  // A code field alone is not evidence that scanning requires an extra challenge.
+  if((codeInput&&verificationTitle)||/接收短信验证码|发送短信验证|请输入.{0,16}短信验证码|短信验证码已发送|验证码已发送至|发送至.{0,20}手机|请使用绑定手机号.{0,12}验证/.test(compact))return {phase:'verification',kind:'sms',message:'抖音需要短信或手机身份验证，请完成下方验证，软件会自动继续'};
+  if(verificationFrame||verificationTitle||/请(?:先)?完成.{0,8}验证|拖动.{0,8}滑块|按住.{0,8}滑块|请依次点击/.test(compact))return {phase:'verification',kind:'challenge',message:'请完成下方身份验证，软件会自动继续'};
+  if(body.split(/\r?\n/).some(line=>/^已确认[，,].{0,8}正在登录/.test(line.trim())))return {phase:'connecting',message:'手机已确认，正在连接账号'};
+  const scanned=body.split(/\r?\n/).some(line=>/^(?:扫码成功|扫描成功)(?:[，,！!。\s].*)?$/.test(line.trim())||/^请在手机(?:抖音)?(?:上)?确认登录[！!。]?$/.test(line.trim()));
+  if(scanned)return {phase:'scanned',message:'已扫码，请在手机确认；若已确认，请打开原登录页检查后续验证'};
   const candidates=[...document.querySelectorAll('img,canvas,svg')].filter(e=>{
     if(!visible(e))return false;const r=e.getBoundingClientRect();if(r.width<100||r.height<100||r.width>450||r.height>450||Math.abs(r.width/r.height-1)>.12)return false;
     const own=[e.getAttribute('alt'),e.id,e.getAttribute('class'),e.getAttribute('src')].join(' ');
@@ -22,7 +33,6 @@ export function readQrPage({openLogin=false,refresh=false}={}){
     return priority(a)-priority(b)||a.children.length-b.children.length;
   })[0];
   if(refresh){const button=exact('点击刷新')||exact('刷新二维码')||exact('重新获取二维码');if(button){button.click();return {phase:'loading',message:'正在刷新二维码'};}return {phase:'needs-page',message:'请打开登录页手动刷新二维码'};}
-  if(/请完成.{0,8}验证|拖动.{0,8}滑块|按住.{0,8}滑块|请依次点击/.test(body))return {phase:'verification',message:'请在抖音登录页完成验证'};
   if(/二维码失效|二维码已过期|二维码过期/.test(body))return {phase:'expired',message:'二维码已过期，请点击刷新'};
   if(qr){
     const r=qr.getBoundingClientRect();let image=null,imageUrl=null;
