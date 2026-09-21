@@ -5,10 +5,10 @@ const digest=value=>createHash('sha256').update(value).digest('hex');
 function ordinary(file){const stat=fs.lstatSync(file,{throwIfNoEntry:false});if(stat&&(!stat.isFile()||stat.isSymbolicLink()))throw new Error('下载临时文件不是普通文件，已停止');}
 async function remove(file){ordinary(file);await fs.promises.unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});}
 async function hashPrefix(file,bytes,signal){const hash=createHash('sha256');if(bytes)for await(const chunk of fs.createReadStream(file,{start:0,end:bytes-1})){signal?.throwIfAborted();hash.update(chunk);}return hash;}
-async function readCheckpoint(dir,name,url,signal){
- const meta=requireInside(dir,path.join(dir,name+'.resume.json'));ordinary(meta);if(!fs.existsSync(meta))return null;
+async function readCheckpoint(dir,name,url,signal,checkpoints){
+ const meta=requireInside(dir,path.join(dir,name+'.resume.json'));if(!checkpoints){ordinary(meta);if(!fs.existsSync(meta))return null;}
  try{
-  if(fs.statSync(meta).size>8192)return null;const value=JSON.parse(await fs.promises.readFile(meta,'utf8'));
+  if(!checkpoints&&fs.statSync(meta).size>8192)return null;const value=checkpoints?checkpoints.get(meta):JSON.parse(await fs.promises.readFile(meta,'utf8'));if(!value)return null;
   if(value.version!==1||value.urlHash!==digest(url)||!/^[a-f0-9]{64}$/.test(value.responseHash)||!strongTag(value.etag)||!Number.isSafeInteger(value.total)||value.total<=0||!Number.isSafeInteger(value.offset)||value.offset<=0||value.offset>=value.total||!/^[a-f0-9]{64}$/.test(value.prefixHash))return null;
   if(!['.mp4','.jpg','.png','.webp','.avif'].some(ext=>value.part===name+ext+'.part'))return null;
   const partial=requireInside(dir,path.join(dir,value.part));ordinary(partial);if(!fs.existsSync(partial)||fs.statSync(partial).size<value.offset)return null;
@@ -16,9 +16,10 @@ async function readCheckpoint(dir,name,url,signal){
   return {...value,hash,partial};
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024}){
- const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';ordinary(meta);ordinary(metaTemp);
- let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal);
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null}){
+ const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
+ const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
+ let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
  const get=async resume=>{signal?.throwIfAborted();return fetchMedia(url,{headers:{'Accept-Encoding':'identity',...(resume?{Range:`bytes=${resume.offset}-`,'If-Range':resume.etag}:{})},signal:AbortSignal.any([signal,AbortSignal.timeout(120000)])});};
  let response=await get(saved);
  if(saved&&response.status===206){
@@ -41,11 +42,11 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  const checkpoint=async()=>{
   if(!resumable||!offset||offset>=total)return;
   await handle.truncate(offset);await handle.sync();
-  const body=JSON.stringify({version:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,prefixHash:hash.copy().digest('hex')});
-  ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');try{await record.writeFile(body);await record.sync();}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);lastSaved=offset;lastTime=Date.now();
+  const value={version:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,prefixHash:hash.copy().digest('hex')};
+  if(checkpoints)checkpoints.set(meta,value);else{ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');try{await record.writeFile(JSON.stringify(value));await record.sync();}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);}lastSaved=offset;lastTime=Date.now();
  };
  try{
-  handle=await fs.promises.open(partial,saved?'r+':'w');if(saved)await handle.truncate(offset);else{await remove(meta);await remove(metaTemp);}
+  handle=await fs.promises.open(partial,saved?'r+':'w');if(saved)await handle.truncate(offset);else await clearCheckpoint();
   reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset);
   while(true){
    signal?.throwIfAborted();const {done,value}=await reader.read();if(done)break;signal?.throwIfAborted();
@@ -57,11 +58,11 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
   signal?.throwIfAborted();if(!offset||(total!==null&&offset!==total))throw new Error('文件未下载完整，已保留可续传进度');
   await handle.sync();await handle.close();handle=null;
   const sha256=hash.copy().digest('hex');if(fs.statSync(partial).size!==offset||(await hashPrefix(partial,offset,signal)).digest('hex')!==sha256)throw new Error('文件校验未通过，未标记为完整');
-  signal?.throwIfAborted();ordinary(file);await fs.promises.rename(partial,file);await remove(meta);await remove(metaTemp);finished=true;
+  signal?.throwIfAborted();ordinary(file);await fs.promises.rename(partial,file);await clearCheckpoint();finished=true;
   return {file,size:offset,sha256,resumedBytes:saved?.offset||0};
- }catch(e){if(handle)try{await checkpoint();}catch{await remove(meta).catch(()=>{});}throw e;}
+ }catch(e){if(handle)try{await checkpoint();}catch{await clearCheckpoint().catch(()=>{});}throw e;}
  finally{
   await reader?.cancel().catch(()=>{});reader?.releaseLock();await handle?.close().catch(()=>{});
-  if(!finished&&!resumable){await remove(partial).catch(()=>{});await remove(meta).catch(()=>{});await remove(metaTemp).catch(()=>{});}
+  if(!finished&&!resumable){await remove(partial).catch(()=>{});await clearCheckpoint().catch(()=>{});}
  }
 }

@@ -1,6 +1,6 @@
 {
   "name": "cangxia-local",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "藏匣本地版 · 大库增量保存与读取进度恢复",
   "author": "CangXia",
   "private": true,

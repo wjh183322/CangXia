@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, sleep } from './model.mjs';
+import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, parseWork, sleep } from './model.mjs';
 import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import {validAccountIdentity} from './account-identity.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
@@ -126,20 +126,21 @@ export class Collector{
   }
   async finishLogin(){await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前任务');await this.applyAuth(await this.browser.credentials());return true;}
   async importConfig(text){await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前任务');await this.applyAuth(parseReferenceConfig(text));return true;}
-  async request(path,{params={},method='GET',form,signal,allowGuest=false}={}){
+  async request(path,{params={},method='GET',form,signal,allowGuest=false,quiet=false}={}){
+    const record=event=>{if(!quiet)this.onDiagnostic(event);};
     await this.ready;this.assertNotCoolingDown();if(!API_PATHS.has(path))throw new Error('不支持的读取接口');
     if(!allowGuest&&!(await this.isAuthenticated())){this.needsLogin('登录会话需要更新，请重新扫码或在专用浏览器完成验证');throw new Error('登录会话需要更新，请重新扫码或完成验证');}
     const url=new URL(path,'https://www.douyin.com');for(const [key,value] of Object.entries({device_platform:'webapp',aid:'6383',channel:'channel_pc_web',...params}))url.searchParams.set(key,String(value));
     const response=this.requestMode==='browser'&&!allowGuest?await this.requestBrowser(path,{params,method,form,signal}):await this.profile.fetch(url.href,{method,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),Accept:'application/json',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000)});
-    this.diagnostics.push({path,status:response.status});if(this.diagnostics.length>40)this.diagnostics.shift();
+    if(!quiet){this.diagnostics.push({path,status:response.status});if(this.diagnostics.length>40)this.diagnostics.shift();}
     if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw new Error('平台限制访问频率，已暂停');}
-    if(!response.ok){const message=response.status===403&&this.requestMode!=='browser'?'读取被拒绝（HTTP 403），请通过“专用浏览器”登录并连接后重试，已有进度保留':`抖音接口未接受请求（HTTP ${response.status}），请在${this.requestMode==='browser'?'专用浏览器':'登录窗口'}检查账号和验证状态`;this.onDiagnostic({event:'api-error',httpStatus:response.status,path});if([401,403].includes(response.status))this.needsLogin(message);throw new Error(message);}
+    if(!response.ok){const message=response.status===403&&this.requestMode!=='browser'?'读取被拒绝（HTTP 403），请通过“专用浏览器”登录并连接后重试，已有进度保留':`抖音接口未接受请求（HTTP ${response.status}），请在${this.requestMode==='browser'?'专用浏览器':'登录窗口'}检查账号和验证状态`;record({event:'api-error',httpStatus:response.status,path});if([401,403].includes(response.status))this.needsLogin(message);throw new Error(message);}
     const text=await response.text();if(text.length>32*1024*1024)throw new Error('响应过大，已停止读取');
-    let data;try{data=parsePlatformJSON(text);}catch{this.needsLogin('抖音未返回有效数据，请在验证窗口检查登录状态');this.onDiagnostic({event:'api-format',path});throw new Error('接口未返回有效数据，请重新登录或完成验证');}
+    let data;try{data=parsePlatformJSON(text);}catch{this.needsLogin('抖音未返回有效数据，请在验证窗口检查登录状态');record({event:'api-format',path});throw new Error('接口未返回有效数据，请重新登录或完成验证');}
     const message=String(data.status_msg||data.message||data.data?.status_msg||data.data?.message||'');
     if(/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)){this.holdAccess();throw new Error('平台限制访问频率，已暂停');}
     if(Number(data.status_code||0)!==0){
-      const code=String(data.status_code).slice(0,32);this.onDiagnostic({event:'api-business-error',path,businessCode:code});const error=new Error(`抖音接口返回访问提示（代码 ${code}），请重新登录或完成验证，已有读取进度保留`);if(!/作品已删除|视频已删除|作品不存在|视频不存在/.test(message))this.needsLogin(error.message);
+      const code=String(data.status_code).slice(0,32);record({event:'api-business-error',path,businessCode:code});const error=new Error(`抖音接口返回访问提示（代码 ${code}），请重新登录或完成验证，已有读取进度保留`);if(!/作品已删除|视频已删除|作品不存在|视频不存在/.test(message))this.needsLogin(error.message);
       if(/作品已删除|视频已删除|作品不存在|视频不存在/.test(message))error.sourceDeleted=true;
       throw error;
     }
@@ -202,6 +203,13 @@ export class Collector{
     }
   }
   markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
+  async resolveMediaOnly(id,signal){
+    await this.ready;signal?.throwIfAborted();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
+    if(!(await this.isAuthenticated()))throw new Error('剩余媒体需要联网，请登录原账号后重试');
+    const controller=new AbortController(),key='flat:'+id;const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;this.waiters.set(key,{reject:()=>controller.abort()});
+    try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined,quiet:true});const work=parseWork(data.aweme_detail||data.data?.aweme_detail||{});if(!work||work.id!==id)throw new Error('未取得对应作品资源');return work;}
+    finally{this.waiters.delete(key);this.scheduleBrowserIdle();}
+  }
   async resolveWork(id){
     await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){

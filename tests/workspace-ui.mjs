@@ -43,6 +43,14 @@ try{
  check('toast uses dialog center instead of sidebar-offset content center',document.querySelector('.toast').style.left==='370px');
  await act(async()=>{document.querySelector('details').open=true;await settle();});await click('导入登录会话配置');check('custom file picker rendered',!!document.querySelector('.file-picker'));await click('取消');await aria('关闭弹窗');
  check('toast returns to content center when dialog closes',document.querySelector('.toast').style.left==='760px');
+ let flatPreparation,flatStarted=0;
+ window.cangxia.flatPrepare=async(directory,ids,includeCover)=>{flatPreparation={directory,ids,includeCover};return {token:'flat-test',nonempty:true};};
+ window.cangxia.flatStart=async(token,allow)=>{assert.equal(token,'flat-test');assert.equal(allow,true);flatStarted++;return {id:'batch'};};
+ await click('取消选择');await aria('选择 测试作品 2');await aria('选择 测试作品 1');await click('单独下载');
+ check('one-off setup has no directory reuse and video cover defaults off',!document.querySelector('.flat-checkbox input').checked&&document.querySelector('.flat-directory').textContent.includes('选择一个文件夹'));
+ await act(async()=>{document.querySelector('.flat-directory').click();await settle();});await click('使用此目录');await click('开始单独下载');
+ check('nonempty target asks before download and selection follows list rather than click order',flatStarted===0&&flatPreparation.ids.join(',')==='1000,1001'&&document.querySelector('.modal').textContent.includes('不会被覆盖'));
+ await click('继续下载');check('one-off starts separately without changing normal root',flatStarted===1&&store.root===path.join(base,'media')&&document.querySelector('.modal').textContent.includes('单独下载 · 本次运行'));await aria('关闭弹窗');
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);
