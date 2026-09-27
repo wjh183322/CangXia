@@ -58,7 +58,7 @@ try{
   await browser.connection.send('Network.enable',{maxTotalBufferSize:16*1024*1024,maxResourceBufferSize:8*1024*1024,maxPostDataSize:65536},sid);
   await browser.connection.send('Page.enable',{},sid);const script=`(${installFavoriteScroller.toString()})();`;
   await browser.connection.send('Page.addScriptToEvaluateOnNewDocument',{source:script},sid);await evaluate(script);
-  console.log('已打开独立抖音窗口。登录后打开总收藏，选取列表，再开始翻页。\n记录目录：'+out+'\n关闭浏览器或此窗口即可结束。');
+  console.log('已打开独立抖音窗口。登录后打开总收藏，再点击开始自动翻页，工具会自动定位列表。\n记录目录：'+out+'\n关闭浏览器或此窗口即可结束。');
   while(!closed){
     await new Promise(r=>setTimeout(r,750));if(closed)break;
     try{

@@ -17,11 +17,22 @@ test('exact numeric IDs survive and exported observation excludes credentials an
   const r=new FavoriteRecorder();r.accept('0','{"aweme_list":[{"aweme_id":7687500314652729467,"desc":"test","video":{"play_addr":"signed-secret"}}],"has_more":0,"cookie":"SECRET"}');
   const out=r.export('done');assert.equal(out.works[0].id,'7687500314652729467');assert.equal(out.serverEnd,true);assert.equal(JSON.stringify(out).includes('SECRET'),false);assert.equal(JSON.stringify(out).includes('signed-secret'),false);
 });
-function pageFixture(){
-  const dom=new JSDOM('<!doctype html><div id="list" style="overflow-y:auto"><a href="/video/123">作品</a></div>',{url:'https://www.douyin.com/user/self',runScripts:'outside-only'}),w=dom.window,list=w.document.getElementById('list');
-  let top=0;Object.defineProperties(list,{clientHeight:{value:400},scrollHeight:{value:1200},scrollTop:{get:()=>top}});list.getBoundingClientRect=()=>({width:600,height:400,top:0,left:0});list.scrollBy=({top:n})=>{top=Math.min(800,top+n);};w.eval(`(${installFavoriteScroller.toString()})();`);const ui=w.document.getElementById('cangxia-favorite-scroll').shadowRoot,api=w.__cangxiaScroll;
-  ui.getElementById('pick').click();list.querySelector('a').click();return {dom,w,list,ui,api};
+function pageFixture({pick=true}={}){
+  const dom=new JSDOM('<!doctype html><div role="tab" aria-selected="true" aria-controls="favorites">收藏</div><div id="favorites"><div id="list" style="overflow-y:auto"><a href="/video/123">作品</a></div></div>',{url:'https://www.douyin.com/user/self',runScripts:'outside-only'}),w=dom.window,list=w.document.getElementById('list');
+  let top=0;Object.defineProperties(list,{clientHeight:{value:400},scrollHeight:{value:1200},scrollTop:{get:()=>top}});list.getBoundingClientRect=()=>({width:600,height:400,top:0,left:0});for(const el of w.document.querySelectorAll('[role="tab"],a'))el.getBoundingClientRect=()=>({width:200,height:200,top:0,left:0});list.scrollBy=({top:n})=>{top=Math.min(800,top+n);};w.eval(`(${installFavoriteScroller.toString()})();`);const ui=w.document.getElementById('cangxia-favorite-scroll').shadowRoot,api=w.__cangxiaScroll;
+  if(pick)ui.getElementById('pick').click();return {dom,w,list,ui,api};
 }
+test('start locates favorites without card clicks and running guard blocks page actions until pause',()=>{
+  const {dom,w,list,ui,api}=pageFixture({pick:false});let clicks=0;
+  w.addEventListener('click',e=>{if(e.target.closest?.('a')){clicks++;e.preventDefault();}},true);
+  assert.equal(ui.getElementById('start').disabled,false);ui.getElementById('start').click();assert.equal(api.phase,'running');assert.equal(clicks,0);assert.equal(api.target,list);
+  list.querySelector('a').click();assert.equal(clicks,0);assert.equal(w.location.pathname,'/user/self');
+  ui.getElementById('pause').click();assert.equal(api.phase,'paused');list.querySelector('a').click();assert.equal(clicks,1);dom.window.close();
+});
+test('empty ARIA placeholder falls back to the rendered sibling list without opening a work',()=>{
+  const {dom,w,list,ui,api}=pageFixture({pick:false});const ul=w.document.createElement('ul');w.document.body.append(ul);ul.append(list);w.document.getElementById('favorites').textContent='';
+  ui.getElementById('start').click();assert.equal(api.phase,'running');assert.equal(api.listRoot,ul);assert.equal(api.target,list);assert.equal(w.location.pathname,'/user/self');dom.window.close();
+});
 test('scroll UI starts from rendered first-screen links without requiring a captured API first page',()=>{
   const {dom,list,ui,api}=pageFixture();ui.getElementById('start').click();assert.equal(api.phase,'running');assert.ok(api.message.includes('仅供参考'));assert.equal(ui.getElementById('count').textContent,'1');api.tick();assert.equal(api.phase,'running');assert.equal(api.steps,1);assert.ok(list.scrollTop>0);
   list.innerHTML='<a href="/note/456">另一个作品</a>';api.lastTick=0;api.tick();assert.equal(api.observed.size,2);ui.getElementById('pause').click();assert.equal(api.phase,'paused');dom.window.close();
