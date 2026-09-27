@@ -19,7 +19,7 @@ app.whenReady().then(async()=>{
   await js(`document.querySelector('[aria-label="本页全选"]').click()`);await sleep();await assertGeometry('bulk action bar has reserved space');
   await js(`(()=>{const i=document.querySelector('[aria-label="搜索作品、作者或标签"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'布局测试 21');i.dispatchEvent(new Event('input',{bubbles:true}));})()`);await sleep();
   assert.equal(await js(`document.querySelectorAll('.work-card').length`),1);await assertGeometry('one filtered account result');
-  await js(`document.querySelectorAll('.main-nav>button')[1].click()`);await sleep();assert.equal(await js(`document.querySelectorAll('.work-card').length`),2);await assertGeometry('two local works');
+  await js(`[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('本地媒体库')).click()`);await sleep();assert.equal(await js(`document.querySelectorAll('.work-card').length`),2);await assertGeometry('two local works');
   win.setContentSize(1100,740);await sleep();await assertGeometry('narrower window keeps card size');
   fs.writeFileSync('.test-output/layout-smoke.json',JSON.stringify({ok:true,checks},null,2));fs.writeFileSync('.test-output/layout-smoke.png',(await win.webContents.capturePage()).toPNG());app.exit(0);
  }catch(e){fs.writeFileSync('.test-output/layout-smoke.json',JSON.stringify({ok:false,error:e.stack,checks},null,2));app.exit(1);}

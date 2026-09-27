@@ -4,7 +4,7 @@ import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import {validAccountIdentity} from './account-identity.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
 
-const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/']);
+const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/','/aweme/v1/web/user/profile/other/','/aweme/v1/web/aweme/post/']);
 export class Collector{
   constructor(store,notify,{profile,vault,browser,delay=()=>sleep(1100),verifyIdentity,onDiagnostic=()=>{}}){
     Object.assign(this,{store,notify,profile,vault,browser,delay,verifyIdentity,onDiagnostic});this.busy=false;this.cancelled=false;this.cancelEpoch=0;this.waiters=new Map();this.diagnostics=[];

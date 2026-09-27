@@ -36,7 +36,7 @@ try{
  await act(async()=>{[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('全部结果全选')).click();await settle();});check('filtered all selects only 23 results',document.querySelector('.selection-dock').textContent.includes('23'));
  await click('删除读取记录');check('custom confirmation has selected count',intent.ids.length===23&&!!document.querySelector('[aria-label="删除读取记录"]'));await click('取消');check('cancel leaves account unchanged',store.snapshot().members.__all__.length===45);
  await click('删除读取记录');await click('删除读取记录');check('confirmation hides selected records in total and folder',store.snapshot().members.__all__.length===22&&store.snapshot().members['9'].length===22);
- await act(async()=>{document.querySelectorAll('.main-nav>button')[1].click();await settle();});check('local keeps 45 works and original order',document.querySelector('.cover-title').textContent==='测试作品 1'&&document.querySelectorAll('.work-card').length===20);
+ await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('本地媒体库')).click();await settle();});check('local keeps 45 works and original order',document.querySelector('.cover-title').textContent==='测试作品 1'&&document.querySelectorAll('.work-card').length===20);
  await aria('选择 测试作品 1');await click('检查并补齐');check('complete files report without download',document.querySelector('.modal').textContent.includes('文件完整，无需补齐')&&started===0);await click('关闭');
  fs.unlinkSync(path.join(store.download('1000').path,'单图.jpg'));await click('检查并补齐');check('missing image named before queue starts',document.querySelector('.modal').textContent.includes('高清单图')&&started===0);await click('开始补齐 1 个作品');check('repair starts after confirmation',started===1);
  await aria('设置');await click('重新检查文件');check('refresh uses themed settings and toast',!!document.querySelector('.toast')&&document.querySelector('.modal').textContent.includes('重新检查文件'));
@@ -51,6 +51,13 @@ try{
  await act(async()=>{document.querySelector('.flat-directory').click();await settle();});await click('使用此目录');await click('开始单独下载');
  check('nonempty target asks before download and selection follows list rather than click order',flatStarted===0&&flatPreparation.ids.join(',')==='1000,1001'&&document.querySelector('.modal').textContent.includes('不会被覆盖'));
  await click('继续下载');check('one-off starts separately without changing normal root',flatStarted===1&&store.root===path.join(base,'media')&&document.querySelector('.modal').textContent.includes('单独下载 · 本次运行'));await aria('关闭弹窗');
+ const authorId='MS4wLjABAAAA_SYNTHETIC_AUTHOR';store.authorSources.add(authorId,{user:{uid:'777',sec_uid:authorId,nickname:'主页作者',unique_id:'demo'}});let authorOptions,normalSelected;
+ window.cangxia.readAuthor=async options=>{authorOptions=options;const a=store.authorSources.start(authorId);store.authorSources.apply(a,{items:[{aweme_id:'7001',desc:'主页独立作品',author:{uid:'777',sec_uid:authorId,nickname:'主页作者'},images:[{url_list:['https://p3.douyinpic.com/test.jpg']}]}],complete:false,next:'30'});store.authorSources.pause(a,'部分读取');notify(data());return {id:authorId};};window.cangxia.download=async ids=>{normalSelected=ids;};
+ await act(async()=>{notify(data());await settle();});await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('作者作品')).click();await settle();});await click('主页作者0');await click('读取作者作品');
+ check('author read dialog identifies target and defaults to 20',document.querySelector('[aria-label="作者读取作品数"]').value==='20'&&document.querySelector('.modal').textContent.includes('ID 777'));
+ await click('从头读取 20 条');check('author read uses separate endpoint and returns independent cards',authorOptions.id===authorId&&authorOptions.limit===20&&document.querySelector('.cover-title').textContent==='主页独立作品');
+ await aria('选择 主页独立作品');await click('下载所选作品');check('author selection feeds normal download without favorite membership',normalSelected.join(',')==='7001'&&!store.snapshot().members.__all__.includes('7001'));
+ await click('读取作者作品');check('author dialog offers checkpoint continuation',document.querySelector('.modal').textContent.includes('继续读取 20 条'));await aria('关闭弹窗');
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

@@ -1,7 +1,7 @@
 {
-  "name": "cangxia-local",
-  "version": "0.2.9",
-  "description": "藏匣本地版 · 大库增量保存与读取进度恢复",
+  "name": "cangxia-author",
+  "version": "0.1.0",
+  "description": "藏匣作者下载试验版 · 独立作者列表与批量下载",
   "author": "CangXia",
   "private": true,
   "type": "module",
@@ -31,10 +31,10 @@
     "vite": "8.3.0"
   },
   "build": {
-    "appId": "local.cangxia.desktop",
-    "productName": "藏匣本地版",
+    "appId": "local.cangxia.author",
+    "productName": "藏匣作者下载试验版",
     "directories": {
-      "output": "release"
+      "output": "release/author"
     },
     "files": [
       "dist/**/*",
@@ -49,7 +49,7 @@
       "icon": "assets/icon.ico"
     },
     "portable": {
-      "artifactName": "CangXia-Local-${version}-Windows-x64.exe"
+      "artifactName": "CangXia-Author-${version}-Windows-x64.exe"
     }
   }
 }

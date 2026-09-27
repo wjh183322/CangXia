@@ -5,11 +5,12 @@ const number=n=>Number(n||0).toLocaleString('zh-CN');
 const elapsed=(start,now)=>{const seconds=Math.max(0,Math.floor((now-start)/1000));return `${String(Math.floor(seconds/3600)).padStart(2,'0')}:${String(Math.floor(seconds/60)%60).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;};
 export function ReadProgress({progress={},onStop,stopping=false}){
  const [now,setNow]=useState(Date.now());useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[]);
- const known=progress.mode==='partial'&&progress.goal>0,percent=known?Math.min(100,Math.floor((progress.added||0)/progress.goal*100)):null;
+ const count=progress.source==='author'?(progress.processed||0):(progress.added||0);
+ const known=progress.mode==='partial'&&progress.goal>0,percent=known?Math.min(100,Math.floor(count/progress.goal*100)):null;
  const saving=stopping||['stopping','saving'].includes(progress.stage);
  return <div className="read-progress"><div className="read-progress-emblem"><RefreshCw size={25} className="spin"/></div><p className="read-progress-caption">{stopping||progress.stage==='stopping'?'正在停止并保存，请稍候':progress.stage==='saving'?'正在保存已读取内容':progress.stage==='preparing'?'正在准备读取，请稍候':'正在读取，请稍候'}</p>
-  <div className="read-progress-main">{known?<><strong>{number(progress.added)}<small> / {number(progress.goal)}</small></strong><span>新增作品 · {percent}%</span></>:<><strong>{number(progress.checked)}<small> {progress.mode==='folders'?'个':'条'}</small></strong><span>{progress.mode==='folders'?'已发现收藏夹':'累计已读取'}</span></>}</div>
-  <div className={`read-progress-track ${known?'':'indeterminate'}`} role="progressbar" aria-label={known?'新增作品进度':'读取进行中'} aria-valuemin={known?0:undefined} aria-valuemax={known?progress.goal:undefined} aria-valuenow={known?progress.added:undefined}><i style={known?{width:`${percent}%`}:undefined}/></div>
+  <div className="read-progress-main">{known?<><strong>{number(count)}<small> / {number(progress.goal)}</small></strong><span>{progress.source==='author'?'本次读取':'新增作品'} · {percent}%</span></>:<><strong>{number(progress.checked)}<small> {progress.mode==='folders'?'个':'条'}</small></strong><span>{progress.mode==='folders'?'已发现收藏夹':'累计已读取'}</span></>}</div>
+  <div className={`read-progress-track ${known?'':'indeterminate'}`} role="progressbar" aria-label={known?(progress.source==='author'?'作者作品读取进度':'新增作品进度'):'读取进行中'} aria-valuemin={known?0:undefined} aria-valuemax={known?progress.goal:undefined} aria-valuenow={known?count:undefined}><i style={known?{width:`${percent}%`}:undefined}/></div>
   <div className="read-progress-metrics"><span>{known?`已检查 ${number(progress.checked)} 条`:progress.mode==='folders'?'正在读取目录':`本次新增 ${number(progress.added)} 条`}</span><span><Clock size={13}/>{elapsed(progress.startedAt||now,now)}</span></div>
   <div className="read-progress-note"><ShieldCheck size={16}/><p>读取期间暂不能进行其他操作。<br/>点击停止后，已读取的内容会保留。</p></div>
   <button className="button secondary read-stop" disabled={saving} onClick={onStop}>{saving?<LoaderCircle size={16} className="spin"/>:<StopCircle size={16}/>} {saving?'正在保存进度…':'停止读取'}</button>
