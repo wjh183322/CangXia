@@ -1,0 +1,33 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {JSDOM} from 'jsdom';
+import {FavoriteRecorder} from '../scripts/favorite-scroll/recorder.mjs';import {installFavoriteScroller} from '../scripts/favorite-scroll/page-ui.mjs';
+const page=(ids,next,more)=>JSON.stringify({status_code:0,aweme_list:ids.map(id=>({aweme_id:id,desc:'示例 '+id})),cursor:next,has_more:more});
+test('scroll observer counts unique IDs and proves only a connected chain ending explicitly',()=>{
+  const r=new FavoriteRecorder();r.accept('30',page(['3','4'],'60',0));assert.equal(r.summary().serverEnd,false);assert.equal(r.summary().hasFirstPage,false);
+  r.accept('0',page(['1','2','3'],'30',1));assert.equal(r.summary().serverEnd,true);assert.equal(r.summary().uniqueWorks,4);assert.equal(r.summary().continuousWorks,4);assert.deepEqual(r.summary().lastWorks.map(w=>w.id),['1','2','3','4']);
+});
+test('empty incomplete page, missing cursor and repeated cursor cannot become complete',()=>{
+  const r=new FavoriteRecorder();r.accept('0',page([],'0',1));assert.equal(r.summary().serverEnd,false);assert.equal(r.summary().cycle,true);
+  const s=new FavoriteRecorder();s.accept('0',JSON.stringify({aweme_list:[{aweme_id:'1'}]}));assert.equal(s.summary().serverEnd,false);
+});
+test('repeat responses do not inflate counts and changed first page preserves previous evidence',()=>{
+  const r=new FavoriteRecorder();r.accept('0',page(['1','2'],'30',1));r.accept('0',page(['1','2'],'30',1));assert.equal(r.summary().uniqueWorks,2);assert.equal(r.summary().responses,2);
+  assert.throws(()=>r.accept('0',page(['7','1'],'30',1)),/内容发生变化/);assert.equal(r.summary().uniqueWorks,2);
+});
+test('exact numeric IDs survive and exported observation excludes credentials and media URLs',()=>{
+  const r=new FavoriteRecorder();r.accept('0','{"aweme_list":[{"aweme_id":7687500314652729467,"desc":"test","video":{"play_addr":"signed-secret"}}],"has_more":0,"cookie":"SECRET"}');
+  const out=r.export('done');assert.equal(out.works[0].id,'7687500314652729467');assert.equal(out.serverEnd,true);assert.equal(JSON.stringify(out).includes('SECRET'),false);assert.equal(JSON.stringify(out).includes('signed-secret'),false);
+});
+function pageFixture(){
+  const dom=new JSDOM('<!doctype html><div id="list" style="overflow-y:auto"><a href="/video/123">作品</a></div>',{url:'https://www.douyin.com/user/self',runScripts:'outside-only'}),w=dom.window,list=w.document.getElementById('list');
+  let top=0;Object.defineProperties(list,{clientHeight:{value:400},scrollHeight:{value:1200},scrollTop:{get:()=>top}});list.getBoundingClientRect=()=>({width:600,height:400,top:0,left:0});list.scrollBy=({top:n})=>{top=Math.min(800,top+n);};w.eval(`(${installFavoriteScroller.toString()})();`);const ui=w.document.getElementById('cangxia-favorite-scroll').shadowRoot,api=w.__cangxiaScroll;
+  ui.getElementById('pick').click();list.querySelector('a').click();return {dom,w,list,ui,api};
+}
+test('scroll UI requires a captured first page, scrolls without clicking and retains virtualized IDs',()=>{
+  const {dom,list,ui,api}=pageFixture();ui.getElementById('start').click();assert.notEqual(api.phase,'running');api.update({hasFirstPage:true,pages:1,uniqueWorks:30});ui.getElementById('start').click();api.tick();assert.equal(api.phase,'running');assert.equal(api.steps,1);assert.ok(list.scrollTop>0);
+  list.innerHTML='<a href="/note/456">另一个作品</a>';api.lastTick=0;api.tick();assert.equal(api.observed.size,2);ui.getElementById('pause').click();assert.equal(api.phase,'paused');dom.window.close();
+});
+test('explicit server end stops; stalled page and changed page never claim completion',()=>{
+  const {dom,ui,api,w}=pageFixture();api.update({hasFirstPage:true});ui.getElementById('start').click();api.update({hasFirstPage:true,serverEnd:true});api.tick();assert.equal(api.phase,'finished');
+  api.update({hasFirstPage:true});ui.getElementById('start').click();for(let i=0;i<5;i++){api.lastTick=0;api.tick();}api.lastGrowth=Date.now()-121000;api.lastTick=0;api.tick();assert.equal(api.phase,'stalled');assert.ok(api.message.includes('不代表'));
+  ui.getElementById('start').click();w.history.pushState({},'','?different=1');api.lastTick=0;api.tick();assert.equal(api.phase,'paused');assert.ok(api.message.includes('变化'));dom.window.close();
+});
