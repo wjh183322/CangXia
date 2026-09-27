@@ -12,6 +12,7 @@ import {verifyAccountIdentity} from './account-identity.mjs';
 import {VerificationView} from './verification-view.mjs';
 import { Collector } from './account-collector.mjs';
 import {AuthorReader} from './author-reader.mjs';
+import {redirectHeaders} from './redirect-headers.mjs';
 import { AuthVault } from './auth-data.mjs';
 import { SystemBrowser } from './system-browser.mjs';
 import { QrLogin } from './qr-login.mjs';
@@ -73,7 +74,7 @@ try {
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe,background:!smoke&&!sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
   await collector.ready;
-  const authorReader=new AuthorReader(collector);
+  const authorReader=new AuthorReader(collector,{fetchLink:redirectHeaders(net,httpProfile)});
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   collector.onAccessHold=()=>{queue.pause();flatQueue.pauseAll();};

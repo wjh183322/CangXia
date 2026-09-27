@@ -2,7 +2,7 @@ import {authorId,resolveAuthorLink} from './author-sources.mjs';
 import {pageResult} from './api-pagination.mjs';
 
 export class AuthorReader{
-  constructor(collector){this.collector=collector;this.store=collector.store;}
+  constructor(collector,{fetchLink}={}){this.collector=collector;this.store=collector.store;this.fetchLink=fetchLink||((url,options)=>collector.profile.fetch(url,options));}
   async operation(name,goal,fn){
     const c=this.collector;if(c.busy||c.waiters.size)throw new Error('请先停止其他读取任务');
     const epoch=c.cancelEpoch;await c.ready;c.assertNotCoolingDown();
@@ -14,7 +14,7 @@ export class AuthorReader{
     finally{c.busy=false;c.syncController=null;if(c.stopRequested)c.update('idle','已停止，已提交的作者记录和进度保留');c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled});c.scheduleBrowserIdle();c.notify();}
   }
   async add(text){return this.operation('作者信息',null,async signal=>{
-    const {id}=await resolveAuthorLink(text,(url,options)=>this.collector.profile.fetch(url,options),signal);
+    const {id}=await resolveAuthorLink(text,this.fetchLink,signal);
     const data=await this.collector.request('/aweme/v1/web/user/profile/other/',{params:{sec_user_id:id,publish_video_strategy_type:2},signal});signal.throwIfAborted();
     const a=this.store.authorSources.add(id,data);this.collector.update('done',`已添加「${a.name}」，可选择读取范围`);return {id:a.id};
   });}
