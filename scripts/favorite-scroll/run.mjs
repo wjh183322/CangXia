@@ -1,6 +1,6 @@
 import fs from 'node:fs';import path from 'node:path';import os from 'node:os';
 import {SystemBrowser} from '../../electron/system-browser.mjs';
-import {FavoriteRecorder} from './recorder.mjs';import {installFavoriteScroller} from './page-ui.mjs';
+import {FavoriteRecorder,requestCursor,isFavoriteRequest} from './recorder.mjs';import {installFavoriteScroller} from './page-ui.mjs';
 
 if(Number(process.versions.node.split('.')[0])<24)throw Error('需要 Node.js 24 或更新版本；当前电脑开发环境已具备。');
 const desktop=process.env.USERPROFILE?path.join(process.env.USERPROFILE,'Desktop'):path.join(os.homedir(),'Desktop');
@@ -19,11 +19,13 @@ const route='/aweme/v1/web/aweme/listcollection/';
 function networkEvent(method,p,sessionId){
   if(sessionId!==sid||closed)return;
   if(method==='Network.requestWillBeSent'){
-    let u;try{u=new URL(p.request.url);}catch{return;}if(u.origin!=='https://www.douyin.com')return;
+    let u;try{u=new URL(p.request.url);}catch{return;}
+    if((u.hostname==='douyin.com'||u.hostname.endsWith('.douyin.com'))&&u.pathname.startsWith('/aweme/'))record.endpointPaths.add(u.origin+u.pathname);
+    if(!['https://www.douyin.com','https://www-hj.douyin.com'].includes(u.origin)||p.request.method==='OPTIONS')return;
     if(u.pathname==='/aweme/v1/web/collects/video/list/'&&lastState.phase==='running'){void pause('检测到自建收藏夹请求，已暂停。请回到总收藏页面重新开始。');return;}
-    if(u.pathname!==route)return;
+    if(!isFavoriteRequest(u.href,p.request.method))return;
     if(requests.size>100)requests.delete(requests.keys().next().value);
-    const cursor=new URLSearchParams(p.request.postData||'').get('cursor')??u.searchParams.get('cursor');requests.set(p.requestId,{cursor,status:null});
+    const cursor=requestCursor(u.href,p.request.postData);requests.set(p.requestId,{cursor,status:null,hasPostData:p.request.hasPostData});
   }else if(method==='Network.responseReceived'){
     const item=requests.get(p.requestId);if(item)item.status=p.response.status;
   }else if(method==='Network.loadingFailed'){
@@ -33,6 +35,7 @@ function networkEvent(method,p,sessionId){
     handling=handling.then(async()=>{
       try{
         if(item.status!==200)throw Error(`收藏页面请求返回 HTTP ${item.status||'未知'}，已暂停，请在网页检查账号状态`);
+        if(item.cursor===null&&item.hasPostData){const post=await browser.connection.send('Network.getRequestPostData',{requestId:p.requestId},sid);item.cursor=requestCursor('https://www.douyin.com'+route,post.postData);}
         if(p.encodedDataLength>8*1024*1024)throw Error('收藏响应过大，已暂停');
         const result=await browser.connection.send('Network.getResponseBody',{requestId:p.requestId},sid);
         const text=result.base64Encoded?Buffer.from(result.body,'base64').toString('utf8'):result.body;
@@ -42,6 +45,7 @@ function networkEvent(method,p,sessionId){
         await evaluate(`window.__cangxiaScroll?.update(${JSON.stringify(summary)})`);
         if(summary.cycle)await pause('网页返回重复翻页位置，已暂停，不能据此认定读完。');
         else if(summary.serverEnd)await pause('网页已从第一页连续返回到明确末页；请查看本机翻页记录。');
+        else if(summary.apiEndObserved)await pause('已观察到接口末页，但缺少完整从头分页证据；数量仅供参考。');
       }catch(e){record.errors.push({at:new Date().toISOString(),message:e.message});await pause(e.message);}
     }).catch(e=>{console.error('保存观察记录失败：'+e.message);closed=true;});
   }
@@ -58,7 +62,7 @@ try{
   while(!closed){
     await new Promise(r=>setTimeout(r,750));if(closed)break;
     try{
-      await evaluate(script);await evaluate(`window.__cangxiaScroll?.update(${JSON.stringify(record.summary())})`);
+      await evaluate(script);record.observe(await evaluate('window.__cangxiaScroll?.drainObserved?.()'));await evaluate(`window.__cangxiaScroll?.update(${JSON.stringify(record.summary())})`);
       const current=await evaluate('window.__cangxiaScroll?.tick()');
       if(current){const changed=lastState.phase!==current.phase;lastState=current;if(changed||Date.now()-saveAt>15000)save(current.message);}
       if(lastState.phase==='running'&&os.freemem()<768*1024*1024)await pause('电脑可用内存不足，已暂停并保存观察记录，请关闭其他大型程序后继续。');

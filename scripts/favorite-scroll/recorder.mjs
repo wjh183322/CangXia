@@ -1,7 +1,18 @@
 import {parsePlatformJSON} from '../../electron/model.mjs';
 
+export function requestCursor(url,postData){
+  const u=new URL(url);let body;
+  try{body=JSON.parse(postData||'{}');}catch{body=Object.fromEntries(new URLSearchParams(postData||''));}
+  const cursor=body?.cursor??body?.max_cursor??u.searchParams.get('cursor')??u.searchParams.get('max_cursor');
+  return cursor===null||cursor===undefined?null:String(cursor);
+}
+export function isFavoriteRequest(url,method){
+  try{const u=new URL(url);return ['https://www.douyin.com','https://www-hj.douyin.com'].includes(u.origin)&&u.pathname==='/aweme/v1/web/aweme/listcollection/'&&method==='POST';}catch{return false;}
+}
+
 export class FavoriteRecorder{
-  constructor(){this.startedAt=new Date().toISOString();this.pages=new Map();this.works=new Map();this.errors=[];this.requests=0;this.lastPageAt=null;}
+  constructor(){this.startedAt=new Date().toISOString();this.pages=new Map();this.works=new Map();this.domIds=new Set();this.errors=[];this.requests=0;this.lastPageAt=null;this.endpointPaths=new Set();}
+  observe(ids){for(const id of ids||[])if(typeof id==='string'&&/^\d{1,32}$/.test(id))this.domIds.add(id);}
   accept(cursor,text){
     if(typeof text!=='string'||text.length>8*1024*1024)throw Error('收藏响应过大，已暂停');
     const data=parsePlatformJSON(text),body=data?.data&&typeof data.data==='object'?data.data:data;
@@ -18,7 +29,7 @@ export class FavoriteRecorder{
   summary(){
     let cursor='0',end=false,cycle=false;const visited=new Set(),ids=[],seen=new Set();
     while(cursor!==null&&this.pages.has(cursor)){if(visited.has(cursor)){cycle=true;break;}visited.add(cursor);const page=this.pages.get(cursor);for(const id of page.ids)if(!seen.has(id)){seen.add(id);ids.push(id);}if(page.complete){end=true;break;}cursor=page.next;}
-    return {uniqueWorks:this.works.size,pages:this.pages.size,responses:this.requests,hasFirstPage:this.pages.has('0'),continuousWorks:ids.length,continuousPages:visited.size,serverEnd:end&&!cycle,cycle,missingCursor:end?null:cursor,lastPageAt:this.lastPageAt,lastWorks:ids.slice(-10).map(id=>this.works.get(id))};
+    return {uniqueWorks:this.works.size,observedTotalUnique:new Set([...this.domIds,...this.works.keys()]).size,domUniqueWorks:this.domIds.size,pages:this.pages.size,responses:this.requests,hasFirstPage:this.pages.has('0'),continuousWorks:ids.length,continuousPages:visited.size,serverEnd:end&&!cycle,apiEndObserved:[...this.pages.values()].some(p=>p.complete),cycle,missingCursor:end?null:cursor,lastPageAt:this.lastPageAt,lastWorks:ids.slice(-10).map(id=>this.works.get(id))};
   }
-  export(reason,dom={}){return {schemaVersion:1,tool:'收藏网页自动翻页',scope:'总收藏中的作品',startedAt:this.startedAt,savedAt:new Date().toISOString(),reason,...this.summary(),domObservedCount:dom.observedCount||0,scrollSteps:dom.steps||0,limits:'统计网页当前返回的作品；即使从第一页连续到末页，也不能证明被平台隐藏或失效的历史收藏均可访问。DOM 观察数仅供参考，不与接口作品数相加。',errors:this.errors,works:[...this.works.values()],pages:[...this.pages.values()]};}
+  export(reason,dom={}){return {schemaVersion:2,tool:'收藏网页自动翻页',scope:'总收藏中的作品',startedAt:this.startedAt,savedAt:new Date().toISOString(),reason,...this.summary(),domObservedCount:dom.observedCount||0,scrollSteps:dom.steps||0,limits:'观察总数是 DOM 作品 ID 与接口作品 ID 的去重并集，是已观察到的数量，不保证覆盖所有收藏；不能直接把两种数量相加。只有完整分页链到达明确末页时 serverEnd 才为 true。',errors:this.errors,endpointPaths:[...this.endpointPaths],observedIds:[...new Set([...this.domIds,...this.works.keys()])],works:[...this.works.values()],pageRecords:[...this.pages.values()]};}
 }
