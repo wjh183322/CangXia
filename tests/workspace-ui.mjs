@@ -29,6 +29,19 @@ const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
 try{
  await act(async()=>{await import('../.test-output/dom-build/main.js');await settle();});
  check('20 cards per page',document.querySelectorAll('.work-card').length===20);
+ const jump=async(location,value)=>{
+   await act(async()=>{const input=document.querySelector(`[aria-label="${location}跳转页码"]`);Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));await settle();});
+   await act(async()=>{document.querySelector(`[aria-label="${location}页码跳转"]`).dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await settle();});
+ };
+ const largeTemplate=data().works[0];const largeWorks=Array.from({length:24001},(_,i)=>({...largeTemplate,id:String(900000+i),name:`大库作品 ${i+1}`,downloaded:false,local:false,localRecord:null}));
+ await act(async()=>{notify({...data(),works:largeWorks,members:{__all__:largeWorks.map(w=>w.id)},localMembers:{__all__:[]}});await settle();});
+ document.querySelector('.work-scroll').scrollTop=500;await jump('顶部','1000');check('page 1000 jumps to correct records and resets scroll',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('.work-scroll').scrollTop===0);
+ check('both page controls stay synchronized',document.querySelector('[aria-label="底部跳转页码"]').value==='1000');
+ await jump('底部','1202');check('out-of-range page is rejected without moving',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('[role="alert"]').textContent.includes('1201'));
+ await jump('底部','1.5');check('fractional page is rejected without moving',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('[aria-label="底部跳转页码"]').getAttribute('aria-invalid')==='true');
+ await jump('底部','１２０１');check('full-width digits jump to the final single-item page',document.querySelector('.cover-title').textContent==='大库作品 24001'&&document.querySelectorAll('.work-card').length===1);
+ await act(async()=>{notify(data());await settle();});check('shrinking list refreshes both inputs and clears old validation',document.querySelector('[aria-label="顶部跳转页码"]').value==='3'&&document.querySelector('[aria-label="底部跳转页码"]').value==='3'&&!document.querySelector('[role="alert"]'));
+ await jump('顶部','1');
  document.querySelector('.work-scroll').scrollTop=500;await aria('顶部下一页');check('top pagination resets scroll and starts at work 21',document.querySelector('.work-scroll').scrollTop===0&&document.querySelector('.cover-title').textContent==='测试作品 21');
  document.querySelector('.work-scroll').scrollTop=500;await aria('底部下一页');check('bottom pagination final page has five and resets scroll',document.querySelectorAll('.work-card').length===5&&document.querySelector('.work-scroll').scrollTop===0);
  await aria('顶部上一页');await aria('顶部上一页');await aria('本页全选');check('page selects 20',document.querySelectorAll('.work-card.selected').length===20);await aria('取消选择');

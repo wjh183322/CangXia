@@ -15,6 +15,10 @@ app.whenReady().then(async()=>{
   const measure=()=>js(`(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return {card:r('.cover-button').width,workspace:r('.workspace').width,main:r('.main-content').width,scrollBottom:r('.work-scroll').bottom,footerTop:r('.list-footer').top,footerBottom:r('.list-footer').bottom,dockTop:document.querySelector('.selection-dock')?.getBoundingClientRect().top,columns:getComputedStyle(document.querySelector('.cover-grid')).gridTemplateColumns.split(' ').length}})()`);
   const assertGeometry=async name=>{const m=await measure();assert.equal(m.card,216,name);assert.ok(Math.abs(m.workspace-m.main)<1,name);assert.ok(m.scrollBottom<=m.footerTop+1,name);if(m.dockTop)assert.ok(m.footerBottom<=m.dockTop,name);checks.push({name,...m});};
   await win.loadFile(path.resolve(process.env.CANGXIA_UI_PACKAGE||'dist/index.html'));await sleep();
+  await js(`(()=>{const input=document.querySelector('[aria-label="顶部跳转页码"]');input.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'2');input.dispatchEvent(new Event('input',{bubbles:true}));})()`);await sleep();
+  win.webContents.focus();win.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});win.webContents.sendInputEvent({type:'char',keyCode:'\r'});win.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});await sleep();
+  assert.equal(await js(`document.querySelector('.cover-title').textContent`),'布局测试 21');assert.equal(await js(`document.querySelector('[aria-label="底部跳转页码"]').value`),'2');
+  await js(`document.querySelector('[aria-label="顶部上一页"]').click()`);await sleep();
   await assertGeometry('unfiltered account');assert.equal(checks[0].columns,5);
   await js(`document.querySelector('[aria-label="本页全选"]').click()`);await sleep();await assertGeometry('bulk action bar has reserved space');
   await js(`(()=>{const i=document.querySelector('[aria-label="搜索作品、作者或标签"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'布局测试 21');i.dispatchEvent(new Event('input',{bubbles:true}));})()`);await sleep();
