@@ -14,9 +14,21 @@ try{
   browser.on('closed',()=>{closed=true;});
   const script=`(${installFavoriteScroller.toString()})();`;
   await browser.connection.send('Page.addScriptToEvaluateOnNewDocument',{source:script},sid);
-  await browser.connection.send('Runtime.evaluate',{expression:script},sid);
-  console.log('翻页窗口已打开。进入收藏后点击开始；到达底部持续没有变化时会暂停，页面保留用于比对。');
-  // Only check whether our tab still exists. No network/response/DOM inspection.
-  while(!closed){await new Promise(r=>setTimeout(r,2000));if(closed)break;const connection=browser.connection;if(!connection)break;const {targetInfos}=await connection.send('Target.getTargets');if(!targetInfos.some(t=>t.targetId===target.targetId))break;}
+  let panelShown=false,lastError='';
+  async function ensurePanel(){
+    const connection=browser.connection;if(!connection)return;
+    const probe=await connection.send('Runtime.evaluate',{expression:`({ready:document.readyState!=='loading'&&['www.douyin.com','douyin.com'].includes(location.hostname),present:!!document.getElementById('cangxia-favorite-scroll')?.isConnected})`,returnByValue:true},sid);
+    if(!probe.result?.value?.ready)return;
+    if(!probe.result.value.present){const result=await connection.send('Runtime.evaluate',{expression:script+`;!!document.getElementById('cangxia-favorite-scroll')?.isConnected`,returnByValue:true},sid);if(result.exceptionDetails)throw Error('工具面板未能显示：'+String(result.exceptionDetails.exception?.description||result.exceptionDetails.text).slice(0,240));if(result.result?.value!==true)return;}
+    if(!panelShown){panelShown=true;console.log('翻页面板已挂载。进入收藏后点击开始即可。');}
+  }
+  console.log('翻页窗口已打开，页面载入后会显示开始、暂停和速度面板。');
+  // Only watch the owned tab and our panel, never inspect or collect work data.
+  while(!closed){
+    const connection=browser.connection;if(!connection)break;
+    const {targetInfos}=await connection.send('Target.getTargets');if(!targetInfos.some(t=>t.targetId===target.targetId))break;
+    try{await ensurePanel();lastError='';}catch(e){if(e.message!==lastError){console.error(e.message);lastError=e.message;}}
+    await new Promise(r=>setTimeout(r,2000));
+  }
 }catch(e){console.error(e.message);process.exitCode=1;}
 finally{await finish();}

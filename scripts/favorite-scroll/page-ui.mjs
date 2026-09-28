@@ -1,6 +1,12 @@
 // Minimal DOM scrolling only. No network interception or work-data collection.
 export function installFavoriteScroller(){
-  if(location.hostname!=='www.douyin.com'||window.__cangxiaScroll)return;
+  if(!['www.douyin.com','douyin.com'].includes(location.hostname))return;
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',installFavoriteScroller,{once:true});return;}
+  if(window.__cangxiaScroll){
+    window.__cangxiaScroll.mount?.();
+    if(document.getElementById('cangxia-favorite-scroll')?.isConnected)return;
+    window.__cangxiaScroll.pause?.();delete window.__cangxiaScroll;
+  }
   const api={phase:'idle',message:'打开「我 → 收藏」，点击开始即可。',target:null,scopeURL:null,speed:1800,frameID:null,lastFrame:null,bottomSince:null,lastHeight:null,lastPaint:0};
   window.__cangxiaScroll=api;
   const host=document.createElement('div');host.id='cangxia-favorite-scroll';host.style.cssText='position:fixed;right:20px;top:88px;width:260px;z-index:2147483647';
@@ -40,5 +46,5 @@ export function installFavoriteScroller(){
   };
   api.state=()=>({phase:api.phase,message:api.message,speed:api.speed});
   api.dispose=()=>{pause();for(const name of guarded)window.removeEventListener(name,guard,true);host.remove();delete window.__cangxiaScroll;};
-  const mount=()=>{if(!host.isConnected&&document.documentElement)document.documentElement.append(host);paint();};if(document.documentElement)mount();else document.addEventListener('DOMContentLoaded',mount,{once:true});
+  const mount=()=>{if(!host.isConnected&&document.documentElement)document.documentElement.append(host);paint();};api.mount=mount;mount();
 }
