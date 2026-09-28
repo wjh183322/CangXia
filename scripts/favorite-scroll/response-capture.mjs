@@ -1,10 +1,13 @@
 // Capture the body immediately; UI updates and disk writes must never delay it.
 export class ResponseCapture{
-  constructor(send,{limit=8*1024*1024,maxPending=12}={}){this.send=send;this.limit=limit;this.maxPending=maxPending;this.items=new Map();}
+  constructor(send,{limit=8*1024*1024,maxPending=12,stream=false}={}){this.send=send;this.limit=limit;this.maxPending=maxPending;this.stream=stream;this.items=new Map();}
   start(id){
     if(this.items.has(id))return;
     if(this.items.size>=this.maxPending)throw Error('待保存响应过多，已暂停以保留记录');
     const item={chunks:[],bytes:0,error:null};this.items.set(id,item);
+    // Keep the production tool on stable CDP methods. Streaming remains opt-in
+    // only for diagnostic tests until long-running renderer stability is known.
+    if(!this.stream){item.ready=Promise.resolve({fallback:true});return;}
     item.ready=this.send('Network.streamResourceContent',{requestId:id}).then(result=>{
       const prefix=Buffer.from(result.bufferedData||'','base64');item.bytes+=prefix.length;if(item.bytes>this.limit)item.error=Error('收藏响应过大，已暂停');return {prefix};
     },error=>({fallback:true,error}));
@@ -21,4 +24,5 @@ export class ResponseCapture{
     })();
   }
   discard(id){this.items.delete(id);}
+  clear(){this.items.clear();}
 }
