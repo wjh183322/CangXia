@@ -19,8 +19,9 @@ test('exact numeric IDs survive and exported observation excludes credentials an
 });
 function pageFixture({pick=true}={}){
   const dom=new JSDOM('<!doctype html><div role="tab" aria-selected="true" aria-controls="favorites">收藏</div><div id="favorites"><div id="list" style="overflow-y:auto"><a href="/video/123">作品</a></div></div>',{url:'https://www.douyin.com/user/self',runScripts:'outside-only'}),w=dom.window,list=w.document.getElementById('list');
-  let top=0;Object.defineProperties(list,{clientHeight:{value:400},scrollHeight:{value:1200},scrollTop:{get:()=>top}});list.getBoundingClientRect=()=>({width:600,height:400,top:0,left:0});for(const el of w.document.querySelectorAll('[role="tab"],a'))el.getBoundingClientRect=()=>({width:200,height:200,top:0,left:0});list.scrollBy=({top:n})=>{top=Math.min(800,top+n);};w.eval(`(${installFavoriteScroller.toString()})();`);const ui=w.document.getElementById('cangxia-favorite-scroll').shadowRoot,api=w.__cangxiaScroll;
-  if(pick)ui.getElementById('pick').click();return {dom,w,list,ui,api};
+  const frames=new Map();let frameId=0;w.requestAnimationFrame=fn=>{frames.set(++frameId,fn);return frameId;};w.cancelAnimationFrame=id=>frames.delete(id);
+  let top=0,totalHeight=1200;Object.defineProperties(list,{clientHeight:{value:400},scrollHeight:{get:()=>totalHeight},scrollTop:{get:()=>top}});list.getBoundingClientRect=()=>({width:600,height:400,top:0,left:0});for(const el of w.document.querySelectorAll('[role="tab"],a'))el.getBoundingClientRect=()=>({width:200,height:200,top:0,left:0});list.scrollBy=({top:n})=>{top=Math.min(totalHeight-400,top+n);};w.eval(`(${installFavoriteScroller.toString()})();`);const ui=w.document.getElementById('cangxia-favorite-scroll').shadowRoot,api=w.__cangxiaScroll;
+  if(pick)ui.getElementById('pick').click();return {dom,w,list,ui,api,frames,grow:height=>{totalHeight=height;},advance:now=>{const scheduled=[...frames.values()];frames.clear();for(const fn of scheduled)fn(now);}};
 }
 test('start locates favorites without card clicks and running guard blocks page actions until pause',()=>{
   const {dom,w,list,ui,api}=pageFixture({pick:false});let clicks=0;
@@ -34,7 +35,7 @@ test('empty ARIA placeholder falls back to the rendered sibling list without ope
   ui.getElementById('start').click();assert.equal(api.phase,'running');assert.equal(api.listRoot,ul);assert.equal(api.target,list);assert.equal(w.location.pathname,'/user/self');dom.window.close();
 });
 test('scroll UI starts from rendered first-screen links without requiring a captured API first page',()=>{
-  const {dom,list,ui,api}=pageFixture();ui.getElementById('start').click();assert.equal(api.phase,'running');assert.ok(api.message.includes('仅供参考'));assert.equal(ui.getElementById('count').textContent,'1');api.tick();assert.equal(api.phase,'running');assert.equal(api.steps,1);assert.ok(list.scrollTop>0);
+  const {dom,list,ui,api}=pageFixture();ui.getElementById('start').click();assert.equal(api.phase,'running');assert.ok(api.message.includes('仅供参考'));assert.equal(ui.getElementById('count').textContent,'1');api.frame(0);api.tick();assert.equal(api.phase,'running');assert.ok(list.scrollTop>0);
   list.innerHTML='<a href="/note/456">另一个作品</a>';api.lastTick=0;api.tick();assert.equal(api.observed.size,2);ui.getElementById('pause').click();assert.equal(api.phase,'paused');dom.window.close();
 });
 test('DOM and API IDs form a deduplicated observation lower bound, not fake full coverage',()=>{
@@ -49,6 +50,16 @@ test('real webpage alternate host is observed while preflight and unrelated endp
 });
 test('explicit server end stops; stalled page and changed page never claim completion',()=>{
   const {dom,ui,api,w}=pageFixture();api.update({hasFirstPage:true});ui.getElementById('start').click();api.update({hasFirstPage:true,serverEnd:true});api.tick();assert.equal(api.phase,'finished');
-  api.update({hasFirstPage:true});ui.getElementById('start').click();for(let i=0;i<5;i++){api.lastTick=0;api.tick();}api.lastGrowth=Date.now()-121000;api.lastTick=0;api.tick();assert.equal(api.phase,'stalled');assert.ok(api.message.includes('不代表'));
+  api.update({hasFirstPage:true});ui.getElementById('start').click();for(let i=0;i<20;i++){api.frame(i*100);api.tick();}api.lastGrowth=Date.now()-121000;api.lastTick=0;api.tick();assert.equal(api.phase,'stalled');assert.ok(api.message.includes('不代表'));
   ui.getElementById('start').click();w.history.pushState({},'','?different=1');api.lastTick=0;api.tick();assert.equal(api.phase,'paused');assert.ok(api.message.includes('变化'));dom.window.close();
+});
+test('continuous frames move smoothly, wait for content at bottom, resume on growth and cancel on pause',()=>{
+  const {dom,list,ui,api,advance,grow,frames}=pageFixture();ui.getElementById('start').click();assert.equal(api.speed,600);
+  advance(0);const first=list.scrollTop;advance(16);assert.ok(list.scrollTop>first&&list.scrollTop-first<20);assert.equal(frames.size,1);
+  for(let i=1;i<=25;i++)advance(i*100);assert.equal(list.scrollTop,800);const bottom=list.scrollTop;advance(2600);assert.equal(list.scrollTop,bottom);assert.equal(api.phase,'running');
+  grow(2000);advance(2700);assert.ok(list.scrollTop>bottom);ui.getElementById('pause').click();assert.equal(frames.size,0);const paused=list.scrollTop;advance(2800);assert.equal(list.scrollTop,paused);dom.window.close();
+});
+test('continuous scrolling stops if recorder heartbeat is lost and caps movement after a delayed frame',()=>{
+  const {dom,list,ui,api,advance}=pageFixture();ui.getElementById('start').click();advance(0);const first=list.scrollTop;advance(60000);assert.ok(list.scrollTop-first<=60);
+  api.watchdogAt=Date.now()-7000;advance(60016);assert.equal(api.phase,'paused');assert.ok(api.message.includes('记录程序'));dom.window.close();
 });
