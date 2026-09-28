@@ -1,5 +1,6 @@
 import fs from 'node:fs';import path from 'node:path';import os from 'node:os';
 import {SystemBrowser} from '../../electron/system-browser.mjs';
+import {ResponseCapture} from './response-capture.mjs';
 import {FavoriteRecorder,requestCursor,isFavoriteRequest} from './recorder.mjs';import {installFavoriteScroller} from './page-ui.mjs';
 
 if(Number(process.versions.node.split('.')[0])<24)throw Error('需要 Node.js 24 或更新版本；当前电脑开发环境已具备。');
@@ -14,6 +15,7 @@ function newOutput(){outputFile=path.join(out,`收藏翻页-${new Date().toISOSt
 function save(message=reason){reason=message;const text=JSON.stringify(record.export(reason,lastState),null,2);fs.writeFileSync(outputFile+'.tmp',text);fs.renameSync(outputFile+'.tmp',outputFile);saveAt=Date.now();}
 async function evaluate(expression){if(!browser.connection||!sid)return null;const result=await browser.connection.send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},sid);if(result.exceptionDetails)return null;return result.result?.value;}
 async function pause(message){reason=message;await evaluate(`window.__cangxiaScroll?.pause(${JSON.stringify(message)})`).catch(()=>{});save(message);}
+const capture=new ResponseCapture((method,params)=>{const connection=browser.connection;return connection?connection.send(method,params,sid):Promise.reject(Error('浏览器已关闭，已记录内容保留'));});
 let handling=Promise.resolve();
 const route='/aweme/v1/web/aweme/listcollection/';
 function networkEvent(method,p,sessionId){
@@ -24,21 +26,24 @@ function networkEvent(method,p,sessionId){
     if(!['https://www.douyin.com','https://www-hj.douyin.com'].includes(u.origin)||p.request.method==='OPTIONS')return;
     if(u.pathname==='/aweme/v1/web/collects/video/list/'&&lastState.phase==='running'){void pause('检测到自建收藏夹请求，已暂停。请回到总收藏页面重新开始。');return;}
     if(!isFavoriteRequest(u.href,p.request.method))return;
-    if(requests.size>100)requests.delete(requests.keys().next().value);
+    if(requests.size>=40){void pause('网页请求积压，已暂停以保留观察记录');return;}
     const cursor=requestCursor(u.href,p.request.postData);requests.set(p.requestId,{cursor,status:null,hasPostData:p.request.hasPostData});
   }else if(method==='Network.responseReceived'){
-    const item=requests.get(p.requestId);if(item)item.status=p.response.status;
+    const item=requests.get(p.requestId);if(item){item.status=p.response.status;if(item.status===200)try{capture.start(p.requestId);}catch(e){void pause(e.message);}}
+  }else if(method==='Network.dataReceived'){
+    capture.data(p.requestId,p.data);
   }else if(method==='Network.loadingFailed'){
-    if(requests.delete(p.requestId))void pause('收藏页面请求失败，已暂停；请检查网页网络或验证提示。');
+    capture.discard(p.requestId);if(requests.delete(p.requestId))void pause('收藏页面请求失败，已暂停；请检查网页网络或验证提示。');
   }else if(method==='Network.loadingFinished'){
     const item=requests.get(p.requestId);if(!item)return;requests.delete(p.requestId);
+    const captured=capture.finish(p.requestId);
     handling=handling.then(async()=>{
       try{
         if(item.status!==200)throw Error(`收藏页面请求返回 HTTP ${item.status||'未知'}，已暂停，请在网页检查账号状态`);
-        if(item.cursor===null&&item.hasPostData){const post=await browser.connection.send('Network.getRequestPostData',{requestId:p.requestId},sid);item.cursor=requestCursor('https://www.douyin.com'+route,post.postData);}
+        if(item.cursor===null&&item.hasPostData){const connection=browser.connection;if(!connection)throw Error('浏览器已关闭，已记录内容保留');const post=await connection.send('Network.getRequestPostData',{requestId:p.requestId},sid);item.cursor=requestCursor('https://www.douyin.com'+route,post.postData);}
         if(p.encodedDataLength>8*1024*1024)throw Error('收藏响应过大，已暂停');
-        const result=await browser.connection.send('Network.getResponseBody',{requestId:p.requestId},sid);
-        const text=result.base64Encoded?Buffer.from(result.body,'base64').toString('utf8'):result.body;
+        const result=await captured;if(result.error)throw result.error;
+        const text=result.text;
         const current=await evaluate('window.__cangxiaScroll?.state()');if(current)lastState=current;
         if(item.cursor==='0'&&record.pages.has('0')&&lastState.phase!=='running'){save('重新加载第一页，上一轮观察结束');record=new FavoriteRecorder();newOutput();}
         const summary=record.accept(item.cursor,text);save('已记录网页正常返回的收藏分页');
@@ -46,17 +51,18 @@ function networkEvent(method,p,sessionId){
         if(summary.cycle)await pause('网页返回重复翻页位置，已暂停，不能据此认定读完。');
         else if(summary.serverEnd)await pause('网页已从第一页连续返回到明确末页；请查看本机翻页记录。');
         else if(summary.apiEndObserved)await pause('已观察到接口末页，但缺少完整从头分页证据；数量仅供参考。');
-      }catch(e){record.errors.push({at:new Date().toISOString(),message:e.message});await pause(e.message);}
+      }catch(e){const message=/evicted|inspector cache|No resource with given identifier/i.test(e.message)?'本次有一页未能核实，已保留已有记录并暂停；不能据此认定读全。':e.message;record.errors.push({at:new Date().toISOString(),cursor:item.cursor,message});await pause(message);}
     }).catch(e=>{console.error('保存观察记录失败：'+e.message);closed=true;});
   }
 }
 async function finish(){if(closed&& !lockHandle)return;closed=true;try{await handling;save(reason);}catch{}try{await browser.close();}catch{}if(lockHandle!==undefined){fs.closeSync(lockHandle);lockHandle=undefined;try{if(fs.readFileSync(lock,'utf8')===String(process.pid))fs.unlinkSync(lock);}catch{}}}
 process.on('SIGINT',()=>{reason='用户结束脚本';void finish().then(()=>process.exit(0));});process.on('SIGTERM',()=>{reason='脚本终止';void finish().then(()=>process.exit(0));});
 try{
-  await browser.launch('https://www.douyin.com/user/self');const target=await browser.target();sid=await browser.attach(target.targetId);
+  await browser.launch('https://www.douyin.com/user/self');const target=await browser.target();
+  sid=await browser.attach(target.targetId);
   browser.on('event',networkEvent);browser.on('closed',()=>{closed=true;reason='浏览器已关闭；已记录内容保留';});
-  await browser.connection.send('Network.enable',{maxTotalBufferSize:16*1024*1024,maxResourceBufferSize:8*1024*1024,maxPostDataSize:65536},sid);
-  await browser.connection.send('Page.enable',{},sid);const script=`(${installFavoriteScroller.toString()})();`;
+  await browser.connection.send('Network.enable',{maxTotalBufferSize:128*1024*1024,maxResourceBufferSize:8*1024*1024,maxPostDataSize:65536},sid);
+  await browser.connection.send('Page.enable',{},sid);await evaluate("window.__cangxiaScroll?.pause('正在更新翻页工具');document.getElementById('cangxia-favorite-scroll')?.remove();delete window.__cangxiaScroll;");const script=`(${installFavoriteScroller.toString()})();`;
   await browser.connection.send('Page.addScriptToEvaluateOnNewDocument',{source:script},sid);await evaluate(script);
   console.log('已打开独立抖音窗口。登录后打开总收藏，再点击开始自动翻页，工具会自动定位列表。\n记录目录：'+out+'\n关闭浏览器或此窗口即可结束。');
   while(!closed){
