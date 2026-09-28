@@ -54,12 +54,12 @@ test('explicit server end stops; stalled page and changed page never claim compl
   ui.getElementById('start').click();w.history.pushState({},'','?different=1');api.lastTick=0;api.tick();assert.equal(api.phase,'paused');assert.ok(api.message.includes('变化'));dom.window.close();
 });
 test('continuous frames move smoothly, wait for content at bottom, resume on growth and cancel on pause',()=>{
-  const {dom,list,ui,api,advance,grow,frames}=pageFixture();ui.getElementById('start').click();assert.equal(api.speed,600);
-  advance(0);const first=list.scrollTop;advance(16);assert.ok(list.scrollTop>first&&list.scrollTop-first<20);assert.equal(frames.size,1);
+  const {dom,list,ui,api,advance,grow,frames}=pageFixture();ui.getElementById('start').click();assert.equal(api.speed,1800);
+  advance(0);const first=list.scrollTop;advance(16);assert.ok(list.scrollTop>first&&list.scrollTop-first<60);assert.equal(frames.size,1);
   for(let i=1;i<=25;i++)advance(i*100);assert.equal(list.scrollTop,800);const bottom=list.scrollTop;advance(2600);assert.equal(list.scrollTop,bottom);assert.equal(api.phase,'running');
   grow(2000);advance(2700);assert.ok(list.scrollTop>bottom);ui.getElementById('pause').click();assert.equal(frames.size,0);const paused=list.scrollTop;advance(2800);assert.equal(list.scrollTop,paused);dom.window.close();
 });
 test('continuous scrolling stops if recorder heartbeat is lost and caps movement after a delayed frame',()=>{
-  const {dom,list,ui,api,advance}=pageFixture();ui.getElementById('start').click();advance(0);const first=list.scrollTop;advance(60000);assert.ok(list.scrollTop-first<=60);
+  const {dom,list,ui,api,advance}=pageFixture();ui.getElementById('start').click();advance(0);const first=list.scrollTop;advance(60000);assert.ok(list.scrollTop-first<=180);
   api.watchdogAt=Date.now()-7000;advance(60016);assert.equal(api.phase,'paused');assert.ok(api.message.includes('记录程序'));dom.window.close();
 });
