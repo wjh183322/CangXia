@@ -1,3 +1,4 @@
+import {collectionCheckpointTables} from './collection-checkpoint-reset.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 export const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -16,6 +17,8 @@ export function serializeShared(store){
   const copy=new store.SQL.Database(store.db.export());
   try{
     copy.run('DELETE FROM sync_runs; DELETE FROM sync_items; DELETE FROM sync_pages;');
+    for(const table of collectionCheckpointTables)copy.run('DROP TABLE IF EXISTS '+table);
+    copy.run('DELETE FROM settings WHERE key=?',['collectionMembershipRevision']);
     for(const key of deviceKeys)copy.run('DELETE FROM settings WHERE key=?',[key]);
     copy.run('DELETE FROM settings WHERE key=?',['root']);
     for(const d of store.all('downloads')){

@@ -1,4 +1,5 @@
 import {DatabaseSync} from 'node:sqlite';
+import {assertCollectionOnlySource} from './collection-source-guard.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import os from 'node:os';import {Worker} from 'node:worker_threads';import {randomUUID} from 'node:crypto';
 import {Store} from './store.mjs';import {SqliteStore} from './sqlite-store.mjs';import {DownloadQueue} from './downloads.mjs';import {serializeShared,digest,child,headFromLog} from './nas-format.mjs';import {requireInside,TOTAL} from './model.mjs';
 
@@ -34,7 +35,7 @@ export class NasLibrary{
   const previous=this.cacheFile(id);let file=previous;fs.mkdirSync(path.dirname(file),{recursive:true});
   let same=false;if(bytes)try{same=fs.existsSync(previous)&&fs.readFileSync(previous+'.remotehash','utf8')===digest(Buffer.from(bytes));}catch{}
   if(bytes&&fs.existsSync(previous+'.pending')){
-    let reading=false;if(same&&this.writable){let check;try{check=new DatabaseSync(previous,{readOnly:true});if(check.prepare("SELECT 1 FROM sqlite_master WHERE name='sync_runs'").get())reading=check.prepare('SELECT body FROM sync_runs').all().some(r=>JSON.parse(r.body).status!=='complete');}catch{}finally{check?.close();}}
+    let reading=false;if(same&&this.writable){let check;try{check=new DatabaseSync(previous,{readOnly:true});if(check.prepare("SELECT 1 FROM sqlite_master WHERE name='sync_runs'").get())reading=check.prepare('SELECT body FROM sync_runs').all().some(r=>JSON.parse(r.body).status!=='complete');if(!reading&&check.prepare("SELECT 1 FROM sqlite_master WHERE name='collection_read_runs'").get())reading=check.prepare('SELECT body FROM collection_read_runs').all().some(r=>JSON.parse(r.body).status!=='complete');}catch{}finally{check?.close();}}
     if(reading){const recovery=previous+'.recovery-'+Date.now();await SqliteStore.copyFile(previous,recovery);this.status.recovery=recovery;}else same=false;
   }
   if(bytes&&!same){if(fs.existsSync(previous+'.pending')&&fs.existsSync(previous)){const recovery=previous+'.recovery-'+Date.now();await SqliteStore.copyFile(previous,recovery);this.status.recovery=recovery;}
@@ -139,6 +140,7 @@ export class NasLibrary{
   await this.flush();
  }
  async migrationPlan(source,target){
+  assertCollectionOnlySource(source);
   if(source.nas)throw new Error('请先返回本机库，再迁移本机资料');
   await source.pruneDeletedDownloads();
   const root=path.resolve(target),relative=path.relative(source.root,root);if(!relative||!relative.startsWith('..')&&!path.isAbsolute(relative))throw new Error('NAS 目标不能位于现有媒体目录内');

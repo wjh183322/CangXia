@@ -31,7 +31,9 @@ fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData'
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let nas,localStore,nasBusy=false,nasMutation=false;
-const writes=new Set(['sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','restoreNasDeleted']);
+const writes=new Set(['confirmCollectionRead','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','restoreNasDeleted']);
+let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
+const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
 const readLocked=()=>readStarting||!!collector?.busy;
 const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send('cangxia:notice','请先点击“停止读取”，保存进度后再关闭软件');};
@@ -41,7 +43,7 @@ function runtimeState(){return {collector:{...collector.status,busy:collector.bu
 function snapshot() { return feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
-  clearTimeout(timer); timer = setTimeout(() => { if (window && !window.isDestroyed()) window.webContents.send('cangxia:change', feed.frame(runtimeState())); }, 250);
+  clearTimeout(timer); timer = setTimeout(() => { if (rendererReady && window && !window.isDestroyed()) window.webContents.send('cangxia:change', feed.frame(runtimeState())); }, 250);
 }
 function ids(value) {
   if (!Array.isArray(value) || value.length > 100000 || value.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('作品选择无效');
@@ -52,9 +54,9 @@ function handler(name, action) {
     let ownsMutation=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','stopSync'].includes(name))throw new Error(readLocked()?'正在读取，请先点击“停止读取”':'正在退出登录，请稍候');
-      if(nasBusy&&!['state','stateChunk','pause','stopSync','cancelQrLogin','openRoot'].includes(name))throw new Error('正在处理 NAS 媒体库，请等待完成');
-      if(nasMutation&&!['state','stateChunk','pause','stopSync','cancelQrLogin'].includes(name))throw new Error('正在保存 NAS 修改，请稍候');
+      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync'].includes(name))throw new Error(readLocked()?'正在读取，请先点击“停止读取”':'正在退出登录，请稍候');
+      if(nasBusy&&!['state','stateChunk','startupReady','pause','stopSync','cancelQrLogin','openRoot'].includes(name))throw new Error('正在处理 NAS 媒体库，请等待完成');
+      if(nasMutation&&!['state','stateChunk','startupReady','pause','stopSync','cancelQrLogin'].includes(name))throw new Error('正在保存 NAS 修改，请稍候');
       if(store.nas&&['flatPrepare','flatStart','flatResume','flatRetry'].includes(name))nas.assertWritable();
       if(store.nas&&writes.has(name)){nas.assertWritable();ensureIdle();}
       if(store.nas&&writes.has(name)){nasMutation=true;ownsMutation=true;}
@@ -78,16 +80,28 @@ try {
   diagnostics.record({event:'startup',version:app.getVersion()});
   process.on('uncaughtExceptionMonitor',error=>diagnostics.record({event:'uncaught',name:error.name,code:error.code}));
   app.on('child-process-gone',(_event,details)=>diagnostics.record({event:'child-process-gone',reason:details.reason,exitCode:details.exitCode}));
+  const area=screen.getPrimaryDisplay().workAreaSize;
+  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', event => event.preventDefault());
+  window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  window.on('close',()=>{if(startupLoading)startupClosing=true;});
+  window.on('closed',()=>{if(!quitting)app.quit();});
+  await window.loadFile(path.join(here,'startup.html'));startupStage('window-visible');
+  if(quitting||window.isDestroyed())return;
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣NAS版'));
   localStore=store;
   await localStore.pruneDeletedDownloads();
   nas=new NasLibrary(profile,notify,()=>{collector?.stop();queue?.pause();flatQueue?.pauseAll();});
   try{store=await nas.restore()||localStore;}catch(e){nas.status={mode:'local',backupDeferred:true,message:'NAS 无法打开，已返回本机库：'+e.message};}
+  startupStage('library-open');
+  if(quitting||window.isDestroyed())return;
   feed=new SnapshotFeed(store);
   const httpProfile=session.fromPartition('cangxia-http');
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe,background:!smoke&&!sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
-  await collector.ready;
+  // Local browsing must not wait for cookie restoration or account checks.
+  collector.ready=collector.ready.catch(()=>collector.update('attention','登录状态未恢复，请重新连接原账号')).finally(()=>startupStage('session-ready'));
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   collector.onAccessHold=()=>{queue.pause();flatQueue.pauseAll();};
@@ -152,18 +166,14 @@ try {
       return net.fetch(pathToFileURL(file).href, { headers: request.headers });
     } catch { return new Response('', { status: 404 }); }
   });
-  const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣NAS版', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  window.webContents.on('will-navigate', event => event.preventDefault());
-  window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  handler('startupReady',()=>{if(!rendererReady){rendererReady=true;startupStage('library-visible');notify();}return true;});
   handler('state', () => {
-    const state=snapshot();if(state.works.length<=1000)return state;
+    const state=snapshot();if(firstState){firstState=false;startupStage('snapshot-ready');}if(state.works.length<=1000)return state;
     for(const [id,transfer]of stateTransfers)if(transfer.expires<Date.now())stateTransfers.delete(id);
     if(stateTransfers.size>=2)stateTransfers.delete(stateTransfers.keys().next().value);
     const token=randomUUID(),{works,...head}=state;stateTransfers.set(token,{works,expires:Date.now()+120000});return {chunkedState:true,token,head,total:works.length};
   });
-  handler('stateChunk',(token,offset)=>{const transfer=stateTransfers.get(token);if(!transfer||transfer.expires<Date.now()||!Number.isSafeInteger(offset)||offset<0||offset>=transfer.works.length)throw new Error('界面状态已更新，请重新加载');const works=transfer.works.slice(offset,offset+250),done=offset+works.length>=transfer.works.length;if(done)stateTransfers.delete(token);return {works,done};});
+  handler('stateChunk',(token,offset)=>{const transfer=stateTransfers.get(token);if(!transfer||transfer.expires<Date.now()||!Number.isSafeInteger(offset)||offset<0||offset>=transfer.works.length)throw new Error('界面状态已更新，请重新加载');const works=transfer.works.slice(offset,offset+1000),done=offset+works.length>=transfer.works.length;if(done)stateTransfers.delete(token);return {works,done};});
   handler('openAccount', async preferred => {ensureIdle();qrLogin.cancel();if(store.getSetting('loggedOut'))await browser.clearLoginData();return collector.open(preferred);});
   handler('startQrLogin',async()=>{ensureIdle();collector.assertNotCoolingDown();await browser.hideLogin();collector.status.browserOpened=false;if(collector.status.needsLogin||store.getSetting('loggedOut')){qrLogin.cancel();await qrProfile.clearStorageData();}return qrLogin.start();});
   handler('confirmLegacyAccount',async token=>{ensureIdle();await collector.confirmLegacyAccount(token);qrLogin.cancel();notify();return snapshot();});
@@ -207,8 +217,9 @@ try {
     ensureIdle();
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
     readStarting=true;if(store.nas)nas.deferCommits=(nas.deferCommits||0)+1;
-    try{await collector.sync(options);if(store.nas&&nas.writable){store.save();await nas.settle();}return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress()};}finally{if(store.nas){nas.deferCommits--;if(nas.dirty&&nas.writable)nas.changed();}readStarting=false;notify();}
+    try{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});if(store.nas&&nas.writable){store.save();await nas.settle();}return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};}finally{if(store.nas){nas.deferCommits--;if(nas.dirty&&nas.writable)nas.changed();}readStarting=false;notify();}
   });
+  handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
   handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
   handler('stopSync', () => collector.stop());
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
@@ -268,10 +279,10 @@ try {
   });
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
+  startupLoading=false;
   window.on('focus', notify);
   window.on('close',event=>{if(!quitting&&readLocked()){event.preventDefault();lockedNotice();return;}if(loggingOut){event.preventDefault();window.webContents.send('cangxia:notice','正在退出登录，请等待登录信息清理完成');return;}if(!quitting&&!exitConfirmed&&flatQueue.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}qrLogin?.cancel();});
   window.webContents.on('render-process-gone',(_event,details)=>{qrLogin?.cancel();diagnostics.record({event:'render-process-gone',reason:details.reason,exitCode:details.exitCode});collector.stop();queue.pause();flatQueue.pauseAll();void dialog.showMessageBox(window,{type:'warning',message:'界面进程已退出，已提交的读取进度仍保留',detail:'可以重新加载界面后继续。诊断记录保存在本机 diagnostics 目录。',buttons:['重新加载','退出'],defaultId:0,cancelId:1}).then(({response})=>{if(response===0)window.reload();else app.quit();});});
-  window.on('closed',()=>{if(!quitting)app.quit();});
   if(qrProbe){
     await qrLogin.start();const deadline=Date.now()+35000;
     while(Date.now()<deadline&&!['ready','limited','error','verification'].includes(qrLogin.state().phase))await new Promise(r=>setTimeout(r,500));
@@ -312,6 +323,8 @@ try {
     app.quit();
   }
 } catch (error) {
+  if(quitting)return;
+  if(startupClosing){app.quit();return;}
   if (smoke || sampleProbe || qrProbe) { fs.mkdirSync('.test-output', {recursive:true}); fs.writeFileSync('.test-output/startup-error.txt', error.stack || error.message); }
   else dialog.showErrorBox('藏匣NAS版启动失败', error.message);
   app.exit(1);

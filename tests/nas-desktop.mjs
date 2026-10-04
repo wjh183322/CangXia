@@ -10,7 +10,7 @@ const checks=[];let started=false;
 const deadline=setTimeout(()=>{console.error('NAS desktop timeout');app.exit(1);},90000);
 app.on('browser-window-created',(_event,win)=>{
  if(started)return;started=true;
- win.webContents.once('did-finish-load',()=>{void (async()=>{
+ win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void (async()=>{
   const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
   const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
   try{
