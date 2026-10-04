@@ -1,8 +1,12 @@
-import React,{useEffect,useLayoutEffect,useRef,useState} from 'react';
+import React,{useEffect,useLayoutEffect,useRef,useState,useId} from 'react';
+import './pagination.css';
 import {ArrowLeft,ArrowRight,ArrowUp,Folder,FileJson,Plus,Search,Check,Info,X,Trash2,CheckCircle,AlertCircle} from 'lucide-react';
 
 export function Pagination({page,pages,onChange,location}){
- return <nav className="pagination" aria-label={`${location}分页`}><span>每页 20 个</span><button aria-label={`${location}上一页`} disabled={page<=1} onClick={()=>onChange(page-1)}><ArrowLeft size={15}/></button><strong>{page}<em>/ {pages}</em></strong><button aria-label={`${location}下一页`} disabled={page>=pages} onClick={()=>onChange(page+1)}><ArrowRight size={15}/></button></nav>;
+ const [draft,setDraft]=useState(String(page)),[error,setError]=useState(''),errorId=useId();
+ useEffect(()=>{setDraft(String(page));setError('');},[page,pages]);
+ function jump(event){event.preventDefault();const text=draft.trim().replace(/[０-９]/g,c=>String.fromCharCode(c.charCodeAt(0)-65248)),target=Number(text);if(!/^\d+$/.test(text)||!Number.isSafeInteger(target)||target<1||target>pages){setError(`请输入 1～${pages} 的整数页码`);return;}setError('');setDraft(String(target));onChange(target);}
+ return <nav className="pagination" aria-label={`${location}分页`}><span>每页 20 个</span><button aria-label={`${location}上一页`} disabled={page<=1} onClick={()=>onChange(page-1)}><ArrowLeft size={15}/></button><form className="page-jump" aria-label={`${location}页码跳转`} onSubmit={jump} noValidate><input aria-label={`${location}跳转页码`} aria-invalid={!!error} aria-describedby={error?errorId:undefined} title={`输入页码，回车跳转（1～${pages}）`} inputMode="numeric" autoComplete="off" maxLength={12} value={draft} disabled={pages<=1} onFocus={e=>e.target.select()} onChange={e=>{setDraft(e.target.value);setError('');}}/><span>/ {pages}</span><button type="submit" disabled={pages<=1||!draft.trim()} aria-label={`${location}跳转`}>跳转</button>{error&&<span id={errorId} className="page-jump-error" role="alert">{error}</span>}</form><button aria-label={`${location}下一页`} disabled={page>=pages} onClick={()=>onChange(page+1)}><ArrowRight size={15}/></button></nav>;
 }
 export function Toast({message,onClose}){
  const [center,setCenter]=useState('50%');

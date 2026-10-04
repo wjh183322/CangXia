@@ -29,6 +29,19 @@ const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
 try{
  await act(async()=>{await import('../.test-output/dom-build/main.js');await settle();});
  check('20 cards per page',document.querySelectorAll('.work-card').length===20);
+ const jump=async(location,value)=>{
+   await act(async()=>{const input=document.querySelector(`[aria-label="${location}跳转页码"]`);Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));await settle();});
+   await act(async()=>{document.querySelector(`[aria-label="${location}页码跳转"]`).dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await settle();});
+ };
+ const largeTemplate=data().works[0];const largeWorks=Array.from({length:24001},(_,i)=>({...largeTemplate,id:String(900000+i),name:`大库作品 ${i+1}`,downloaded:false,local:false,localRecord:null}));
+ await act(async()=>{notify({...data(),works:largeWorks,members:{__all__:largeWorks.map(w=>w.id)},localMembers:{__all__:[]}});await settle();});
+ document.querySelector('.work-scroll').scrollTop=500;await jump('顶部','1000');check('page 1000 jumps to correct records and resets scroll',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('.work-scroll').scrollTop===0);
+ check('both page controls stay synchronized',document.querySelector('[aria-label="底部跳转页码"]').value==='1000');
+ await jump('底部','1202');check('out-of-range page is rejected without moving',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('[role="alert"]').textContent.includes('1201'));
+ await jump('底部','1.5');check('fractional page is rejected without moving',document.querySelector('.cover-title').textContent==='大库作品 19981'&&document.querySelector('[aria-label="底部跳转页码"]').getAttribute('aria-invalid')==='true');
+ await jump('底部','１２０１');check('full-width digits jump to the final single-item page',document.querySelector('.cover-title').textContent==='大库作品 24001'&&document.querySelectorAll('.work-card').length===1);
+ await act(async()=>{notify(data());await settle();});check('shrinking list refreshes both inputs and clears old validation',document.querySelector('[aria-label="顶部跳转页码"]').value==='3'&&document.querySelector('[aria-label="底部跳转页码"]').value==='3'&&!document.querySelector('[role="alert"]'));
+ await jump('顶部','1');
  document.querySelector('.work-scroll').scrollTop=500;await aria('顶部下一页');check('top pagination resets scroll and starts at work 21',document.querySelector('.work-scroll').scrollTop===0&&document.querySelector('.cover-title').textContent==='测试作品 21');
  document.querySelector('.work-scroll').scrollTop=500;await aria('底部下一页');check('bottom pagination final page has five and resets scroll',document.querySelectorAll('.work-card').length===5&&document.querySelector('.work-scroll').scrollTop===0);
  await aria('顶部上一页');await aria('顶部上一页');await aria('本页全选');check('page selects 20',document.querySelectorAll('.work-card.selected').length===20);await aria('取消选择');
@@ -36,7 +49,7 @@ try{
  await act(async()=>{[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('全部结果全选')).click();await settle();});check('filtered all selects only 23 results',document.querySelector('.selection-dock').textContent.includes('23'));
  await click('删除读取记录');check('custom confirmation has selected count',intent.ids.length===23&&!!document.querySelector('[aria-label="删除读取记录"]'));await click('取消');check('cancel leaves account unchanged',store.snapshot().members.__all__.length===45);
  await click('删除读取记录');await click('删除读取记录');check('confirmation hides selected records in total and folder',store.snapshot().members.__all__.length===22&&store.snapshot().members['9'].length===22);
- await act(async()=>{document.querySelectorAll('.main-nav>button')[1].click();await settle();});check('local keeps 45 works and original order',document.querySelector('.cover-title').textContent==='测试作品 1'&&document.querySelectorAll('.work-card').length===20);
+ await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('本地媒体库')).click();await settle();});check('local keeps 45 works and original order',document.querySelector('.cover-title').textContent==='测试作品 1'&&document.querySelectorAll('.work-card').length===20);
  await aria('选择 测试作品 1');await click('检查并补齐');check('complete files report without download',document.querySelector('.modal').textContent.includes('文件完整，无需补齐')&&started===0);await click('关闭');
  fs.unlinkSync(path.join(store.download('1000').path,'单图.jpg'));await click('检查并补齐');check('missing image named before queue starts',document.querySelector('.modal').textContent.includes('高清单图')&&started===0);await click('开始补齐 1 个作品');check('repair starts after confirmation',started===1);
  await aria('设置');await click('重新检查文件');check('refresh uses themed settings and toast',!!document.querySelector('.toast')&&document.querySelector('.modal').textContent.includes('重新检查文件'));
@@ -51,6 +64,25 @@ try{
  await act(async()=>{document.querySelector('.flat-directory').click();await settle();});await click('使用此目录');await click('开始单独下载');
  check('nonempty target asks before download and selection follows list rather than click order',flatStarted===0&&flatPreparation.ids.join(',')==='1000,1001'&&document.querySelector('.modal').textContent.includes('不会被覆盖'));
  await click('继续下载');check('one-off starts separately without changing normal root',flatStarted===1&&store.root===path.join(base,'media')&&document.querySelector('.modal').textContent.includes('单独下载 · 本次运行'));await aria('关闭弹窗');
+ const authorId='MS4wLjABAAAA_SYNTHETIC_AUTHOR';store.authorSources.add(authorId,{user:{uid:'777',sec_uid:authorId,nickname:'主页作者',unique_id:'demo'}});let authorOptions,normalSelected;
+ window.cangxia.readAuthor=async options=>{authorOptions=options;const a=store.authorSources.start(authorId);store.authorSources.apply(a,{items:[{aweme_id:'7001',desc:'主页独立作品',author:{uid:'777',sec_uid:authorId,nickname:'主页作者'},images:[{url_list:['https://p3.douyinpic.com/test.jpg']}]}],complete:false,next:'30'});store.authorSources.pause(a,'部分读取');notify(data());return {id:authorId};};window.cangxia.download=async ids=>{normalSelected=ids;};
+ await act(async()=>{notify(data());await settle();});await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('作者作品')).click();await settle();});await click('主页作者0');await click('读取作者作品');
+ check('author read dialog identifies target and defaults to 20',document.querySelector('[aria-label="作者读取作品数"]').value==='20'&&document.querySelector('.modal').textContent.includes('ID 777'));
+ await click('从头读取 20 条');check('author read uses separate endpoint and returns independent cards',authorOptions.id===authorId&&authorOptions.limit===20&&document.querySelector('.cover-title').textContent==='主页独立作品');
+ await aria('选择 主页独立作品');await click('下载所选作品');check('author selection feeds normal download without favorite membership',normalSelected.join(',')==='7001'&&!store.snapshot().members.__all__.includes('7001'));
+ await click('读取作者作品');check('author dialog offers checkpoint continuation',document.querySelector('.modal').textContent.includes('继续读取 20 条'));await aria('关闭弹窗');
+ let collectionOptions,confirmed=0;window.cangxia.sync=async options=>{collectionOptions=options;return {collector:{phase:'done',message:'检查结束'},collectionReadInfo:store.collectionReads.snapshot()};};window.cangxia.confirmCollectionRead=async options=>{confirmed++;store.collectionReads.confirm(options.collectionId,options.mode,options.token);};
+ await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('账号收藏')).click();await settle();});await click('同步收藏');
+ check('collection dialog defaults to quick check without a new-item quota',document.querySelector('.collection-read-setup').textContent.includes('尚无可确认的完整对照')&&!document.querySelector('[aria-label="最大新增作品数"]'));
+ await click('检查新增');check('unknown history warns before invoking the reader',collectionOptions===undefined&&document.querySelector('.modal').textContent.includes('可能需要读取全部收藏'));await click('返回');check('returning from scan warning does not start a read',collectionOptions===undefined);await click('检查新增');await click('继续检查');check('quick check passes explicit mode without requesting all',collectionOptions.mode==='quick'&&collectionOptions.allowFullScan===true&&!collectionOptions.readAll&&!collectionOptions.resume);
+ const scope=collectionOptions.collectionId,reads=store.collectionReads;let run=reads.start(scope,'full');reads.apply(run,{items:[{aweme_id:'1000',desc:'测试作品 1'}],next:'30',complete:false});reads.finish(run,'paused');run=reads.start(scope,'quick');reads.apply(run,{items:[{aweme_id:'1001',desc:'测试作品 2'}],next:'30',complete:false});reads.finish(run,'limit');
+ await act(async()=>{notify(data());await settle();});await click('同步收藏');
+ check('quick and full checkpoints have independent continuation buttons',document.querySelector('.modal').textContent.includes('继续检查新增')&&document.querySelector('.modal').textContent.includes('继续完整核对'));
+ await click('继续检查新增');await click('继续检查');check('quick continuation does not resume full scan',collectionOptions.mode==='quick'&&collectionOptions.resume===true);
+ await click('同步收藏');await click('继续完整核对');check('full continuation explicitly selects full checkpoint',collectionOptions.mode==='full'&&collectionOptions.resume===true);
+ run=reads.start(scope,'full');reads.apply(run,{items:[],next:null,complete:true});await act(async()=>{notify(data());await settle();});await click('同步收藏');await click('查看并确认');
+ check('suspicious shrink requires an explicit second confirmation with file-preservation notice',confirmed===0&&document.querySelector('.collection-read-confirm').textContent.includes('本地已下载的文件和作品资料仍保留'));
+ await click('保留旧记录');check('cancel confirmation does not reconcile missing records',confirmed===0&&reads.membership(scope).length>0);await click('查看并确认');await click('确认采用本次列表');check('confirmed list reaches backend with matching scope mode token',confirmed===1&&reads.membership(scope).length===0);
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

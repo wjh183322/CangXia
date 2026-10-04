@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 
-const ROUTES=new Set(['/aweme/v1/web/user/profile/self/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/aweme/detail/']);
+const ROUTES=new Set(['/aweme/v1/web/user/profile/self/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/aweme/detail/','/aweme/v1/web/user/profile/other/','/aweme/v1/web/aweme/post/']);
 const failure=(code,message)=>Object.assign(new Error(message),{code});
 export function apiRequest(route,{params={},method='GET',form}={}){
  if(!ROUTES.has(route)||method!==(route==='/aweme/v1/web/aweme/listcollection/'?'POST':'GET'))throw failure('BROWSER_ROUTE','不支持的读取接口');
