@@ -3,6 +3,7 @@ import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, parseWork, sleep } f
 import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import {validAccountIdentity} from './account-identity.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
+import {readCollection} from './collection-reader.mjs';
 
 const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/','/aweme/v1/web/user/profile/other/','/aweme/v1/web/aweme/post/']);
 export class Collector{
@@ -56,6 +57,7 @@ export class Collector{
         if(needsLegacyCheck&&!verified.ownsLegacyCollection&&!confirmLegacy){this.pendingAuth={auth,identity:verified,previous,token:randomUUID(),expires:Date.now()+300000};this.status.pendingAccount={uid:verified.uid,nickname:verified.nickname||'当前账号',token:this.pendingAuth.token,records:this.store.rows('SELECT COUNT(*) n FROM works')[0].n};throw Object.assign(new Error('旧版资料没有保存可核对的账号 ID，请确认这是原来收藏的账号'),{code:'LEGACY_CONFIRM_REQUIRED'});}
         auth.identity={uid:verified.uid,nickname:verified.nickname||''};
         this.store.setSetting('browserAccountKey','uid:'+verified.uid);
+        this.store.collectionReads.rebind(previous,'uid:'+verified.uid);
         for(const row of this.store.rows('SELECT collection_id,body FROM sync_runs')){const run=JSON.parse(row.body);if(run.accountKey===previous){run.accountKey='uid:'+verified.uid;this.store.db.run('UPDATE sync_runs SET body=? WHERE collection_id=?',[JSON.stringify(run),row.collection_id]);}}
         this.store.setSetting('account',{...savedAccount,uid:verified.uid,nickname:verified.nickname||savedAccount?.nickname||'抖音已连接'});
       }else{
@@ -150,7 +152,8 @@ export class Collector{
   readProgress(change){this.status.readProgress={...this.status.readProgress,...change};this.notify();}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
   async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.cancelAuthentication();await this.browser.close();}
-  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false}={}){
+  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode}={}){
+    if(mode&&!discoverOnly)return readCollection(this,{collectionId,mode,resume});
     const epoch=this.cancelEpoch;
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');
     if(!discoverOnly){

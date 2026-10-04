@@ -71,6 +71,18 @@ try{
  await click('从头读取 20 条');check('author read uses separate endpoint and returns independent cards',authorOptions.id===authorId&&authorOptions.limit===20&&document.querySelector('.cover-title').textContent==='主页独立作品');
  await aria('选择 主页独立作品');await click('下载所选作品');check('author selection feeds normal download without favorite membership',normalSelected.join(',')==='7001'&&!store.snapshot().members.__all__.includes('7001'));
  await click('读取作者作品');check('author dialog offers checkpoint continuation',document.querySelector('.modal').textContent.includes('继续读取 20 条'));await aria('关闭弹窗');
+ let collectionOptions,confirmed=0;window.cangxia.sync=async options=>{collectionOptions=options;return {collector:{phase:'done',message:'检查结束'},collectionReadInfo:store.collectionReads.snapshot()};};window.cangxia.confirmCollectionRead=async options=>{confirmed++;store.collectionReads.confirm(options.collectionId,options.mode,options.token);};
+ await act(async()=>{[...document.querySelectorAll('.main-nav>button')].find(b=>b.textContent.includes('账号收藏')).click();await settle();});await click('同步收藏');
+ check('collection dialog defaults to bounded quick check without a new-item quota',document.querySelector('.collection-read-setup').textContent.includes('尚无可确认的完整对照')&&!document.querySelector('[aria-label="最大新增作品数"]'));
+ await click('检查新增');check('quick check passes explicit mode without requesting all',collectionOptions.mode==='quick'&&!collectionOptions.readAll&&!collectionOptions.resume);
+ const scope=collectionOptions.collectionId,reads=store.collectionReads;let run=reads.start(scope,'full');reads.apply(run,{items:[{aweme_id:'1000',desc:'测试作品 1'}],next:'30',complete:false});reads.finish(run,'paused');run=reads.start(scope,'quick');reads.apply(run,{items:[{aweme_id:'1001',desc:'测试作品 2'}],next:'30',complete:false});reads.finish(run,'limit');
+ await act(async()=>{notify(data());await settle();});await click('同步收藏');
+ check('quick and full checkpoints have independent continuation buttons',document.querySelector('.modal').textContent.includes('继续检查一段')&&document.querySelector('.modal').textContent.includes('继续完整核对'));
+ await click('继续检查一段');check('quick continuation does not resume full scan',collectionOptions.mode==='quick'&&collectionOptions.resume===true);
+ await click('同步收藏');await click('继续完整核对');check('full continuation explicitly selects full checkpoint',collectionOptions.mode==='full'&&collectionOptions.resume===true);
+ run=reads.start(scope,'full');reads.apply(run,{items:[],next:null,complete:true});await act(async()=>{notify(data());await settle();});await click('同步收藏');await click('查看并确认');
+ check('suspicious shrink requires an explicit second confirmation with file-preservation notice',confirmed===0&&document.querySelector('.collection-read-confirm').textContent.includes('本地已下载的文件和作品资料仍保留'));
+ await click('保留旧记录');check('cancel confirmation does not reconcile missing records',confirmed===0&&reads.membership(scope).length>0);await click('查看并确认');await click('确认采用本次列表');check('confirmed list reaches backend with matching scope mode token',confirmed===1&&reads.membership(scope).length===0);
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

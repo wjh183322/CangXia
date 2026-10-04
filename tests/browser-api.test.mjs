@@ -32,6 +32,17 @@ test('browser-connected collector reads several pages and preserves exact cursor
  const f=await setup(t,async(_route,o)=>{const n=Number(o.form.cursor);return new Response(JSON.stringify({status_code:0,aweme_list:[raw(String(100+n))],has_more:n<60?1:0,cursor:String(n+30)}));});
  await f.c.sync({readAll:true});assert.deepEqual(f.calls.filter(x=>x.route===TOTAL_ROUTE).map(x=>x.options.form.cursor),['0','30','60']);assert.equal(f.store.all('works').length,3);assert.equal(f.direct,0);assert.equal(f.calls.filter(x=>x.route.includes('profile/self')).length,2);
 });
+
+test('quick check uses authenticated browser transport and ordered baseline without direct fallback',async t=>{
+ const f=await setup(t,async(_route,o)=>{const n=Number(o.form.cursor);return new Response(JSON.stringify({status_code:0,aweme_list:Array.from({length:30},(_,i)=>raw(String(n+i+1))),has_more:1,cursor:String(n+30)}));});
+ const ids=Array.from({length:300},(_,i)=>String(i+1));for(const id of ids)f.store.upsertWork(raw(id));f.store.ingestMembers('__all__',ids,true);f.store.sync.write({collectionId:'__all__',status:'complete',count:300,accountKey:'uid:123'});
+ await f.c.sync({mode:'quick'});assert.deepEqual(f.calls.filter(x=>x.route===TOTAL_ROUTE).map(x=>x.options.form.cursor),['0','30']);assert.equal(f.store.collectionReads.get('__all__','quick').outcome,'matched');assert.equal(f.direct,0);
+});
+
+test('quick check honors browser frequency hold and rejects a changed session before commit',async t=>{
+ let mode='limit',f;f=await setup(t,async()=>{if(mode==='limit')return new Response('',{status:429,headers:{'retry-after':'60'}});f.changeAccount();return new Response(JSON.stringify({aweme_list:[raw('999')],has_more:0}));});
+ await f.c.sync({mode:'quick'});assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.match(f.c.status.message,/频繁/);f.store.setSetting('accessHoldUntil',0);mode='change';await f.c.sync({mode:'quick',resume:true});assert.equal(f.store.work('999'),null);assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.equal(f.direct,0);
+});
 test('browser frequency response stops and never falls back to direct requests',async t=>{
  const f=await setup(t,async()=>new Response('',{status:429,headers:{'retry-after':'120'}}));await f.c.sync({readAll:true});assert.equal(f.calls.filter(x=>x.route===TOTAL_ROUTE).length,1);assert.equal(f.direct,0);assert.ok(f.store.getSetting('accessHoldUntil')>Date.now()+110000);
 });

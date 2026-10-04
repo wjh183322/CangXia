@@ -173,8 +173,9 @@ try {
     ensureIdle();
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
     readStarting=true;
-    try{await collector.sync(options);return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress()};}finally{readStarting=false;notify();}
+    try{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};}finally{readStarting=false;notify();}
   });
+  handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
   handler('addAuthor',async text=>{ensureIdle();readStarting=true;try{return await authorReader.add(text);}finally{readStarting=false;notify();}});
   handler('readAuthor',async options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('作者读取选项无效');readStarting=true;try{return await authorReader.read(options);}finally{readStarting=false;notify();}});
   handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
