@@ -12,7 +12,7 @@ import { Pagination, Toast, FilePicker, DeleteConfirmation, RepairReport } from 
 import { SoundProvider, VolumeControl, MediaVideo, CoverAction, Viewer, TagRow, TagChoices, ChoiceList, TagEditor, DownloadManager } from './library-ui.jsx';
 
 const preview = !window.cangxia;
-const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.1.3', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
+const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.1.4', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
 const api = window.cangxia || Object.fromEntries(['addAuthor','readAuthor','flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'].map(k => [k, async () => { if (k === 'state' || k === 'refreshFiles') return blank; throw new Error('浏览器仅用于界面预览，请在 Windows 桌面程序中操作'); }]));
 const fmt = n => Number(n || 0).toLocaleString('zh-CN');
 const time = ms => `${Math.floor(ms / 60000).toString().padStart(2,'0')}:${Math.floor(ms / 1000 % 60).toString().padStart(2,'0')}`;
@@ -29,6 +29,7 @@ function Modal({ title, description, children, onClose, wide = false, side = fal
   return <div className="overlay" onMouseDown={e => { if(dismissible&&e.target === e.currentTarget) onClose(); }}><section ref={panel} className={`modal ${wide ? 'wide' : ''} ${side ? 'detail-drawer' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header className="modal-head"><div><h2>{title}</h2>{description && <p>{description}</p>}</div>{dismissible&&<button className="icon-button" aria-label="关闭弹窗" onClick={onClose}><X size={20}/></button>}</header>{children}</section></div>;
 }
 function App() {
+  const [loading,setLoading]=useState(true);
   const [data,setData] = useState(blank), [mode,setMode] = useState('account'), [collection,setCollection] = useState(TOTAL);
   const [authorSourceId,setAuthorSourceId]=useState('');
   const [query,setQuery] = useState(''), [type,setType] = useState('all'), [tags,setTags] = useState([]), [tagMode,setTagMode] = useState('any'), [author,setAuthor] = useState(''), [downloaded,setDownloaded] = useState('all');
@@ -54,7 +55,8 @@ function App() {
   useEffect(()=>{if(modal==='settings'&&!preview)api.refreshFiles().then(setData).catch(e=>setToast(e.message));},[modal]);
   useEffect(()=>{document.body.style.overflow=modal||detailId||viewerId?'hidden':'';return()=>{document.body.style.overflow='';};},[modal,detailId,viewerId]);
   useEffect(()=>setVideoError(false),[detailId]);
-  useEffect(() => { (preview && import.meta.env.DEV && new URLSearchParams(location.search).get('fixture')==='1' ? fetch('/__test__/snapshot').then(r=>r.json()) : api.state()).then(setData).catch(e=>setToast(e.message)); return window.cangxia?.onChange(update=>setData(previous=>mergeState(previous,update))); }, []);
+  useEffect(() => { (preview && import.meta.env.DEV && new URLSearchParams(location.search).get('fixture')==='1' ? fetch('/__test__/snapshot').then(r=>r.json()) : api.state()).then(value=>{setData(value);setLoading(false);}).catch(e=>{setToast(e.message);setLoading(false);}); return window.cangxia?.onChange(update=>setData(previous=>mergeState(previous,update))); }, []);
+  useEffect(()=>{if(!loading&&api.startupReady){const id=window.requestAnimationFrame(()=>{void api.startupReady().catch(()=>{});});return()=>window.cancelAnimationFrame(id);}},[loading]);
   useEffect(()=>{if(data.needsFullState)api.state().then(setData).catch(e=>setToast(e.message));},[data.needsFullState]);
   useEffect(()=>{if(modal!=='login'||preview)return;api.startQrLogin().catch(e=>setToast(e.message));return()=>{api.cancelQrLogin().catch(()=>{});};},[modal]);
   useEffect(()=>{if(modal==='login'&&data.qr?.phase==='success'){setModal(null);setToast('登录成功，可以同步收藏');}},[modal,data.qr?.phase]);
@@ -112,6 +114,7 @@ function App() {
   const filteredIdSet=new Set(filtered.map(w=>w.id));
   const selectedIds=[...selected].filter(id=>filteredIdSet.has(id));
   const busy=pending || data.collector.busy;
+  if(loading)return <div className="library-loading" role="status"><Archive size={38}/><h2>正在加载本地资料</h2><p>收藏和下载记录保留在原位置</p><LoaderCircle className="spin" size={19}/></div>;
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Archive size={25} strokeWidth={2}/></div><div><strong>藏匣<span> CANGXIA</span></strong><small>把喜欢的，好好收藏</small></div></div>

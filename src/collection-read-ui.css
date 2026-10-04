@@ -2,3 +2,4 @@
 .modal:has(>.collection-read-setup),.modal:has(>.collection-read-confirm){display:flex;flex-direction:column;overflow:hidden}
 .collection-read-setup,.collection-read-confirm{min-height:0;overflow:auto}
 .modal:has(>.collection-read-setup)>.modal-head,.modal:has(>.collection-read-setup)>.modal-footer,.modal:has(>.collection-read-confirm)>.modal-head,.modal:has(>.collection-read-confirm)>.modal-footer{flex-shrink:0}
+.library-loading{height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;background:#f7f8fa;color:#f4624d}.library-loading h2{font-size:18px;font-weight:550;margin:0;color:#303b4d}.library-loading p{font-size:12px;color:#8a96aa;margin:0 0 8px}
