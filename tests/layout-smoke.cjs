@@ -8,7 +8,7 @@ app.whenReady().then(async()=>{
  try{
   const works=Array.from({length:21},(_,i)=>({id:String(1000+i),name:`布局测试 ${i+1}`,title:'',description:'',author:{uid:'1',nickname:'测试作者'},tags:[],localTags:[],type:'images',images:[{index:0}],local:i<2,downloaded:i<2,localRecord:i<2?{collectionId:'__all__',assets:[]}:null}));
   const members={__all__:works.map(w=>w.id)};
-  const collectionReadInfo={__all__:{baselineKnown:true,quick:{mode:'quick',count:510,added:120,restored:3,canResume:true,reason:'达到本段检查上限，可继续检查'},full:{mode:'full',count:22000,added:120,canResume:true,reason:'上次读取未正常结束，已有内容保留'}}};
+  const collectionReadInfo={__all__:{baselineKnown:true,quick:{mode:'quick',baselineKnown:true,count:810,added:120,restored:3,canResume:true,reason:'已停止，已读取内容和进度保留'},full:{mode:'full',count:22000,added:120,canResume:true,reason:'上次读取未正常结束，已有内容保留'}}};
   ipcMain.handle('layout:state',()=>({works,collectionReadInfo,collections:[{id:'__all__',name:'收藏',added:true}],members,localMembers:members,root:'测试目录',collector:{phase:'idle',message:'布局测试数据'},queue:{jobs:[]}}));
   protocol.handle('app-media',()=>new Response(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==','base64'),{headers:{'content-type':'image/png'}}));
   win=new BrowserWindow({show:false,useContentSize:true,width:1400,height:960,webPreferences:{offscreen:true,contextIsolation:true,sandbox:true,backgroundThrottling:false,preload:path.join(__dirname,'layout-preload.cjs')}});

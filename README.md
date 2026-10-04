@@ -1,6 +1,6 @@
 # 藏匣 CangXia
 
-**当前工作树为作者下载试验版 0.1.4**（`codex/author-download`）。推荐运行 `release/author/CangXia-Author-0.1.4-Setup-x64.exe` 安装一次，以后使用桌面快捷方式启动，避免反复解压。用户目录仍为 `%APPDATA%\藏匣作者下载试验版`。收藏默认使用有上限的“检查新增”。见 [启动优化说明](RELEASE-AUTHOR-0.1.4.md)、[新增检查说明](RELEASE-AUTHOR-0.1.3.md) 和 [作者下载说明](AUTHOR-DOWNLOAD.md)。下面的稳定版及本地版说明作为历史参考。
+**当前工作树为作者下载试验版 0.1.5**（`codex/author-download`）。推荐运行 `release/author/CangXia-Author-0.1.5-Setup-x64.exe` 安装或覆盖升级，以后使用桌面快捷方式启动，避免反复解压。用户目录仍为 `%APPDATA%\藏匣作者下载试验版`。收藏“检查新增”不设数量上限，匹配历史顺序或到达末页后结束。见 [本版说明](RELEASE-AUTHOR-0.1.5.md)、[启动优化说明](RELEASE-AUTHOR-0.1.4.md) 和 [作者下载说明](AUTHOR-DOWNLOAD.md)。下面的稳定版及本地版说明作为历史参考。
 
 本地版优化预览：**[0.2.9](https://github.com/wjh183322/CangXia/releases/tag/local-v0.2.9)**，在 `codex/local` 分支开发。加入 SQLite 增量保存、界面差量更新、读取进度恢复和登录验证引导。升级前先退出 0.1.7，保留原数据目录；见[升级与验证说明](docs/releases/local-v0.2.9.md)。NAS 版和备份版保持独立。
 

@@ -41,7 +41,7 @@ test('quick check uses authenticated browser transport and ordered baseline with
 
 test('quick check honors browser frequency hold and rejects a changed session before commit',async t=>{
  let mode='limit',f;f=await setup(t,async()=>{if(mode==='limit')return new Response('',{status:429,headers:{'retry-after':'60'}});f.changeAccount();return new Response(JSON.stringify({aweme_list:[raw('999')],has_more:0}));});
- await f.c.sync({mode:'quick'});assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.match(f.c.status.message,/频繁/);f.store.setSetting('accessHoldUntil',0);mode='change';await f.c.sync({mode:'quick',resume:true});assert.equal(f.store.work('999'),null);assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.equal(f.direct,0);
+ await f.c.sync({mode:'quick',allowFullScan:true});assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.match(f.c.status.message,/频繁/);f.store.setSetting('accessHoldUntil',0);mode='change';await f.c.sync({mode:'quick',allowFullScan:true,resume:true});assert.equal(f.store.work('999'),null);assert.equal(f.store.collectionReads.get('__all__','quick').nextCursor,'0');assert.equal(f.direct,0);
 });
 test('browser frequency response stops and never falls back to direct requests',async t=>{
  const f=await setup(t,async()=>new Response('',{status:429,headers:{'retry-after':'120'}}));await f.c.sync({readAll:true});assert.equal(f.calls.filter(x=>x.route===TOTAL_ROUTE).length,1);assert.equal(f.direct,0);assert.ok(f.store.getSetting('accessHoldUntil')>Date.now()+110000);

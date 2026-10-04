@@ -1,8 +1,8 @@
 import {TOTAL} from './model.mjs';
 import {pageResult} from './api-pagination.mjs';
 
-// A segment budget limits requests, not newly discovered works. Pages are atomic.
-export async function readCollection(collector,{collectionId=TOTAL,mode='quick',resume=false}={}){
+// Quick reads end on ordered overlap or an explicit last page, never a new-item quota.
+export async function readCollection(collector,{collectionId=TOTAL,mode='quick',resume=false,allowFullScan=false}={}){
   const c=collector,store=c.store,reads=store.collectionReads,epoch=c.cancelEpoch;
   reads.key(collectionId,mode);
   if(c.busy||c.waiters.size)throw Error('已有读取任务正在进行');
@@ -11,14 +11,16 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
   await c.ready;
   try{c.assertNotCoolingDown();if(!(await c.isAuthenticated())){c.update('attention','请先连接原抖音账号，再读取收藏');return;}}catch(e){c.update('attention',e.message);return;}
   if(epoch!==c.cancelEpoch){c.update('idle','已取消读取，原资料保留');return;}
+  reads.importLegacy(collectionId);
+  const hasAnchor=resume?reads.get(collectionId,'quick')?.baselineKnown:!!reads.baseline(collectionId);
+  if(mode==='quick'&&!hasAnchor&&allowFullScan!==true)throw Error('没有可靠的历史对照，可能读取到列表末尾，请先确认继续');
   c.busy=true;c.cancelled=false;c.stopRequested=false;c.syncController=new AbortController();
   const signal=c.syncController.signal;
   c.status.readProgress={mode,name:collection.name,goal:null,checked:0,added:0,restored:0,startedAt:Date.now(),stage:'preparing'};c.notify();
   let run,failure='',saveFailed=false;
   try{
     run=reads.start(collectionId,mode,{resume});
-    const startCount=run.rawCount,startPages=run.pages;
-    for(let page=0;page<10000;page++){
+    for(let page=0;mode==='quick'||page<10000;page++){
       signal.throwIfAborted();if(c.cancelled)break;
       c.update('syncing',`${mode==='quick'?'正在检查新增':'正在完整核对'}「${collection.name}」`,run.count);
       c.readProgress({stage:'reading',checked:run.count,added:run.added,restored:run.restored});
@@ -32,7 +34,6 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
       reads.apply(run,result,{signal});
       c.readProgress({checked:run.count,added:run.added,restored:run.restored});
       if(run.status!=='running')break;
-      if(mode==='quick'&&(run.rawCount-startCount>=500||run.pages-startPages>=20)){reads.finish(run,'limit');break;}
       await c.delay();signal.throwIfAborted();
     }
     if(run.status==='running')reads.finish(run,c.cancelled?'paused':'limit',c.cancelled?'':'本次请求已达上限，进度保留，请手动继续');

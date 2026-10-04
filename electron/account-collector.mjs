@@ -152,8 +152,8 @@ export class Collector{
   readProgress(change){this.status.readProgress={...this.status.readProgress,...change};this.notify();}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
   async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.cancelAuthentication();await this.browser.close();}
-  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode}={}){
-    if(mode&&!discoverOnly)return readCollection(this,{collectionId,mode,resume});
+  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode,allowFullScan=false}={}){
+    if(mode&&!discoverOnly)return readCollection(this,{collectionId,mode,resume,allowFullScan});
     const epoch=this.cancelEpoch;
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');
     if(!discoverOnly){
