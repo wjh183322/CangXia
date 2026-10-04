@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {SqliteStore} from './sqlite-store.mjs';
 import {SyncState} from './sync-state.mjs';
+import {CollectionReads} from './collection-reads.mjs';
 import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
@@ -25,11 +26,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sync_pages(collection_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(collection_id,cursor));`);
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
+    s.collectionReads.init();
     s.sync.recover();
+    s.collectionReads.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this); }
-  syncProgress(){return this.sync.list();}
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.collectionReads=new CollectionReads(this); }
+  syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
   rows(sql, args = []) {
     return this.db.all(sql,args);
   }
@@ -116,7 +119,7 @@ export class Store {
     members.forEach((row,index)=>{if(!pendingOrder.has(row.work_id))pendingOrder.set(row.work_id,index);});
     return rows.sort((a,b)=>Number(a.rank===null)-Number(b.rank===null)||(a.rank!==null?a.rank-b.rank:(pendingOrder.get(a.work_id)??Number.MAX_SAFE_INTEGER)-(pendingOrder.get(b.work_id)??Number.MAX_SAFE_INTEGER))||a.work_id.localeCompare(b.work_id));
   }
-  ingestMembers(id, ids, complete) {
+  ingestMembers(id, ids, complete, options={}) {
     const c = this.collection(id); if (!c || !c.added) return;
     ids = [...new Set(ids)];
     const seen = new Set(ids);
@@ -126,16 +129,17 @@ export class Store {
     this.db.run('BEGIN');
     try {
       // Each scope owns its order. A partial prefix retains the unvisited suffix without rank collisions.
-      for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}
+      if(options.unhide!==false)for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}
       this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
       ordered.forEach((wid, rank) => this.db.run('INSERT INTO members VALUES (?,?,?)', [id, wid, rank]));
       pending.forEach(wid => this.db.run('INSERT INTO members VALUES (?,?,NULL)', [id, wid]));
       if (id !== TOTAL) for (const wid of ids) {
-        this.db.run('DELETE FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?', [wid, TOTAL, id]);
+        if(!options.preserveOther)this.db.run('DELETE FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?', [wid, TOTAL, id]);
         // A folder proves total membership, but cannot establish the total's position.
         this.db.run('INSERT OR IGNORE INTO members VALUES (?,?,NULL)', [TOTAL, wid]);
       }
       this.put('collections', id, { ...c, syncedAt: new Date().toISOString(), complete, count: complete ? ids.length : Math.max(c.count || 0, ids.length), loadedCount: ids.length });
+      this.setSetting('collectionMembershipRevision',Number(this.getSetting('collectionMembershipRevision')||0)+1);
       this.db.run('COMMIT');
     } catch (e) { this.db.run('ROLLBACK'); throw e; }
     this.save();
@@ -287,12 +291,13 @@ export class Store {
     const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
     const hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
     for (const c of collections) {
-      const rows=this.sync.order(c.id,this.orderedMemberRows(c.id));
+      const baseRows=this.orderedMemberRows(c.id);
+      const rows = this.collectionReads.managed(c.id)?this.collectionReads.order(c.id,baseRows):this.sync.order(c.id,baseRows);
       localMembers[c.id]=rows.map(r=>r.work_id);
       localPendingMembers[c.id]=rows.filter(r=>r.rank===null).map(r=>r.work_id);
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers, readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.2.1' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers,collectionReadInfo:this.collectionReads.snapshot(), readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.2.2' };
   }
 }

@@ -1,7 +1,7 @@
 import {app,session} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
 app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false;
 const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
-app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.once('did-finish-load',()=>{void(async()=>{
+app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
  const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
  try{
   let data=await call('state');check('backup starts isolated and read-only',data.storage.mode==='backup'&&!data.storage.writable&&data.works.length===0);
