@@ -1,4 +1,4 @@
-export const membershipFields=['members','pendingMembers','localMembers','localPendingMembers'];
+export const membershipFields=['members','pendingMembers','localMembers','localPendingMembers','authorMembers'];
 export function arrayPatch(before=[],after=[]){let start=0;while(start<before.length&&start<after.length&&before[start]===after[start])start++;if(start===before.length&&start===after.length)return null;let end=0;while(end<before.length-start&&end<after.length-start&&before[before.length-1-end]===after[after.length-1-end])end++;return {start,remove:before.length-start-end,insert:after.slice(start,after.length-end)};}
 export function mergeState(before,update){
   if(!update?.delta)return update;

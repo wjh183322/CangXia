@@ -11,10 +11,12 @@ import { BackupClient } from './backup-client.mjs';
 import {exportRecords,applyChanges} from './backup-model.mjs';
 import {requireLocalStorage} from './local-storage.mjs';
 import {SnapshotFeed} from './snapshot-feed.mjs';
-import {assertCollectionOnlySource} from './collection-source-guard.mjs';
+import {importDestination} from './author-import.mjs';
 import {createDiagnostics} from './diagnostics.mjs';
 import {VerificationView} from './verification-view.mjs';
 import { Collector } from './account-collector.mjs';
+import {AuthorReader} from './author-reader.mjs';
+import {redirectHeaders} from './redirect-headers.mjs';
 import { AuthVault } from './auth-data.mjs';
 import {verifyAccountIdentity} from './account-identity.mjs';
 import { SystemBrowser } from './system-browser.mjs';
@@ -35,7 +37,7 @@ fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData'
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let backup,backupBusy=false,exitApproved=false;
-const writes=new Set(['confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
+const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
@@ -97,6 +99,7 @@ try {
   // Local browsing must not wait for cookie restoration or account checks.
   collector.ready=collector.ready.catch(()=>collector.update('attention','登录状态未恢复，请重新连接原账号')).finally(()=>startupStage('session-ready'));
   backup.fetchCover=(url,options)=>collector.fetchMedia(url,options);
+  const authorReader=new AuthorReader(collector,{fetchLink:redirectHeaders(net,httpProfile)});
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
@@ -113,11 +116,11 @@ try {
   let importPreview;
   async function oldLibrary(kind){
     let legacy=process.env.CANGXIA_BACKUP_TEST_PROFILE&&process.env.CANGXIA_BACKUP_TEST_ORIGINAL?process.env.CANGXIA_BACKUP_TEST_ORIGINAL:path.join(app.getPath('appData'),'藏匣');let file=path.join(legacy,'library.sqlite');
+    if(kind==='author'){legacy=process.env.CANGXIA_BACKUP_TEST_PROFILE?(process.env.CANGXIA_BACKUP_TEST_AUTHOR||path.join(path.dirname(profile),'author-original')):path.join(app.getPath('appData'),'藏匣作者下载试验版');file=path.join(legacy,'library.sqlite');}
     if(kind==='nas'){const isolated=path.join(app.getPath('appData'),'藏匣NAS版');if(fs.existsSync(path.join(isolated,'library-location.json')))legacy=isolated;const c=JSON.parse(fs.readFileSync(path.join(legacy,'library-location.json'),'utf8'));if(!c.id||!/^[a-f0-9-]+$/.test(c.id))throw new Error('没有可导入的 NAS 版缓存');let name=c.id+'.sqlite';try{const active=fs.readFileSync(path.join(legacy,'nas-cache',c.id+'.active'),'utf8').trim();if(active.startsWith(c.id+'-')&&/^[a-f0-9-]+\.sqlite$/.test(active))name=active;}catch{}file=path.join(legacy,'nas-cache',name);}
-    else if(kind!=='local')throw new Error('导入来源无效');
+    else if(!['local','author'].includes(kind))throw new Error('导入来源无效');
     if(!fs.existsSync(file))throw new Error('未找到旧版资料');const temp=path.join(profile,'import-preview.sqlite');await SqliteStore.copyFile(file,temp);const source=await Store.open(temp,path.join(app.getPath('downloads'),'藏匣'));
     try{
-      assertCollectionOnlySource(source);
       const currentKey=store.getSetting('browserAccountKey'),sourceKey=source.getSetting('browserAccountKey');
       if(currentKey&&sourceKey&&currentKey!==sourceKey){
         const currentUid=currentKey.startsWith('uid:')?currentKey.slice(4):store.getSetting('account')?.uid;
@@ -137,9 +140,9 @@ try {
   handler('previewExistingLibrary',async kind=>{ensureIdle();if(store.all('works').length)throw new Error('当前备份版本机库已有记录，不能直接合并导入');const source=await oldLibrary(kind);try{const entries=exportRecords(source),downloads=source.all('downloads');let files=0,bytes=0;for(const d of downloads)for(const a of d.assets||[])if(source.assetExists(d,a)){files++;bytes+=a.size||0;}importPreview={token:randomUUID(),kind,works:entries.filter(e=>e.table==='works').length,files,bytes};return importPreview;}finally{source.close();}});
   handler('importExistingLibrary',async token=>{ensureIdle();if(!importPreview||importPreview.token!==token||store.all('works').length)throw new Error('请重新预览导入范围');const kind=importPreview.kind;importPreview=null;backupBusy=true;backup.applying=true;notify();let source;try{
     source=await oldLibrary(kind);const entries=exportRecords(source).filter(e=>e.table!=='downloads');applyChanges(store,entries);const errors=[];let count=0;
-    for(const original of source.all('downloads')){if(!store.work(original.id))continue;const target=store.destination(original.id);fs.mkdirSync(target.dir,{recursive:true});const assets=[];
+    for(const original of source.all('downloads')){if(!store.work(original.id))continue;const target=importDestination(store,source,original);fs.mkdirSync(target.dir,{recursive:true});const assets=[];
       for(const a of original.assets||[]){if(!source.assetExists(original,a))continue;try{backup.status.progress='正在复制已有文件：'+a.file;notify();await fs.promises.copyFile(requireInside(original.path,path.join(original.path,a.file)),requireInside(target.dir,path.join(target.dir,a.file)),fs.constants.COPYFILE_EXCL);assets.push(a);count++;}catch(e){errors.push(e.message);}}
-      if(assets.length)store.put('downloads',original.id,{...original,path:target.dir,collectionId:target.collectionId,assets,state:assets.length===original.assets.length?original.state:'partial'});
+      if(assets.length)store.put('downloads',original.id,{...original,path:target.dir,collectionId:target.collectionId,home:target.home,assets,state:assets.length===original.assets.length?original.state:'partial'});
     }store.save();return {works:entries.filter(e=>e.table==='works').length,files:count,errors};
   }finally{source?.close();backup.applying=false;backupBusy=false;backup.status.progress='';backup.changed();notify();}});
   collector.onAccessHold=()=>{queue.pause();flatQueue.pauseAll();};
@@ -242,6 +245,9 @@ try {
     try{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};}finally{readStarting=false;notify();}
   });
   handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
+  handler('addAuthor',async text=>{ensureIdle();readStarting=true;try{return await authorReader.add(text);}finally{readStarting=false;notify();}});
+  handler('readAuthor',async options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('作者读取选项无效');readStarting=true;try{return await authorReader.read(options);}finally{readStarting=false;notify();}});
+  handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});
   handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
   handler('stopSync', () => collector.stop());
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
@@ -275,17 +281,18 @@ try {
     notify();
   });
   handler('checkSource', async id => { ids([id]); ensureIdle(); try { await collector.resolveWork(id); } finally { notify(); } });
-  handler('prepareDelete',(selected,kind)=>{
+  handler('prepareDelete',(selected,kind,authorScope=null)=>{
     ensureIdle();if(!['local','records'].includes(kind))throw new Error('删除类型无效');
-    const selectedIds=ids(selected).filter(id=>kind==='local'?store.download(id):store.hasRead(id));
+    if(authorScope&&!store.authorSources.get(authorScope))throw Error('作者范围无效');
+    const selectedIds=ids(selected).filter(id=>kind==='local'?store.download(id):authorScope?store.rows('SELECT 1 FROM author_members WHERE author_id=? AND work_id=? AND hidden=0',[authorScope,id]).length:store.hasRead(id));
     const invalid=selectedIds.some(id=>store.work(id)?.remoteState==='unavailable');
-    const token=randomUUID();deleteIntents.clear();deleteIntents.set(token,{ids:selectedIds,kind,invalid,expires:Date.now()+600000});
+    const token=randomUUID();deleteIntents.clear();deleteIntents.set(token,{ids:selectedIds,kind,authorScope,invalid,expires:Date.now()+600000});
     return {token,kind,count:selectedIds.length,invalid,backup:true};
   });
   handler('confirmDelete',async token=>{
     ensureIdle();const intent=deleteIntents.get(token);if(!intent||intent.expires<Date.now())throw new Error('删除确认已过期，请重新选择');
     deleteIntents.delete(token);
-    if(intent.kind==='records'){store.deleteReadRecords(intent.ids);notify();return true;}
+    if(intent.kind==='records'){if(intent.authorScope)store.authorSources.hide(intent.authorScope,intent.ids);else store.deleteReadRecords(intent.ids);notify();return true;}
     const records=intent.ids.map(id=>store.download(id)).filter(Boolean);
     if(!intent.invalid&&records.some(d=>store.work(d.id)?.remoteState==='unavailable'))throw new Error('原作品状态已变化，请重新确认删除');
     const failed = [];

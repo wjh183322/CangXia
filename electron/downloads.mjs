@@ -63,9 +63,9 @@ export class DownloadQueue {
     if (signal.aborted) throw new Error('已暂停');
     const old = store.download(job.id);
     if (old) store.relocate(job.id);
-    const { dir, collectionId } = store.destination(job.id);
+    const { dir, collectionId,home } = store.destination(job.id);
     store.assertDirectory(dir); fs.mkdirSync(dir, { recursive: true });
-    let d = { ...store.download(job.id), id: job.id, path: dir, collectionId, state: 'partial', assets: store.download(job.id)?.assets || [], savedAt: old?.savedAt || new Date().toISOString() };
+    let d = { ...store.download(job.id), id: job.id, path: dir, collectionId, home,state: 'partial', assets: store.download(job.id)?.assets || [], savedAt: old?.savedAt || new Date().toISOString() };
     store.put('downloads', job.id, d); store.save();
     const targets = w.type === 'video'
       ? [{ key: 'video', name: '视频', kind: 'video', urls: w.videoUrls }, { key: 'cover', name: '单图', kind: 'image', urls: w.coverUrls }]

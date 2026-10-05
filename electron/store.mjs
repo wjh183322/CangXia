@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {SqliteStore} from './sqlite-store.mjs';
 import {SyncState} from './sync-state.mjs';
+import {AuthorSources} from './author-sources.mjs';
 import {CollectionReads} from './collection-reads.mjs';
 import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
+import {validHome} from '../shared/backup-protocol.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
 
 export class Store {
@@ -26,12 +28,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sync_pages(collection_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(collection_id,cursor));`);
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
+    s.authorSources.init();
     s.collectionReads.init();
     s.sync.recover();
     s.collectionReads.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.collectionReads=new CollectionReads(this); }
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this); }
   syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
   rows(sql, args = []) {
     return this.db.all(sql,args);
@@ -42,7 +45,7 @@ export class Store {
   getSetting(key) { const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
   setSetting(key, value) { if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;if(this.backup&&!this.backup.localKey(key))this.backup.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]);if(key==='root')this.viewCache.clear();this.revision++; }
   get root() { return this.getSetting('root'); }
-  collection(id) { return this.get('collections', id); }
+  collection(id) { return this.authorSources.collection(id)||this.get('collections', id); }
   work(id) { return this.get('works', id); }
   hasRead(id) { const w=this.work(id);return !!w&&!w.readHidden; }
   deleteReadRecords(ids) {
@@ -145,6 +148,8 @@ export class Store {
     this.save();
   }
   canonicalCollection(id) {
+    // An existing author download keeps its location even if later collected.
+    const saved=this.download(id)||this.get('backup_downloads',id);if(saved?.collectionId?.startsWith('author:')){const source=this.collection(saved.collectionId);if(source)return source;}
     for (const r of this.rows('SELECT collection_id FROM members WHERE work_id=? AND collection_id<>?', [id, TOTAL])) {
       const c = this.collection(r.collection_id); if (c?.added && !c.remoteMissing) return c;
     }
@@ -155,7 +160,8 @@ export class Store {
       const stillCollected = this.rows('SELECT work_id FROM members WHERE collection_id=? AND work_id=?', [TOTAL, id]).length > 0;
       if (old && (old.remoteMissing || !old.complete || !stillCollected)) return old;
     }
-    return this.collection(TOTAL);
+    const collected=this.rows('SELECT 1 FROM members WHERE collection_id=? AND work_id=?',[TOTAL,id]).length>0;
+    return (!collected&&!saved&&this.authorSources.destination(id))||this.collection(TOTAL);
   }
   assertDirectory(dir) {
     requireInside(this.root, dir);
@@ -168,6 +174,8 @@ export class Store {
   }
   destination(id) {
     const work = this.work(id); if (!work) throw new Error('作品不存在');
+    const remembered=this.download(id)?.home||this.get('backup_downloads',id)?.home;
+    if(remembered&&(remembered.kind==='author'||!this.download(id))){if(!validHome(remembered))throw Error('备份目录归属无效');const dir=requireInside(this.root,path.join(this.root,remembered.folder,remembered.workFolder));this.assertDirectory(dir);if(dir.length>235)throw Error('恢复路径过长，请选择更短的下载目录');return {dir,collectionId:(remembered.kind==='author'?'author:':'')+remembered.id,home:remembered};}
     const c = this.canonicalCollection(id);
     const parent = requireInside(this.root, path.join(this.root, c.folder));
     const basename = `${safeName(work.name, 52)}-${safeName(work.author.nickname, 24)}`;
@@ -177,7 +185,7 @@ export class Store {
     if (occupied || (fs.existsSync(dir) && path.resolve(current?.path || '.') !== dir)) dir += '-' + id;
     if (dir.length > 235) throw new Error('保存路径过长，请选择更短的下载根目录');
     this.assertDirectory(dir);
-    return { dir, collectionId: c.id };
+    return { dir, collectionId: c.id,home:{kind:c.id.startsWith('author:')?'author':'collection',id:c.id.startsWith('author:')?c.id.slice(7):c.id,folder:c.folder,workFolder:path.basename(dir)} };
   }
   relocate(id) {
     const d = this.download(id); if (!d) return;
@@ -191,7 +199,7 @@ export class Store {
       const oldParent = path.dirname(d.path);
       if (oldParent !== this.root && fs.existsSync(oldParent) && fs.readdirSync(oldParent).length === 0) fs.rmdirSync(oldParent);
     }
-    const moved={ ...d, path: target.dir, collectionId: target.collectionId };
+    const moved={ ...d, path: target.dir, collectionId: target.collectionId,home:target.home };
     this.put('downloads', id, moved);
     this.refreshMetadata(id);
   }
@@ -298,6 +306,6 @@ export class Store {
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers,collectionReadInfo:this.collectionReads.snapshot(), readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.2.2' };
+    return { works, collections, members, pendingMembers,localMembers,localPendingMembers,...this.authorSources.snapshot(),collectionReadInfo:this.collectionReads.snapshot(), readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.3.0' };
   }
 }

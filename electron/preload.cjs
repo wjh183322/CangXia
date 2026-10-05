@@ -3,6 +3,7 @@ const methods = ['flatPrepare','flatStart','flatPause','flatResume','flatRetry',
 const api = {};
 methods.push('configureBackup','checkBackup','syncBackup','cancelBackup','acceptRemoteBackup','openBackupRecovery','previewExistingLibrary','importExistingLibrary','finishBackupExit');
 methods.push('startupReady','confirmCollectionRead');
+methods.push('addAuthor','readAuthor','archiveAuthor');
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);

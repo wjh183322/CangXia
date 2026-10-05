@@ -21,13 +21,14 @@ jobs:
           version=$(node -p "require('./backup-server/package.json').version")
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           docker build -f backup-server/Dockerfile -t "cangxia-backup-server:$version" .
+          docker run --rm -v "$PWD:/workspace:ro" -w /workspace --entrypoint node "cangxia-backup-server:$version" --test tests/backup-author.test.mjs tests/backup.test.mjs tests/collection-sync-isolation.test.mjs
           docker run -d --name backup-smoke -p 127.0.0.1:18443:8443 "cangxia-backup-server:$version"
           trap 'docker rm -fv backup-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
-            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 1' >/dev/null; then break; fi
+            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2' >/dev/null; then break; fi
             sleep 1
           done
-          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 1'
+          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2'
           mkdir -p server-release
           docker save "cangxia-backup-server:$version" | gzip > "server-release/CangXia-Backup-Server-$version.tar.gz"
           cp backup-server/compose.yaml backup-server/README.md server-release/
