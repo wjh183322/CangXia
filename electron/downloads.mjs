@@ -5,6 +5,7 @@ import { isMediaURL, requireInside } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { inspectWorkFiles } from './repair-check.mjs';
+import {setImmediate as yieldToUI} from 'node:timers/promises';
 
 function extension(contentType, kind) {
   const t = (contentType || '').split(';')[0];
@@ -17,50 +18,104 @@ function extension(contentType, kind) {
   return ext;
 }
 export class DownloadQueue {
-  constructor(store, collector, fetchMedia, notify) { Object.assign(this, { store, collector, fetchMedia, notify }); this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,state:j.state==='running'?'waiting':j.state})); this.running = false; this.paused = this.jobs.some(j=>j.state==='waiting'); this.controller = null; }
-  state() { return { jobs: this.jobs.map(({ id, title, state, progress, message }) => ({ id, title, state, progress, message })), paused: this.paused, running: this.running }; }
+  constructor(store, collector, fetchMedia, notify) {
+    Object.assign(this, { store, collector, fetchMedia, notify });
+    this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,state:j.state==='running'?'waiting':j.state}));
+    this.running=false;this.paused=this.jobs.some(j=>j.state==='waiting');this.active=new Map();this.resolveTail=Promise.resolve();this.cursor=0;
+    const saved=store.getSetting('downloadConcurrency');this.concurrency=Number.isInteger(saved)&&saved>=1&&saved<=6?saved:3;
+  }
+  state() { return { jobs: this.jobs.map(({ id, title, state, progress, message, phase }) => ({ id, title, state, progress, message, phase })), paused: this.paused, running: this.running, concurrency:this.concurrency, active:this.active.size, transferring:this.jobs.filter(j=>j.state==='running'&&j.phase==='transferring').length, pauseReason:this.pauseReason||'' }; }
+  setConcurrency(value){
+    if(!Number.isInteger(value)||value<1||value>6)throw new Error('同时下载数量应为 1 至 6');
+    this.concurrency=value;this.store.setSetting('downloadConcurrency',value);this.store.save();this.wake?.();this.notify();
+  }
   clearCompleted(ids) {
     const selected=new Set(ids);
     this.jobs=this.jobs.filter(j=>j.state!=='complete'||!selected.has(j.id));
-    this.emit();this.store.save();
+    this.cursor=0;this.emit(true);this.store.save();
   }
-  emit() { this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message})=>({id,title,state,progress,message}))); this.notify(); }
-  enqueue(ids) {
-    for (const id of [...new Set(ids)]) {
-      const w = this.store.work(id); if (!w) continue;
-      if (this.jobs.some(j => j.id === id && ['waiting', 'running'].includes(j.state))) continue;
-      this.jobs = this.jobs.filter(j => j.id !== id);
-      this.jobs.push({ id, title: w.name, state: 'waiting', progress: 0, message: '' });
+  async cancel(ids=null){
+    const selected=ids===null?null:new Set(ids),removed=this.jobs.filter(j=>j.state!=='complete'&&(!selected||selected.has(j.id)));
+    const removedIds=new Set(removed.map(j=>j.id)),pending=[];
+    // Persist queue removal before waiting for network/file handles to settle.
+    this.jobs=this.jobs.filter(j=>!removedIds.has(j.id));this.cursor=0;
+    if(this.jobs.every(j=>j.state==='complete'))this.pauseReason='';
+    this.emit(true);this.store.save();
+    for(const id of removedIds){const task=this.active.get(id);if(task){task.cancelled=true;task.controller.abort();pending.push(task.promise);}}
+    this.wake?.();await Promise.allSettled(pending);this.emit(true);
+    return {cancelled:removedIds.size};
+  }
+  emit(force=false) {
+    // Asset checkpoints remain durable; avoid serializing a 30,000-job queue on every byte update.
+    if(force||!this.lastPersist||Date.now()-this.lastPersist>=5000){
+      this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message,coverOnly})=>({id,title,state,progress,message,coverOnly})));this.lastPersist=Date.now();
     }
-    this.paused = false; this.emit(); void this.run();
+    this.notify();
   }
-  pause() { this.paused = true; this.controller?.abort(); if(this.controller)this.collector.cancelResolve?.('下载已暂停'); this.emit(); this.store.save(); }
-  resume() { this.paused = false; this.emit(); void this.run(); }
+  enqueue(ids,{coverOnly=false}={}) {
+    if(ids.some(id=>this.active.get(id)?.cancelled))throw Error('该任务正在取消，请稍后重新添加');
+    const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
+    for (const id of [...new Set(ids)]) {
+      if(busy.has(id))continue;
+      const w = this.store.work(id); if (!w) continue;
+      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly });
+    }
+    const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
+    this.paused = false;this.pauseReason=''; this.emit(true);this.wake?.();void this.run();
+  }
+  pause() { this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
+  resume() { this.pauseReason='';this.paused = false;this.cursor=0;this.emit(true);this.wake?.();void this.run(); }
+  async resolveWork(id,signal,job){
+    if(job){job.phase='waitingResource';job.message='等待后台刷新资源';this.emit();}
+    const previous=this.resolveTail;let release;this.resolveTail=new Promise(r=>{release=r;});
+    let onAbort;
+    try{signal.throwIfAborted();await Promise.race([previous,new Promise((_,reject)=>{onAbort=()=>reject(signal.reason);signal.addEventListener('abort',onAbort,{once:true});})]);signal.throwIfAborted();this.resolving=true;if(job){job.phase='resolving';job.message='后台刷新作品资源';this.emit();}try{return await this.collector.resolveWork(id,{backgroundOnly:true,signal});}finally{this.resolving=false;}}
+    finally{if(onAbort)signal.removeEventListener('abort',onAbort);void previous.then(release);}
+  }
   waitForIdle(){if(!this.running)return Promise.resolve();return new Promise(resolve=>(this.idleWaiters??=[]).push(resolve));}
   async run() {
-    if (this.running) return; this.running = true;
+    if (this.running) return; this.running = true;this.cursor=0;
     try {
-      while (!this.paused) {
-        const job=this.jobs.find(j=>j.state==='waiting');
-        if(!job)break;
-        job.state = 'running'; this.controller = new AbortController(); this.emit();
-        try { await this.saveWork(job, this.controller.signal); job.state = 'complete'; job.progress = 100; job.message = '文件已保存'; }
-        catch (e) { job.state = this.paused ? 'waiting' : 'failed'; job.message = this.paused ? '已暂停，继续时补齐' : e.message; }
-        this.controller = null; this.emit(); this.store.save();
+      while (true) {
+        while(!this.paused&&this.active.size<this.concurrency&&this.cursor<this.jobs.length){
+          const job=this.jobs[this.cursor++];if(job.state!=='waiting'||this.active.has(job.id))continue;
+          const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
+          task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(()=>{
+            if(task.cancelled)return;
+            job.state='complete';job.progress=100;job.message='文件已保存';
+          },e=>{
+            if(task.cancelled)return;
+            if(e.code==='AUTH_REQUIRED'){this.pauseReason=e.message;this.pause();}
+            const interrupted=task.controller.signal.aborted;
+            job.state=interrupted?'waiting':'failed';job.message=interrupted?'已暂停，继续时补齐':e.message;
+            if(interrupted)this.cursor=0;
+          }).finally(()=>{this.active.delete(job.id);this.emit();this.store.save();});
+        }
+        if(!this.active.size)break;
+        await Promise.race([...this.active.values()].map(t=>t.promise).concat(new Promise(r=>{this.wake=r;})));this.wake=null;
+        await yieldToUI();
       }
-    } finally { this.running = false; this.emit();for(const resolve of this.idleWaiters||[])resolve();this.idleWaiters=[];if(!this.paused)this.onIdle?.(); }
+    } finally { this.running = false;this.wake=null;this.emit(true);for(const resolve of this.idleWaiters||[])resolve();this.idleWaiters=[];if(!this.paused)this.onIdle?.(); }
   }
   async saveWork(job, signal) {
-    if(this.backupRestore&&await this.backupRestore(job,signal))return;
+    signal.throwIfAborted();
+    if(job.coverOnly){const w=this.store.work(job.id),d=this.store.download(job.id);if(w?.type!=='video'||!d)throw Error('本机没有可补齐封面的视频');try{await this.ensureHDCover(job,w,d,signal);const check=inspectWorkFiles(this.store,job.id);d.state=check.status==='error'||check.missing.some(a=>!['cover-quality','metadata'].includes(a.key))?'partial':'complete';}finally{if(!signal.aborted){this.saveMetadata(w,d);this.store.put('downloads',d.id,d);this.store.save();}}return;}
+    if(this.backupRestore&&await this.backupRestore(job,signal)&&(!this.hdCovers||this.store.download(job.id)?.hdCover?.status==='ready'))return;
     const { store } = this;
     const inspection=inspectWorkFiles(store,job.id);
     if(inspection.status==='error')throw new Error(inspection.error);
-    if (inspection.status==='complete') { job.message = '文件完整，无需补齐'; return; }
-    let w = store.work(job.id);
-    job.message = '刷新作品资源'; this.emit();
-    try { const fresh = await this.collector.resolveWork(job.id); if (fresh) w = fresh; }
-    catch (e) { w=store.work(job.id)||w; if (!w.videoUrls.length && !w.images.length) throw e; }
-    if (signal.aborted) throw new Error('已暂停');
+    const w=store.work(job.id);
+    if (inspection.status==='complete'&&(!this.hdCovers||w.type!=='video'||store.download(job.id)?.hdCover?.status==='ready')) { job.message = '文件完整，无需补齐'; return; }
+    try{return await this.saveResources(job,signal,w);}
+    catch(error){
+      signal.throwIfAborted();if(!error.refreshable)throw error;
+      const fresh=await this.resolveWork(job.id,signal,job);signal.throwIfAborted();
+      // Only one refresh per work attempt; saved assets are retained and skipped below.
+      return this.saveResources(job,signal,fresh||store.work(job.id));
+    }
+  }
+  async saveResources(job,signal,w){
+    signal.throwIfAborted();const {store}=this;
     const old = store.download(job.id);
     if (old) store.relocate(job.id);
     const { dir, collectionId,home } = store.destination(job.id);
@@ -70,8 +125,8 @@ export class DownloadQueue {
     const targets = w.type === 'video'
       ? [{ key: 'video', name: '视频', kind: 'video', urls: w.videoUrls }, { key: 'cover', name: '单图', kind: 'image', urls: w.coverUrls }]
       : w.images.map(im => ({ key: `image-${im.index}`, name: `图片-${String(im.index + 1).padStart(3, '0')}`, kind: 'image', urls: im.urls }));
-    if (!targets.length) throw new Error('未获得作品媒体资源，请在抖音窗口正常打开作品后重试');
-    let completed = 0; const failures = [];
+    if (!targets.length) throw Object.assign(new Error('未获得作品媒体资源'),{refreshable:true});
+    let completed = 0; const failures = [];let refreshable=false;
     for (const target of targets) {
       if (signal.aborted) throw new Error('已暂停');
       const existing = d.assets.find(a => a.key === target.key);
@@ -79,31 +134,40 @@ export class DownloadQueue {
         if(existing.kind==='image' && !existing.width) Object.assign(existing,imageDimensions(fs.readFileSync(path.join(d.path,existing.file))));
         completed++; continue;
       }
-      job.message = `保存${target.name}`; this.emit();
+      job.phase='connecting';job.message = `连接${target.name}`; this.emit();
       try {
-        const progress=bytes => { job.progress = Math.round((completed / targets.length) * 95); job.message = `${target.name} · ${(bytes / 1048576).toFixed(1)} MB`; this.emit(); };
+        const progress=bytes => { job.phase='transferring';job.progress = Math.round((completed / targets.length) * 95); job.message = `${target.name} · ${(bytes / 1048576).toFixed(1)} MB`; this.emit(); };
         const asset = target.key==='cover' && w.coverVariants?.length ? await this.saveBestCover(dir,w.coverVariants,signal,progress) : await this.saveAsset(dir, target, signal, progress);
         d.assets = [...d.assets.filter(a => a.key !== target.key), asset];
         store.put('downloads', job.id, d); store.save();
-      } catch (e) { if (signal.aborted) throw e; failures.push(`${target.name}：${e.message}`); }
+      } catch (e) { if (signal.aborted||e.code==='AUTH_REQUIRED') throw e;refreshable ||= !!e.refreshable||[401,403,404,410].includes(e.httpStatus);failures.push(`${target.name}：${e.message}`); }
       completed++;
     }
-    const metadata = this.metadata(w, d);
-    const file = requireInside(dir, path.join(dir, '作品信息.json'));
-    fs.writeFileSync(file + '.part', JSON.stringify(metadata, null, 2)); fs.renameSync(file + '.part', file);
-    d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
+    if(!failures.length&&w.type==='video')try{await this.ensureHDCover(job,w,d,signal);}catch(e){if(signal.aborted)throw e;failures.push(e.message);}
     d.state = failures.length ? 'partial' : 'complete';
     d.coverSource = d.assets.find(a=>a.key==='cover')?.source || w.coverSource; d.lastError = failures.join('；');
     const cover = d.assets.find(a=>a.key==='cover');
-    d.coverWarning = cover?.width && Math.min(cover.width,cover.height)<720 ? `当前单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本` : '';
+    if(!this.hdCovers)d.coverWarning = cover?.width ? `当前封面 ${cover.width}×${cover.height}，尚未与视频实际分辨率核对` : '';
+    this.saveMetadata(w,d);
     store.put('downloads', job.id, d); store.save(); this.emit();
-    if (failures.length) throw new Error(`部分已保存，${failures.join('；')}`);
+    if (failures.length) throw Object.assign(new Error(`部分已保存，${failures.join('；')}`),{refreshable});
+  }
+  async ensureHDCover(job,w,d,signal){
+    if(!this.hdCovers)return;
+    try{await this.hdCovers.ensure(this,w,d,signal,message=>{job.phase='matching';job.message=message;this.emit();});}
+    catch(e){if(signal.aborted)throw e;d.hdCover={status:'failed',message:e.message};d.coverWarning='未取得与视频清晰度相当的封面：'+e.message;d.state='partial';throw Error(d.coverWarning);}
+  }
+  saveMetadata(w,d){
+    const metadata = this.metadata(w, d),dir=d.path;
+    const file = requireInside(dir, path.join(dir, '作品信息.json'));
+    fs.writeFileSync(file + '.part', JSON.stringify(metadata, null, 2)); fs.renameSync(file + '.part', file);
+    d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
   }
   metadata(w, d) {
-    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons }) => ({ key, file, size, width, height, source, comparisons })) };
+    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, hdCover:d.hdCover, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons,match }) => ({ key, file, size, width, height, source, comparisons,match })) };
   }
   async saveAsset(dir, target, signal, progress) {
-    if (!target.urls?.length) throw new Error('作品未提供此资源');
+    if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});
     let lastError;
     for (const url of target.urls.slice(0, 9)) {
       if (!isMediaURL(url)) continue;
@@ -112,7 +176,7 @@ export class DownloadQueue {
         const dimensions=target.kind==='image'?imageDimensions(fs.readFileSync(file)):{};
         return { key: target.key, kind: target.kind, file: path.basename(file), size,sha256,resumedBytes,...dimensions };
       } catch (e) {
-        if (signal.aborted||e.httpStatus===429) throw e; lastError = e;
+        if (signal.aborted||e.httpStatus===429||e.code==='AUTH_REQUIRED') throw e; lastError = e;
       }
     }
     throw lastError || new Error('没有可用的媒体地址');
@@ -120,10 +184,15 @@ export class DownloadQueue {
   async saveBestCover(dir,variants,signal,progress){
     const candidates=[];const seen=new Set();let lastError;
     try{
-      for(const variant of variants.slice(0,3)){
+      const groups=[];
+      for(const variant of variants.slice(0,3))for(const url of variant.urls.slice(0,9)){
+        if(!isMediaURL(url))continue;const u=new URL(url);for(const key of ['x-signature','x-expires','l','from','s','lk3s'])u.searchParams.delete(key);u.searchParams.sort();const identity=u.pathname+'?'+u.searchParams.toString();
+        let group=groups.find(g=>g.identity===identity);if(!group){group={identity,source:variant.source,urls:[]};groups.push(group);}if(!group.urls.includes(url))group.urls.push(url);
+      }
+      for(const variant of groups.slice(0,9)){
         if(signal.aborted)throw new Error('已暂停');
         const identity=JSON.stringify([...variant.urls].sort());if(seen.has(identity))continue;seen.add(identity);
-        const urls=variant.source==='cover'&&variant.urls.length>1?[variant.urls[1],variant.urls[0],...variant.urls.slice(2)]:variant.urls;
+        const urls=variant.urls;
         try{const candidate=await this.saveAsset(dir,{key:'cover',name:'.cangxia-'+randomUUID(),kind:'image',urls},signal,progress);candidate.source=variant.source;candidate.sha256=createHash('sha256').update(fs.readFileSync(path.join(dir,candidate.file))).digest('hex');candidates.push(candidate);}catch(e){lastError=e;if(signal.aborted)throw e;}
       }
       if(!candidates.length)throw lastError||new Error('没有可用静态单图');

@@ -11,3 +11,9 @@ services:
       TZ: Asia/Shanghai
     security_opt:
       - no-new-privileges:true
+    networks:
+      - backup_net
+
+networks:
+  backup_net:
+    driver: bridge

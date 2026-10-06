@@ -1,5 +1,5 @@
 import {checkAuthorDesktop} from './author-desktop-checks.mjs';
-import {app,session} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
+import {app,session,shell} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
 app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false;
 const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
 app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
@@ -7,6 +7,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
  try{
   let data=await call('state');check('backup starts isolated and read-only',data.storage.mode==='backup'&&!data.storage.writable&&data.works.length===0);
   const title=await win.webContents.executeJavaScript('document.title');check('backup title and settings identify the correct edition',title.includes('藏匣备份版 v'+data.version)&&win.getTitle()===title);
+  await call('setDownloadConcurrency',6);check('native concurrency setting works without NAS and rejects invalid limits',(await call('state')).queue.concurrency===6);await assert.rejects(call('setDownloadConcurrency',7));await call('setDownloadConcurrency',3);
   await assert.rejects(call('setTags','123',['blocked']));check('mutations rejected before NAS comparison',true);
   await call('configureBackup',settings);data=await call('state');check('pinned HTTPS service permits local use after comparison',data.storage.writable===true);
   const preview=await call('previewExistingLibrary','local');check('import preview reports fixture records and preserves the empty destination',preview.works===1&&preview.files===3&&(await call('state')).works.length===0);
@@ -24,9 +25,51 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   const loginFile=path.join(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE),'fixture-login.json');fs.writeFileSync(loginFile,JSON.stringify({cookie:'sessionid=SYNTHETIC_ONLY; uid_tt=SYNTHETIC_CHANGED_COOKIE',user_agent:'Fixture/1'}));
   try{await call('importLoginConfig',loginFile);data=await call('state');check('real desktop upgrades legacy binding only after verifying self identity and folder ownership',data.collector.connected&&data.account.uid==='456'&&identityCalls.length===2);const sealed=fs.readFileSync(path.join(process.env.CANGXIA_BACKUP_TEST_PROFILE,'login-state.bin'));check('verified desktop login remains encrypted on disk',!sealed.includes(Buffer.from('SYNTHETIC_ONLY')));}finally{http.fetch=originalFetch;}
   await checkAuthorDesktop({win,http,call,check,profile:process.env.CANGXIA_BACKUP_TEST_PROFILE});
+  const savedFetch=http.fetch;let activeTransfers=0,peakTransfers=0,detailQueries=0;
+  const mediaBytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII=','base64');
+  http.fetch=async(url,options={})=>{
+    if(new URL(url).pathname.includes('/aweme/detail/')){detailQueries++;throw Error('cached media must not refresh first');}
+    const tracked=options.headers?.['Accept-Encoding']==='identity';if(!tracked)return new Response(mediaBytes,{headers:{'content-type':'image/png'}});
+    activeTransfers++;peakTransfers=Math.max(peakTransfers,activeTransfers);let timer,finished=false;
+    const finish=()=>{if(!finished){finished=true;activeTransfers--;clearTimeout(timer);}};
+    const body=new ReadableStream({start(controller){timer=setTimeout(()=>{controller.enqueue(mediaBytes);controller.close();finish();},500);options.signal?.addEventListener('abort',()=>{if(!finished){finish();controller.error(Error('aborted'));}},{once:true});},cancel(){finish();}});
+    return new Response(body,{headers:{'content-type':url.includes('douyinvod')?'video/mp4':'image/png','content-length':String(mediaBytes.length)}});
+  };
+  try{
+    await call('setDownloadConcurrency',6);await call('download',['100002','100003','100004','100005','100006','100007']);let simultaneous=false;
+    for(let i=0;i<120;i++){data=await call('state');if(data.queue.transferring===6)simultaneous=true;if(!data.queue.running)break;await new Promise(r=>setTimeout(r,50));}
+    check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&data.queue.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).every(j=>j.state==='complete'));
+  }finally{http.fetch=savedFetch;await call('setDownloadConcurrency',3);}
+  const cancelFetch=http.fetch;let blockedTransfers=0;
+  http.fetch=async(url,options={})=>{if(options.headers?.['Accept-Encoding']!=='identity')return new Response(mediaBytes,{headers:{'content-type':'image/png'}});blockedTransfers++;return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));};
+  try{
+    await call('download',['100008','100010']);for(let i=0;i<100&&blockedTransfers<2;i++)await new Promise(r=>setTimeout(r,20));assert.equal(blockedTransfers,2);
+    const one=await call('cancelDownloads',['100008']);data=await call('state');check('native single download cancellation leaves the other transfer and collection intact',one.cancelled===1&&!data.queue.jobs.some(j=>j.id==='100008')&&data.queue.jobs.some(j=>j.id==='100010')&&data.works.some(w=>w.id==='100008'));
+    await call('cancelDownloads',null);for(let i=0;i<100;i++){data=await call('state');if(!data.queue.running)break;await new Promise(r=>setTimeout(r,20));}
+    check('native bulk cancellation retains completed downloads and NAS copies',data.queue.jobs.every(j=>j.state==='complete')&&data.works.find(w=>w.id==='123').local&&data.works.find(w=>w.id==='123').backedUp);
+  }finally{http.fetch=cancelFetch;}
+  const originalTrash=shell.trashItem;let trashStarted,finishTrash;const begunTrash=new Promise(r=>trashStarted=r),trashGate=new Promise(r=>finishTrash=r);let trashCalls=0;
+  shell.trashItem=async dir=>{assert.ok(dir.startsWith(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE)+path.sep));trashCalls++;trashStarted();await trashGate;await fs.promises.rename(dir,dir+'.fixture-recycled');};
+  try{
+    const intent=await call('prepareDelete',['100002','100003'],'local');await call('confirmDelete',intent.token);await begunTrash;
+    check('native local deletion waits for NAS upload to stop',!(await call('state')).storage.syncing);
+    await assert.rejects(call('download',['100004']),/删除本地文件/);await call('cancelLocalRemoval');finishTrash();
+    for(let i=0;i<100;i++){data=await call('state');if(!data.localRemoval.running)break;await new Promise(r=>setTimeout(r,50));}
+    check('native cancellation finishes current folder only and retains remaining local work',trashCalls===1&&data.localRemoval.phase==='cancelled'&&data.localRemoval.deleted===1&&!data.works.find(w=>w.id==='100002').local&&data.works.find(w=>w.id==='100003').local);
+  }finally{finishTrash?.();shell.trashItem=originalTrash;}
+  const defectReport=await call('inspectDefects');check('native defect inspection returns typed per-work issues without starting a read',Array.isArray(defectReport.items)&&defectReport.items.every(i=>typeof i.id==='string'&&Array.isArray(i.issues))&&!(await call('state')).collector.busy);
+  const defectUIWait=Date.now()+3000;while(await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').disabled")&&Date.now()<defectUIWait)await new Promise(r=>setTimeout(r,50));
+  await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').click()");await new Promise(r=>setTimeout(r,250));
+  check('native defect panel exposes selected-only repair with themed controls',await win.webContents.executeJavaScript("!!document.querySelector('[aria-label=\"检查并补齐失败作品\"] .defect-list')&&document.querySelector('[aria-label=\"检查并补齐失败作品\"]').textContent.includes('补齐选中')"));
+  fs.writeFileSync('.test-output/defect-repair-desktop.png',(await win.webContents.capturePage()).toPNG());
+  await win.webContents.executeJavaScript("document.querySelector('.modal-head [aria-label=\"关闭弹窗\"]').click()");
+
   fs.mkdirSync('.test-output',{recursive:true});let captured=false;try{fs.writeFileSync('.test-output/backup-desktop.png',(await win.webContents.capturePage()).toPNG());captured=true;}catch(e){fs.writeFileSync('.test-output/backup-capture-note.txt',String(e));}await call('setTags','123',['pending-on-exit']);win.close();await new Promise(r=>setTimeout(r,250));check('closing with unsynced changes prompts instead of silently discarding',await win.webContents.executeJavaScript(`!!document.querySelector('[aria-label="还有内容未同步"]')`));fs.writeFileSync('.test-output/backup-desktop-result.json',JSON.stringify({ok:true,checks,captured},null,2));console.log({ok:true,checks,captured});clearTimeout(timeout);await call('finishBackupExit','keep');
  }catch(e){console.error(e);fs.mkdirSync('.test-output',{recursive:true});fs.writeFileSync('.test-output/backup-desktop-result.json',JSON.stringify({ok:false,error:e.stack,checks},null,2));clearTimeout(timeout);app.exit(1);}
 })();});});
 const mainURL=process.env.CANGXIA_BACKUP_TEST_MAIN?pathToFileURL(path.resolve(process.env.CANGXIA_BACKUP_TEST_MAIN)):new URL('../electron/main.mjs',import.meta.url);
 const {SystemBrowser:FixtureBrowser}=await import(new URL('system-browser.mjs',mainURL));Object.defineProperty(FixtureBrowser.prototype,'api',{configurable:true,get(){return null;},set(){}});
+// Existing IPC fixtures use literal "fixture-media", not encoded videos. Real decoding
+// and matching are covered separately by cover-frame-test.py and the packaged helper smoke test.
+const {HDCover:FixtureCover}=await import(new URL('hd-cover.mjs',mainURL));FixtureCover.prototype.runHelper=async request=>{assert.equal(request.mode,'probe');return {width:1,height:1};};
 await import(mainURL.href);

@@ -1,0 +1,24 @@
+import React,{useEffect,useState} from 'react';
+import {AlertCircle,CheckCircle,ExternalLink,LoaderCircle,Pause,RefreshCw} from 'lucide-react';
+import {Pagination} from './workspace-ui.jsx';
+import './defect-repair.css';
+
+const actionable=item=>item.issues.some(i=>i.kind!=='blocked');
+export function DefectRepairPanel({report,job,busy,canWrite,onScan,onStart,onStop,onResume,onOpenWork,onClose}){
+ const [selected,setSelected]=useState(new Set()),[filter,setFilter]=useState('all'),[page,setPage]=useState(1),[tab,setTab]=useState('problems');
+ useEffect(()=>{setSelected(new Set((report?.items||[]).filter(actionable).map(i=>i.id)));setPage(1);},[report]);
+ useEffect(()=>{if(job?.running)setTab('results');},[job?.running]);
+ const rows=(report?.items||[]).filter(i=>filter==='all'||i.issues.some(v=>v.kind===filter)),pages=Math.max(1,Math.ceil(rows.length/20)),current=Math.min(page,pages),shown=rows.slice((current-1)*20,current*20),active=!!job?.running;
+ const toggle=id=>setSelected(previous=>{const next=new Set(previous);if(next.has(id))next.delete(id);else next.add(id);return next;});
+ return <><div className="modal-content defect-content">
+  <div className="info-box"><AlertCircle size={18}/><p>只处理失败封面和已经下载过的缺损文件。未下载的正常作品不算缺陷，不会重新读取整批收藏。文件补齐交给下载管理执行。</p></div>
+  {job&&<div className="defect-progress" role="status"><div><strong>{active?<LoaderCircle className="spin" size={16}/>:<CheckCircle size={16}/>} {job.message}</strong><span>{job.processed} / {job.total}</span></div><progress max={Math.max(1,job.total)} value={job.processed}/><small>封面等补齐成功 {job.done} · 交给下载管理 {job.queued} · 仍失败 {job.failed}</small></div>}
+  <div className="defect-tabs"><button className={tab==='problems'?'active':''} disabled={active} onClick={()=>setTab('problems')}>问题作品 {report?.items.length||0}</button><button className={tab==='results'?'active':''} disabled={!job} onClick={()=>setTab('results')}>补齐结果</button></div>
+  {tab==='problems'?<>
+   <div className="defect-controls"><span>已检查 {report?.checked||0} 条本机记录</span><select aria-label="缺陷类型" disabled={busy||active} value={filter} onChange={e=>{setFilter(e.target.value);setPage(1);}}><option value="all">全部问题</option><option value="cover">封面</option><option value="files">缺损文件</option><option value="blocked">无法检查</option></select><button className="button secondary" disabled={busy||active} onClick={onScan}><RefreshCw size={14}/>{busy?'正在检查…':'重新检查'}</button></div>
+   <div className="defect-select"><label><input type="checkbox" disabled={!rows.some(actionable)||busy||active} checked={rows.some(actionable)&&rows.filter(actionable).every(i=>selected.has(i.id))} onChange={e=>setSelected(previous=>{const next=new Set(previous);for(const row of rows.filter(actionable))e.target.checked?next.add(row.id):next.delete(row.id);return next;})}/>选择当前筛选的问题作品</label><span>已选 {selected.size} 个</span></div>
+   <div className="defect-list">{shown.map(item=><article key={item.id}><input aria-label={'选择补齐 '+item.id} type="checkbox" disabled={!actionable(item)||active||busy} checked={selected.has(item.id)} onChange={()=>toggle(item.id)}/><div><strong title={item.name}>{item.name}</strong><small>{item.author} · {item.id}</small>{item.issues.map((issue,index)=><p key={index}><b>{issue.label}</b>：{issue.reason}</p>)}</div><button className="icon-button" aria-label={'打开原作品 '+item.id} disabled={active||busy} onClick={()=>onOpenWork(item.id)}><ExternalLink size={16}/></button></article>)}{!rows.length&&<div className="complete-message"><CheckCircle size={32}/><h3>{busy?'正在检查本机记录…':'没有发现这类问题'}</h3><p>不会添加下载任务。</p></div>}</div>
+   {pages>1&&<Pagination page={current} pages={pages} onChange={setPage} location="缺陷列表"/>}
+  </>:<div className="defect-list">{job?.items.map(item=><article key={item.id}><span className={'defect-state '+item.state}>{item.state==='running'?<LoaderCircle className="spin" size={16}/>:item.state==='failed'?<AlertCircle size={16}/>:<CheckCircle size={16}/>}</span><div><strong title={item.name}>{item.name}</strong><small>{item.id}</small><p>{item.message||{waiting:'等待补齐',running:'正在处理'}[item.state]}</p></div><button className="icon-button" disabled={active||busy} aria-label={'打开原作品 '+item.id} onClick={()=>onOpenWork(item.id)}><ExternalLink size={16}/></button></article>)}{job?.total>20&&<p className="muted small">这里只显示最近处理的 20 条；重新检查可列出仍存在的问题作品。</p>}</div>}
+ </div><footer className="modal-footer"><button className="button secondary" disabled={active||busy} onClick={onClose}>关闭</button>{active?<button className="button secondary" onClick={onStop}><Pause size={15}/>停止补齐</button>:<>{job&&(job.phase==='paused'||job.failed>0)&&<button className="button secondary" disabled={busy||!canWrite} onClick={onResume}>继续未完成 / 重试失败项</button>}<button className="button primary" disabled={busy||!canWrite||!selected.size} onClick={()=>onStart([...selected])}>补齐选中 {selected.size} 个</button></>}</footer></>;
+}

@@ -56,12 +56,13 @@ export class Store {
     this.save();
   }
   download(id) { return this.get('downloads', id); }
-  forgetDownloads(ids){
-    this.backup?.assertWritable();
-    const removed=new Set(ids),jobs=this.getSetting('downloadJobs')||[];
+  forgetDownloads(ids,{localOnly=false,pruneHistory=true}={}){
+    if(!localOnly)this.backup?.assertWritable();
+    const removed=new Set(ids),jobs=pruneHistory?(this.getSetting('downloadJobs')||[]):[];
     let changed=false;this.db.run('BEGIN');try{
       for(const id of removed){this.db.run('DELETE FROM downloads WHERE id=?',[id]);this.viewCache.delete(id);}
-      const kept=jobs.filter(j=>!((j.state==='complete'&&!this.download(j.id))||(j.state==='failed'&&removed.has(j.id))));
+      const present=new Set(pruneHistory?this.rows('SELECT id FROM downloads').map(r=>r.id):[]);
+      const kept=jobs.filter(j=>!((j.state==='complete'&&!present.has(j.id))||(j.state==='failed'&&removed.has(j.id))));
       if(kept.length!==jobs.length)this.setSetting('downloadJobs',kept);
       this.db.run('COMMIT');changed=removed.size||kept.length!==jobs.length;
     }catch(e){this.db.run('ROLLBACK');throw e;}
@@ -69,7 +70,7 @@ export class Store {
     return [...removed];
   }
   async pruneDeletedDownloads(){
-    try{const removed=await findDeletedDownloads(this.all('downloads'),{probe:()=>fs.promises.stat(path.parse(path.resolve(this.root)).root),validate:dir=>this.assertDirectory(dir)});return this.forgetDownloads(removed);}catch{return [];}
+    try{const removed=await findDeletedDownloads(this.all('downloads'),{probe:()=>fs.promises.stat(path.parse(path.resolve(this.root)).root),validate:dir=>this.assertDirectory(dir)});return this.forgetDownloads(removed,{localOnly:true});}catch{return [];}
   }
   save() {
     // SQLite commits directly to WAL. Never rewrite or duplicate the full file here.
@@ -281,7 +282,7 @@ export class Store {
         Object.assign(a,imageDimensions(fs.readFileSync(path.join(d.path,a.file))));changed=true;
       }
       const cover=d.assets?.find(a=>a.key==='cover');
-      const warning=cover?.width&&Math.min(cover.width,cover.height)<720?`当前单图仅 ${cover.width}×${cover.height}，尚未取得更高清版本`:'';
+      const warning=d.hdCover?.status==='ready'?'':d.hdCover?.status==='failed'?'未取得与视频清晰度相当的封面：'+d.hdCover.message:cover?.width?`当前封面 ${cover.width}×${cover.height}，尚未与视频实际分辨率核对`:'';
       if(d.coverWarning!==warning){d.coverWarning=warning;changed=true;}
       if(changed)this.put('downloads',d.id,d);
     }

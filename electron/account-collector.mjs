@@ -201,7 +201,7 @@ export class Collector{
     }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{
       let saveFailed=false;
       try{if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}}
-      catch{saveFailed=true;this.update('attention','读取已停止，但进度保存未完成，请检查磁盘空间或目录权限');}
+      catch(error){saveFailed=true;this.onDiagnostic({event:'read-save-failed',name:error.name,code:error.code,reason:error.message,count:run?.count});this.update('attention',`读取已停止，收尾进度保存失败：${error.message}；已提交的页面仍保留`);}
       finally{this.busy=false;this.syncController=null;if(!saveFailed&&this.cancelled&&this.stopRequested)this.update('idle','已停止，已读取内容和进度已保留');this.readProgress({stage:'finished',finishedAt:Date.now(),stopped:this.cancelled,saveFailed});this.scheduleBrowserIdle();this.notify();}
     }
   }
@@ -213,14 +213,16 @@ export class Collector{
     try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined,quiet:true});const work=parseWork(data.aweme_detail||data.data?.aweme_detail||{});if(!work||work.id!==id)throw new Error('未取得对应作品资源');return work;}
     finally{this.waiters.delete(key);this.scheduleBrowserIdle();}
   }
-  async resolveWork(id){
+  async resolveWork(id,{backgroundOnly=false,signal}={}){
+    signal?.throwIfAborted();
     await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){
-      const controller=new AbortController();this.waiters.set(id,{reject:()=>controller.abort()});
-      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:controller.signal});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');const w=this.store.upsertWork(raw);this.store.save();this.notify();return w;}
-      catch(e){if(e.sourceDeleted)this.markUnavailable(id);throw e;}
+      const controller=new AbortController();const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;combined.throwIfAborted();this.waiters.set(id,{reject:()=>controller.abort()});
+      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const w=this.store.upsertWork(raw);this.store.save();this.notify();return w;}
+      catch(e){if(e.sourceDeleted)this.markUnavailable(id);if(backgroundOnly&&this.status.needsLogin)e.code='AUTH_REQUIRED';throw e;}
       finally{this.waiters.delete(id);this.scheduleBrowserIdle();}
     }
+    if(backgroundOnly){this.needsLogin('下载资源需要更新，请重新连接抖音账号后继续下载');throw Object.assign(new Error('请重新连接抖音账号后继续下载，已有文件和队列保留'),{code:'AUTH_REQUIRED'});}
     // Public-link fallback only: observe the normal page's own detail response, never synthesize a signature.
     let cleanup;
     const result=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.waiters.delete(id);reject(new Error('公开作品读取超时，请连接系统浏览器后重试'));},40000);this.waiters.set(id,{resolve,reject,timer});});

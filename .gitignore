@@ -16,4 +16,6 @@ user-data/
 sessions/
 login-state.bin
 system-browser/
+__pycache__/
+*.pyc
 config.json

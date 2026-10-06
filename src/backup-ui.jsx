@@ -1,5 +1,5 @@
 import React,{useState} from 'react';
-const labels={upgrade:'NAS 服务需要升级',mediaConflict:'媒体内容有差异',unconfigured:'尚未连接',checking:'正在比对',synced:'已同步',coversPending:'封面待备份',pending:'本机有更新',syncing:'正在同步',readonly:'只读使用',offline:'无法检查',conflict:'双方都有更新',remoteChanges:'NAS 有更新'};
+const labels={upgrade:'NAS 服务需要升级',mediaConflict:'媒体内容有差异',unconfigured:'尚未连接',checking:'正在比对',synced:'已同步',coversPending:'封面待备份',pending:'本机资料待同步',waitingIdle:'等待空闲备份',syncing:'正在同步',readonly:'只读使用',offline:'无法检查',conflict:'双方都有更新',remoteChanges:'NAS 有更新'};
 export function BackupStatus({storage={},onOpen}){const warning=!storage.writable&&storage.phase!=='checking';return <button className={`backup-status-pill ${warning?'warning':''}`} onClick={onOpen}><span className="status-dot"/>{labels[storage.phase]||'同步状态'}{storage.pending&&storage.phase==='offline'?' · 有待同步内容':''}</button>;}
 export function BackupPanel({storage={},busy,api,onUpdated,onImport,onConflict}){
  const config=storage.config||{};const [url,setUrl]=useState(config.url||''),[token,setToken]=useState(''),[fingerprint,setFingerprint]=useState(config.fingerprint||''),[deviceName,setDeviceName]=useState(config.deviceName||''),[intervalMinutes,setInterval]=useState(String(config.intervalMinutes||5)),[working,setWorking]=useState(false),[error,setError]=useState('');
@@ -18,7 +18,7 @@ export function BackupPanel({storage={},busy,api,onUpdated,onImport,onConflict})
  <button className="button primary" disabled={blocked||storage.syncing} onClick={()=>run(()=>api.configureBackup({url,token,fingerprint,deviceName,intervalMinutes:Number(intervalMinutes)}))}>{working?'正在连接…':'保存并检查连接'}</button>
  </div></details>
  {error&&<p className="backup-error" role="alert">{error}</p>}
- <div className="info-box"><p>启动时先与 NAS 比对；无法连接时只读浏览本机资料。平时下载到本机，后台按间隔或一批下载完成后同步。程序关闭后自动同步停止。</p></div>
+ <div className="info-box"><p>启动时先与 NAS 比对；无法连接时只读浏览本机资料。读取开始前暂停已有备份，读取和下载期间不启动备份，空闲后自动同步。已开始的读取遇到 NAS 断联仍保存到本机，结束后重新比对；双方有修改时不会自动覆盖。程序关闭后自动同步停止。</p></div>
  <div className="settings-actions"><button className="button secondary" disabled={blocked||!storage.writable||storage.syncing} onClick={()=>onImport('local')}>导入旧本机版资料</button><button className="button secondary" disabled={blocked||!storage.writable||storage.syncing} onClick={()=>onImport('nas')}>导入旧 NAS 版资料</button><button className="button secondary" disabled={blocked||!storage.writable||storage.syncing} onClick={()=>onImport('author')}>导入作者试验版资料</button>{storage.recovery&&<button className="text-button" onClick={()=>run(()=>api.openBackupRecovery())}>打开本机恢复副本</button>}</div>
  <p className="muted small">导入仅用于空的备份版本机库，原版资料保留。清理本机媒体不会删除 NAS 中已经备份的副本。</p>
  </section>;

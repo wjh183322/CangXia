@@ -44,7 +44,7 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
       if(run?.status==='running')reads.finish(run,c.stopRequested?'paused':'error',failure);
       if(run){const errors=store.reconcile();if(errors.length)failure=errors.join('；');}
       if(run)c.update(!failure&&['matched','end'].includes(run.outcome)?'done':c.stopRequested?'idle':'attention',failure||`${run.reason} · 已检查 ${run.count} 条，新增收藏 ${run.added} 条${run.restored?`，恢复记录 ${run.restored} 条`:''}`,run.count);
-    }catch{saveFailed=true;c.update('attention','读取已停止，但进度保存未完成，请检查磁盘空间或目录权限');}
+    }catch(error){saveFailed=true;c.onDiagnostic({event:'read-save-failed',name:error.name,code:error.code,reason:error.message,count:run?.count});c.update('attention',`读取已停止，收尾进度保存失败：${error.message}；已提交的页面仍保留`);}
     c.busy=false;c.syncController=null;c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled,saveFailed});c.scheduleBrowserIdle();c.notify();
   }
 }

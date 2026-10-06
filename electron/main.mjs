@@ -1,7 +1,10 @@
+import {LocalRemoval} from './local-removal.mjs';
+import {HDCover,bestCover} from './hd-cover.mjs';
 import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, session, safeStorage, screen } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { listDirectory, makeDirectory, absolutePath } from './file-browser.mjs';
 import { inspectRepairs } from './repair-check.mjs';
+import {DefectRepair} from './defect-repair.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,6 +29,7 @@ import { FlatDownloadQueue } from './flat-downloads.mjs';
 import { isDouyinURL, requireInside } from './model.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const appVersion=JSON.parse(fs.readFileSync(path.join(here,'..','package.json'),'utf8')).version;
 const smoke = process.argv.includes('--smoke');
 const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
@@ -36,7 +40,7 @@ else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getP
 fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let backup,backupBusy=false,exitApproved=false;
+let backup,defectRepair,localRemoval,removalExit=false,backupBusy=false,exitApproved=false;
 const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
@@ -45,11 +49,12 @@ const readLocked=()=>readStarting||!!collector?.busy;
 const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send('cangxia:notice','请先点击“停止读取”，保存进度后再关闭软件');};
 const deleteIntents=new Map();
 const stateTransfers=new Map();
-function runtimeState(){return {collector:{...collector.status,busy:collector.busy},queue:queue.state(),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing},syncProgress:store.syncProgress?.()||[]};}
+const inFlightActions=new Set();
+function runtimeState(){return {localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state(),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing},syncProgress:store.syncProgress?.()||[]};}
 function snapshot() { return feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
-  clearTimeout(timer); timer = setTimeout(() => { if (rendererReady && window && !window.isDestroyed()) window.webContents.send('cangxia:change', feed.frame(runtimeState())); }, 250);
+  if(timer)return;timer = setTimeout(() => { timer=null;if (rendererReady && window && !window.isDestroyed()) window.webContents.send('cangxia:change', feed.frame(runtimeState())); }, 250);
 }
 function ids(value) {
   if (!Array.isArray(value) || value.length > 100000 || value.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('作品选择无效');
@@ -57,16 +62,21 @@ function ids(value) {
 }
 function handler(name, action) {
   ipcMain.handle('cangxia:' + name, async (event, ...args) => {
+    const guarded=!['state','stateChunk','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync'].includes(name))throw new Error(readLocked()?'正在读取，请先点击“停止读取”':'正在退出登录，请稍候');
+      if(localRemoval?.running&&!['state','stateChunk','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync','stopDefectRepair','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
       if(backupBusy&&!['state','stateChunk','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
+      if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
       return { ok: true, data: await action(...args) };
     } catch (error) { notify();return { ok: false, error: error.message || '操作未完成' }; }
+    finally{if(entered)inFlightActions.delete(name);}
   });
 }
-function ensureIdle() { if (backupBusy || readLocked() || loggingOut || collector.authenticating || collector.verifyingIdentity || queue.running || flatQueue?.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
+function ensureIdle() { if (localRemoval?.running || backupBusy || readLocked() || loggingOut || collector.authenticating || collector.verifyingIdentity || queue.running || flatQueue?.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
+async function foregroundRead(action){ensureIdle();readStarting=true;try{return await backup.withForegroundRead(action);}finally{readStarting=false;notify();}}
 function confirmFlatExit(){
  if(exitPrompt)return;exitPrompt=true;
  void dialog.showMessageBox(window,{type:'question',message:'取消剩余单独下载并退出？',detail:'已完成的图片和视频会保留。单独下载仅在本次运行中有效，退出后无法继续这些临时任务。',buttons:['继续使用','取消剩余任务并退出'],defaultId:0,cancelId:0}).then(({response})=>{if(response===1){exitConfirmed=true;app.quit();}}).finally(()=>{exitPrompt=false;});
@@ -76,7 +86,7 @@ app.whenReady().then(async () => {
 try {
   const profile = app.getPath('userData');
   diagnostics=createDiagnostics(profile);
-  diagnostics.record({event:'startup',version:app.getVersion()});
+  diagnostics.record({event:'startup',version:appVersion});
   process.on('uncaughtExceptionMonitor',error=>diagnostics.record({event:'uncaught',name:error.name,code:error.code}));
   app.on('child-process-gone',(_event,details)=>diagnostics.record({event:'child-process-gone',reason:details.reason,exitCode:details.exitCode}));
   const area=screen.getPrimaryDisplay().workAreaSize;
@@ -84,12 +94,12 @@ try {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  window.on('close',()=>{if(startupLoading)startupClosing=true;});
+  window.on('close',event=>{if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}if(startupLoading)startupClosing=true;});
   window.on('closed',()=>{if(!quitting)app.quit();});
   await window.loadFile(path.join(here,'startup.html'));startupStage('window-visible');
   if(quitting||window.isDestroyed())return;
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣备份版'));
-  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onUnavailable:()=>{collector?.stop();queue?.pause();flatQueue?.pauseAll();},isIdle:()=>!collector?.busy&&!collector?.verifyingIdentity&&!queue?.running&&!flatQueue?.running&&!readStarting&&!loggingOut&&!backupBusy});
+  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onDiagnostic:diagnostics.record,onUnavailable:()=>{if(!backup?.localReadDepth)collector?.stop();queue?.pause();flatQueue?.pauseAll();},isIdle:()=>!collector?.busy&&!collector?.authenticating&&!collector?.verifyingIdentity&&!queue?.running&&!flatQueue?.running&&!readStarting&&!loggingOut&&!backupBusy&&!localRemoval?.running});
   startupStage('library-open');
   if(quitting||window.isDestroyed())return;
   feed=new SnapshotFeed(store);
@@ -101,9 +111,18 @@ try {
   backup.fetchCover=(url,options)=>collector.fetchMedia(url,options);
   const authorReader=new AuthorReader(collector,{fetchLink:redirectHeaders(net,httpProfile)});
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
+  queue.hdCovers=new HDCover({store,helper:app.isPackaged?path.join(process.resourcesPath,'cover-helper','CangXiaCover.exe'):path.resolve('.test-output/cover-helper-dist/CangXiaCover/CangXiaCover.exe')});
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
   queue.onIdle=()=>backup.afterDownloads();
+  localRemoval=new LocalRemoval({store,trash:dir=>shell.trashItem(dir),before:async()=>{backup.cancel();if(backup.syncing)await backup.syncing.catch(()=>{});if(backup.checking)await backup.checking.catch(()=>{});},after:()=>{queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();notify();if(!removalExit)backup.deferSync();},notify});
+  handler('cancelLocalRemoval',()=>localRemoval.cancel());
+  defectRepair=new DefectRepair({store,backup,collector,queue,profile,runForeground:foregroundRead,onChange:notify});
+  handler('inspectDefects',()=>{ensureIdle();return defectRepair.scan();});
+  handler('startDefectRepair',selected=>{ensureIdle();backup.assertWritable();return defectRepair.start(ids(selected));});
+  handler('resumeDefectRepair',()=>{ensureIdle();backup.assertWritable();return defectRepair.start(null,{resume:true});});
+  handler('stopDefectRepair',()=>{defectRepair.stop();return true;});
+  handler('reportCoverStatus',(id,failed)=>{ids([id]);if(!store.work(id)||typeof failed!=='boolean')return false;const previous=backup.covers.problems.get(id);if(failed&&!previous)backup.covers.reportProblem(id,'界面无法显示封面，可定向检查并补齐','display');else if(!failed&&previous?.kind==='display')backup.covers.clearProblem(id);return true;});
   async function restoreBackupAuth(){await collector.ready;if(collector.verifyingIdentity)return;await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();}
   backup.onRemoteApplied=restoreBackupAuth;
   handler('configureBackup',async input=>{ensureIdle();await backup.configure(input);await restoreBackupAuth();return snapshot();});
@@ -144,7 +163,7 @@ try {
       for(const a of original.assets||[]){if(!source.assetExists(original,a))continue;try{backup.status.progress='正在复制已有文件：'+a.file;notify();await fs.promises.copyFile(requireInside(original.path,path.join(original.path,a.file)),requireInside(target.dir,path.join(target.dir,a.file)),fs.constants.COPYFILE_EXCL);assets.push(a);count++;}catch(e){errors.push(e.message);}}
       if(assets.length)store.put('downloads',original.id,{...original,path:target.dir,collectionId:target.collectionId,home:target.home,assets,state:assets.length===original.assets.length?original.state:'partial'});
     }store.save();return {works:entries.filter(e=>e.table==='works').length,files:count,errors};
-  }finally{source?.close();backup.applying=false;backupBusy=false;backup.status.progress='';backup.changed();notify();}});
+  }finally{source?.close();backup.applying=false;backupBusy=false;backup.status.progress='';await backup.changed();notify();}});
   collector.onAccessHold=()=>{queue.pause();flatQueue.pauseAll();};
   collector.onBrowserStop=collector.onAccessHold;
   const qrProfile=session.fromPartition('persist:cangxia-popup-login');
@@ -168,7 +187,7 @@ try {
         if (!asset || !store.assetExists(d, asset)) return new Response('', { status: 404 });
         file = requireInside(d.path, path.join(d.path, asset.file));
       } else if (u.hostname === 'cover') {
-        const d = store.download(id), cover = d?.assets.find(a => a.key === 'cover' || a.key === 'image-0');
+        const d = store.download(id), cover = bestCover(d)||d?.assets.find(a => a.key === 'image-0');
         if (cover && store.assetExists(d, cover)) file = requireInside(d.path, path.join(d.path, cover.file));
         else if(store.work(id)?.backupCover||store.get('backup_downloads',id)?.assets?.some(a=>a.kind==='image')) {
           file=await backup.covers.get(id);
@@ -188,8 +207,8 @@ try {
           }
         }
       } else return new Response('', { status: 404 });
-      return net.fetch(pathToFileURL(file).href, { headers: request.headers });
-    } catch { return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
+      return await net.fetch(pathToFileURL(file).href, { headers: request.headers });
+    } catch(error) {try{const u=new URL(request.url),id=u.pathname.split('/').filter(Boolean)[0];if(u.hostname==='cover'&&/^\d+$/.test(id)&&!backup.covers.problems.has(id))backup.covers.reportProblem(id,'封面显示失败：'+error.message,'display');}catch{}return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
   });
   handler('startupReady',()=>{if(!rendererReady){rendererReady=true;startupStage('library-visible');notify();}return true;});
   handler('state', () => {
@@ -239,23 +258,24 @@ try {
   handler('checkRepairs',selected=>{ensureIdle();return inspectRepairs(store,ids(selected));});
   handler('startRepairs',selected=>{ensureIdle();if(store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length))throw new Error('请登录原账号后再补齐未备份的作品');const report=inspectRepairs(store,ids(selected));const missing=report.items.filter(i=>i.status==='missing');if(missing.length)queue.enqueue(missing.map(i=>i.id));return {...report,started:missing.length};});
   handler('sync', async(options = {}) => {
-    ensureIdle();
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
-    readStarting=true;
-    try{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};}finally{readStarting=false;notify();}
+    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};});
   });
   handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
-  handler('addAuthor',async text=>{ensureIdle();readStarting=true;try{return await authorReader.add(text);}finally{readStarting=false;notify();}});
-  handler('readAuthor',async options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('作者读取选项无效');readStarting=true;try{return await authorReader.read(options);}finally{readStarting=false;notify();}});
+  handler('addAuthor',async text=>foregroundRead(()=>authorReader.add(text)));
+  handler('readAuthor',async options=>{if(!options||typeof options!=='object')throw new Error('作者读取选项无效');return foregroundRead(()=>authorReader.read(options));});
   handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});
   handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
-  handler('stopSync', () => collector.stop());
+  handler('stopSync', () => {if(defectRepair.running)defectRepair.stop();else collector.stop();});
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
-  handler('download', selected => { if (collector.busy || collector.waiters.size || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected)); return true; });
+  handler('download', selected => { if (collector.busy || (collector.waiters.size&&!queue.running) || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected)); return true; });
+  handler('setDownloadConcurrency',value=>{queue.setConcurrency(value);return true;});
   handler('pause', () => queue.pause());
+  handler('repairVideoCover',selected=>{if(collector.busy||flatQueue.running)throw Error('请等待当前读取或单独下载结束');backup.assertWritable();const targets=ids(selected);if(targets.some(id=>store.work(id)?.type!=='video'||!store.download(id)))throw Error('请选择本机已有视频');queue.enqueue(targets,{coverOnly:true});return true;});
+  handler('cancelDownloads',selected=>queue.cancel(selected===null?null:ids(selected)));
   handler('resume', () => { if (collector.busy || flatQueue.running) throw new Error('请等待同步完成或暂停单独下载');if(store.getSetting('loggedOut')&&queue.jobs.some(j=>j.state==='waiting'&&!store.get('backup_downloads',j.id)?.assets?.length))throw new Error('请登录原账号后再继续下载未备份的作品');queue.resume(); });
-  handler('refreshFiles',async()=>{if(!collector.busy&&!queue.running&&backup.status.writable)await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();backup.changed();notify();return snapshot();});
+  handler('refreshFiles',async()=>{if(!collector.busy&&!queue.running)await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();await backup.changed();notify();return snapshot();});
   handler('chooseRoot', async value => {
     ensureIdle();
     if (store.hasSavedFiles()) throw new Error('原目录仍有本地文件，或暂时无法检查。请清空文件后点击“重新检查文件”。');
@@ -295,22 +315,15 @@ try {
     if(intent.kind==='records'){if(intent.authorScope)store.authorSources.hide(intent.authorScope,intent.ids);else store.deleteReadRecords(intent.ids);notify();return true;}
     const records=intent.ids.map(id=>store.download(id)).filter(Boolean);
     if(!intent.invalid&&records.some(d=>store.work(d.id)?.remoteState==='unavailable'))throw new Error('原作品状态已变化，请重新确认删除');
-    const failed = [];
-    for (const d of records) try {
-      store.assertDirectory(d.path);
-      if (fs.existsSync(d.path)) await shell.trashItem(d.path);
-      store.forgetDownloads([d.id]);
-      store.viewCache.delete(d.id);
-    } catch (e) { failed.push(e.message); }
-    queue.jobs=store.getSetting('downloadJobs')||[];store.save(); notify(); if (failed.length) throw new Error(`部分文件删除失败：${failed.join('；')}`); return true;
+    return localRemoval.start(records.map(d=>d.id));
   });
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
   startupLoading=false;
-  void collector.ready.then(()=>backup.start()).then(()=>restoreBackupAuth()).catch(()=>{});
-  window.on('close',event=>{if(!quitting&&!readLocked()&&!loggingOut&&!flatQueue.hasUnfinished()&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
+  void collector.ready.then(async()=>{await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];notify();await backup.start();}).then(()=>restoreBackupAuth()).catch(()=>{});
+  window.on('close',event=>{if(localRemoval?.running)return;if(!quitting&&!readLocked()&&!loggingOut&&!flatQueue.hasUnfinished()&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
   window.on('focus', notify);
-  window.on('close',event=>{if(!quitting&&readLocked()){event.preventDefault();lockedNotice();return;}if(loggingOut){event.preventDefault();window.webContents.send('cangxia:notice','正在退出登录，请等待登录信息清理完成');return;}if(!quitting&&!exitConfirmed&&flatQueue.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}qrLogin?.cancel();});
+  window.on('close',event=>{if(localRemoval?.running)return;if(!quitting&&readLocked()){event.preventDefault();lockedNotice();return;}if(loggingOut){event.preventDefault();window.webContents.send('cangxia:notice','正在退出登录，请等待登录信息清理完成');return;}if(!quitting&&!exitConfirmed&&flatQueue.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}qrLogin?.cancel();});
   window.webContents.on('render-process-gone',(_event,details)=>{qrLogin?.cancel();diagnostics.record({event:'render-process-gone',reason:details.reason,exitCode:details.exitCode});collector.stop();queue.pause();flatQueue.pauseAll();void dialog.showMessageBox(window,{type:'warning',message:'界面进程已退出，已提交的读取进度仍保留',detail:'可以重新加载界面后继续。诊断记录保存在本机 diagnostics 目录。',buttons:['重新加载','退出'],defaultId:0,cancelId:1}).then(({response})=>{if(response===0)window.reload();else app.quit();});});
   if(qrProbe){
     await qrLogin.start();const deadline=Date.now()+35000;
@@ -361,8 +374,10 @@ try {
 });
 app.on('window-all-closed', () => app.quit());
 app.on('second-instance',()=>{if(window&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
+function stopRemovalForExit(){if(removalExit)return;removalExit=true;localRemoval.cancel();void localRemoval.wait().finally(()=>{removalExit=false;app.quit();});}
 app.on('before-quit', event => {
   if(quitting)return;
+  if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}
   if(readLocked()||loggingOut){event.preventDefault();if(readLocked())lockedNotice();return;}
   if(!exitConfirmed&&flatQueue?.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}
   if(!exitApproved&&window&&!window.isDestroyed()&&(backup?.syncing||(backup?.config&&backup?.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');return;}
@@ -371,6 +386,6 @@ app.on('before-quit', event => {
     try{await flatClose;}catch{dialog.showErrorBox('临时文件未完全清理','单独下载任务已取消；目标目录中的 .cangxia-flat- 开头临时文件夹可能仍有未完成片段，可在退出后删除。');}
     for(let i=0;i<50&&(queue?.running||collector?.busy);i++)await new Promise(r=>setTimeout(r,100));
     await Promise.race([browserClose||Promise.resolve(),new Promise(r=>setTimeout(r,3000))]);
-    diagnostics?.record({event:'shutdown',reason:collector?.busy?'pending-request':'normal'});diagnostics?.close();await backup?.close();if(!collector?.busy)store?.close();app.exit(0);
+    diagnostics?.record({event:'shutdown',reason:collector?.busy?'pending-request':'normal'});diagnostics?.close();await backup?.close();defectRepair?.close();if(!collector?.busy)store?.close();app.exit(0);
   })();
 });

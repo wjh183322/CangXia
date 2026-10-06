@@ -122,3 +122,20 @@ test('largest single image is selected by downloaded pixels, preserving bytes an
 test('one-off media resolution reads resources without storing works, history or diagnostic requests',async t=>{
  const {store}=await setup(t);const a=adapter(store,async()=>new Response(JSON.stringify({status_code:0,aweme_detail:raw('999')})));await a.collector.importConfig(config());const revision=store.revision;const events=[];a.collector.onDiagnostic=e=>events.push(e);const work=await a.collector.resolveMediaOnly('999',new AbortController().signal);assert.equal(work.id,'999');assert.equal(store.work('999'),null);assert.equal(store.revision,revision);assert.equal(store.all('downloads').length,0);assert.deepEqual(events,[]);assert.deepEqual(a.collector.diagnostics,[]);await a.collector.dispose();
 });
+
+test('expired media without login pauses the whole pool without opening public browser pages',async t=>{
+ const f=await setup(t),{collector,browser}=adapter(f.store);await collector.ready;let opened=0;
+ browser.observeWork=async()=>{opened++;throw Error('must never open');};
+ for(let n=1;n<=8;n++)f.store.upsertWork({aweme_id:String(n),desc:'expired '+n,images:[{url_list:[`https://p3.douyinpic.com/${n}.jpg`]}]});
+ const q=new DownloadQueue(f.store,collector,async()=>new Response('',{status:403}),()=>{});q.setConcurrency(6);q.enqueue(['1','2','3','4','5','6','7','8']);await q.waitForIdle();
+ assert.equal(opened,0);assert.equal(q.paused,true);assert.match(q.state().pauseReason,/重新连接/);assert.ok(q.jobs.every(j=>j.state==='waiting'));assert.equal(collector.waiters.size,0);
+});
+
+test('expired media refreshes in background once, with exact work identity and no public fallback',async t=>{
+ const f=await setup(t),{collector,browser}=adapter(f.store,async()=>new Response(JSON.stringify({status_code:0,aweme_detail:{aweme_id:'1',desc:'fresh',images:[{url_list:['https://p3.douyinpic.com/fresh.jpg']}]}})));
+ await collector.ready;await collector.applyAuth(parseReferenceConfig(config()));let opened=0,old=0,fresh=0;
+ browser.observeWork=async()=>{opened++;throw Error('must never open');};
+ f.store.upsertWork({aweme_id:'1',desc:'expired',images:[{url_list:['https://p3.douyinpic.com/expired.jpg']}]});
+ const q=new DownloadQueue(f.store,collector,async url=>{if(url.includes('expired')){old++;return new Response('',{status:403});}fresh++;return new Response('image-fixture',{headers:{'content-type':'image/jpeg'}});},()=>{});
+ q.enqueue(['1']);await q.waitForIdle();assert.equal(q.jobs[0].state,'complete');assert.equal(old,1);assert.equal(fresh,1);assert.equal(opened,0);
+});
