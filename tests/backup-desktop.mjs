@@ -1,6 +1,6 @@
 import {checkAuthorDesktop} from './author-desktop-checks.mjs';
 import {app,session,shell} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
-app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false;
+app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false,hdProbeCalls=0;
 const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
 app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
  const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
@@ -57,6 +57,9 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     for(let i=0;i<100;i++){data=await call('state');if(!data.localRemoval.running)break;await new Promise(r=>setTimeout(r,50));}
     check('native cancellation finishes current folder only and retains remaining local work',trashCalls===1&&data.localRemoval.phase==='cancelled'&&data.localRemoval.deleted===1&&!data.works.find(w=>w.id==='100002').local&&data.works.find(w=>w.id==='100003').local);
   }finally{finishTrash?.();shell.trashItem=originalTrash;}
+  check('ordinary native download and NAS restore never launch HD processing',hdProbeCalls===0);
+  const hdStart=await call('repairVideoCover',['100003','100004']);for(let i=0;i<100;i++){data=await call('state');if(!data.queue.running)break;await new Promise(r=>setTimeout(r,30));}
+  check('explicit native bulk HD processing skips images and marks its own task',hdStart.queued===1&&hdStart.skipped===1&&hdProbeCalls===1&&data.queue.jobs.some(j=>j.id==='100003'&&j.coverOnly&&j.state==='complete'));
   const defectReport=await call('inspectDefects');check('native defect inspection returns typed per-work issues without starting a read',Array.isArray(defectReport.items)&&defectReport.items.every(i=>typeof i.id==='string'&&Array.isArray(i.issues))&&!(await call('state')).collector.busy);
   const defectUIWait=Date.now()+3000;while(await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').disabled")&&Date.now()<defectUIWait)await new Promise(r=>setTimeout(r,50));
   await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').click()");await new Promise(r=>setTimeout(r,250));
@@ -71,5 +74,5 @@ const mainURL=process.env.CANGXIA_BACKUP_TEST_MAIN?pathToFileURL(path.resolve(pr
 const {SystemBrowser:FixtureBrowser}=await import(new URL('system-browser.mjs',mainURL));Object.defineProperty(FixtureBrowser.prototype,'api',{configurable:true,get(){return null;},set(){}});
 // Existing IPC fixtures use literal "fixture-media", not encoded videos. Real decoding
 // and matching are covered separately by cover-frame-test.py and the packaged helper smoke test.
-const {HDCover:FixtureCover}=await import(new URL('hd-cover.mjs',mainURL));FixtureCover.prototype.runHelper=async request=>{assert.equal(request.mode,'probe');return {width:1,height:1};};
+const {HDCover:FixtureCover}=await import(new URL('hd-cover.mjs',mainURL));FixtureCover.prototype.runHelper=async request=>{hdProbeCalls++;assert.equal(request.mode,'probe');return {width:1,height:1};};
 await import(mainURL.href);

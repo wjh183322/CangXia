@@ -20,8 +20,6 @@ export function inspectWorkFiles(store,id){
       if(stat.isSymbolicLink())throw new Error('文件是链接，无法安全检查');
       if(!stat.isFile()||stat.size===0||(asset.size&&asset.size!==stat.size))result.missing.push({key,label,reason:'文件大小异常'});
     }
-    if(w.type==='video'&&d?.hdCover?.status==='failed')result.missing.push({key:'cover-quality',label:'高清图',reason:d.hdCover.message||'未取得可靠匹配的高清图'});
-    if(w.type==='video'&&d?.hdCover?.status==='ready'&&!store.assetExists(d,d.assets.find(a=>a.key===d.hdCover.key)||{}))result.missing.push({key:'cover-quality',label:'高清图',reason:'高清文件缺失'});
     if(result.missing.length)result.status='missing';
   }catch(e){result.status='error';result.error=e.message;}
   return result;

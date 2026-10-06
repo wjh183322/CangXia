@@ -27,7 +27,6 @@ export class DefectRepair{
   if(problem)issues.push({kind:'cover',label:'封面异常',reason:problem.reason});
   else if(!asset&&(!work.thumbnail||(!this.backup.meta.dirty&&this.backup.meta.baseRevision!==null)))issues.push({kind:'cover',label:'封面待补',reason:work.thumbnail?'封面尚未成功备份':'缺少封面地址'});
   const download=this.store.download(id),failed=this.queue.jobs.find(j=>j.id===id&&j.state==='failed');
-  if(work.type==='video'&&download&&!download.hdCover)issues.push({kind:'files',label:'封面清晰度待核对',reason:'旧版下载的封面尚未与视频实际分辨率核对'});
   if(download||failed){const files=inspectWorkFiles(this.store,id);if(files.status==='missing')issues.push({kind:'files',label:'文件缺失或异常',reason:files.missing.map(m=>`${m.label}：${m.reason}`).join('；')});else if(files.status==='error')issues.push({kind:files.error.includes('缺少原始图片数量')?'metadata':'blocked',label:files.error.includes('缺少原始图片数量')?'作品信息不完整':'暂时无法检查文件',reason:files.error});}
   return issues.length?{id,name:work.name,author:work.author?.nickname||'',url:work.url,issues}:null;
  }
@@ -66,7 +65,7 @@ export class DefectRepair{
     if(defect.issues.some(v=>v.kind==='metadata')){await this.collector.resolveWork(item.id);signal.throwIfAborted();messages.push('已刷新这一条作品信息');}
     if(defect.issues.some(v=>v.kind==='cover'))try{messages.push(await this.repairCover(item.id,signal));}catch(error){if(signal.aborted)throw error;failures.push(error.message);}
     signal.throwIfAborted();
-    if(defect.issues.some(v=>['files','metadata'].includes(v.kind))){const files=inspectWorkFiles(this.store,item.id),d=this.store.download(item.id);if(files.status==='missing'||(this.store.work(item.id)?.type==='video'&&d&&!d.hdCover)){queued=true;messages.push('交给下载管理，仅补缺失文件及核对封面清晰度');}else if(files.status==='error')failures.push(files.error);}
+    if(defect.issues.some(v=>['files','metadata'].includes(v.kind))){const files=inspectWorkFiles(this.store,item.id);if(files.status==='missing'){queued=true;messages.push('交给下载管理，仅补缺失文件');}else if(files.status==='error')failures.push(files.error);}
     if(defect.issues.some(v=>v.kind==='blocked'))failures.push('目录暂时不可访问，未尝试下载');
     item.queueFiles=queued;item.state=failures.length?'failed':queued?'queued':'done';item.message=[...messages,...failures].join('；');
    }catch(error){if(signal.aborted){item.state='waiting';item.message='已停止，未完成部分可继续';stopped=true;break;}item.state='failed';item.message=error.message;}

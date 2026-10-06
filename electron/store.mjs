@@ -231,8 +231,10 @@ export class Store {
     } catch { return false; }
   }
   isDownloaded(id) {
-    const d = this.download(id); if (!d || d.state !== 'complete' || !d.assets?.length) return false;
-    return d.assets.every(a => this.assetExists(d, a));
+    const d = this.download(id); if (!d || !d.assets?.length) return false;
+    // A failed optional cover task in 0.3.10 must not hide otherwise complete media.
+    if(d.state!=='complete')return d.hdCover?.status==='failed'&&this.work(id)?.type==='video'&&['video','cover','metadata'].every(key=>d.assets.some(a=>a.key===key&&this.assetExists(d,a)));
+    return d.assets.filter(a=>!a.key.startsWith('cover-hd-')).every(a => this.assetExists(d, a));
   }
   hasSavedFiles() {
     const records=this.all('downloads');

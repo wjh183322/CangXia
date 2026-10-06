@@ -24,7 +24,7 @@ export class DownloadQueue {
     this.running=false;this.paused=this.jobs.some(j=>j.state==='waiting');this.active=new Map();this.resolveTail=Promise.resolve();this.cursor=0;
     const saved=store.getSetting('downloadConcurrency');this.concurrency=Number.isInteger(saved)&&saved>=1&&saved<=6?saved:3;
   }
-  state() { return { jobs: this.jobs.map(({ id, title, state, progress, message, phase }) => ({ id, title, state, progress, message, phase })), paused: this.paused, running: this.running, concurrency:this.concurrency, active:this.active.size, transferring:this.jobs.filter(j=>j.state==='running'&&j.phase==='transferring').length, pauseReason:this.pauseReason||'' }; }
+  state() { return { jobs: this.jobs.map(({ id, title, state, progress, message, phase,coverOnly }) => ({ id, title, state, progress, message, phase,coverOnly })), paused: this.paused, running: this.running, concurrency:this.concurrency, active:this.active.size, transferring:this.jobs.filter(j=>j.state==='running'&&j.phase==='transferring').length, pauseReason:this.pauseReason||'' }; }
   setConcurrency(value){
     if(!Number.isInteger(value)||value<1||value>6)throw new Error('同时下载数量应为 1 至 6');
     this.concurrency=value;this.store.setSetting('downloadConcurrency',value);this.store.save();this.wake?.();this.notify();
@@ -54,6 +54,7 @@ export class DownloadQueue {
   }
   enqueue(ids,{coverOnly=false}={}) {
     if(ids.some(id=>this.active.get(id)?.cancelled))throw Error('该任务正在取消，请稍后重新添加');
+    const requested=new Set(ids);if(this.jobs.some(j=>requested.has(j.id)&&['waiting','running'].includes(j.state)&&!!j.coverOnly!==coverOnly))throw Error('所选作品已有另一类任务，请先完成或取消该任务');
     const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
     for (const id of [...new Set(ids)]) {
       if(busy.has(id))continue;
@@ -62,6 +63,7 @@ export class DownloadQueue {
     }
     const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
     this.paused = false;this.pauseReason=''; this.emit(true);this.wake?.();void this.run();
+    return added.length;
   }
   pause() { this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
   resume() { this.pauseReason='';this.paused = false;this.cursor=0;this.emit(true);this.wake?.();void this.run(); }
@@ -99,13 +101,13 @@ export class DownloadQueue {
   }
   async saveWork(job, signal) {
     signal.throwIfAborted();
-    if(job.coverOnly){const w=this.store.work(job.id),d=this.store.download(job.id);if(w?.type!=='video'||!d)throw Error('本机没有可补齐封面的视频');try{await this.ensureHDCover(job,w,d,signal);const check=inspectWorkFiles(this.store,job.id);d.state=check.status==='error'||check.missing.some(a=>!['cover-quality','metadata'].includes(a.key))?'partial':'complete';}finally{if(!signal.aborted){this.saveMetadata(w,d);this.store.put('downloads',d.id,d);this.store.save();}}return;}
-    if(this.backupRestore&&await this.backupRestore(job,signal)&&(!this.hdCovers||this.store.download(job.id)?.hdCover?.status==='ready'))return;
+    if(job.coverOnly){const w=this.store.work(job.id),d=this.store.download(job.id);if(w?.type!=='video'||!d)throw Error('本机没有可补齐封面的视频');try{await this.ensureHDCover(job,w,d,signal);}finally{if(!signal.aborted){this.saveMetadata(w,d);this.store.put('downloads',d.id,d);const check=inspectWorkFiles(this.store,job.id);if(check.status!=='error')d.state=check.missing.length?'partial':'complete';this.store.put('downloads',d.id,d);this.store.save();}}return;}
+    if(this.backupRestore&&await this.backupRestore(job,signal))return;
     const { store } = this;
     const inspection=inspectWorkFiles(store,job.id);
     if(inspection.status==='error')throw new Error(inspection.error);
     const w=store.work(job.id);
-    if (inspection.status==='complete'&&(!this.hdCovers||w.type!=='video'||store.download(job.id)?.hdCover?.status==='ready')) { job.message = '文件完整，无需补齐'; return; }
+    if (inspection.status==='complete') { job.message = '文件完整，无需补齐'; return; }
     try{return await this.saveResources(job,signal,w);}
     catch(error){
       signal.throwIfAborted();if(!error.refreshable)throw error;
@@ -143,11 +145,10 @@ export class DownloadQueue {
       } catch (e) { if (signal.aborted||e.code==='AUTH_REQUIRED') throw e;refreshable ||= !!e.refreshable||[401,403,404,410].includes(e.httpStatus);failures.push(`${target.name}：${e.message}`); }
       completed++;
     }
-    if(!failures.length&&w.type==='video')try{await this.ensureHDCover(job,w,d,signal);}catch(e){if(signal.aborted)throw e;failures.push(e.message);}
     d.state = failures.length ? 'partial' : 'complete';
     d.coverSource = d.assets.find(a=>a.key==='cover')?.source || w.coverSource; d.lastError = failures.join('；');
     const cover = d.assets.find(a=>a.key==='cover');
-    if(!this.hdCovers)d.coverWarning = cover?.width ? `当前封面 ${cover.width}×${cover.height}，尚未与视频实际分辨率核对` : '';
+    if(!d.hdCover)d.coverWarning = cover?.width ? `当前封面 ${cover.width}×${cover.height}，可手动补齐高清图` : '';
     this.saveMetadata(w,d);
     store.put('downloads', job.id, d); store.save(); this.emit();
     if (failures.length) throw Object.assign(new Error(`部分已保存，${failures.join('；')}`),{refreshable});
@@ -155,7 +156,7 @@ export class DownloadQueue {
   async ensureHDCover(job,w,d,signal){
     if(!this.hdCovers)return;
     try{await this.hdCovers.ensure(this,w,d,signal,message=>{job.phase='matching';job.message=message;this.emit();});}
-    catch(e){if(signal.aborted)throw e;d.hdCover={status:'failed',message:e.message};d.coverWarning='未取得与视频清晰度相当的封面：'+e.message;d.state='partial';throw Error(d.coverWarning);}
+    catch(e){if(signal.aborted)throw e;d.hdCover={status:'failed',message:e.message};d.coverWarning='未取得与视频清晰度相当的封面：'+e.message;throw Error(d.coverWarning);}
   }
   saveMetadata(w,d){
     const metadata = this.metadata(w, d),dir=d.path;
