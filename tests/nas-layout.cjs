@@ -17,8 +17,9 @@ app.whenReady().then(async()=>{
    return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="480" height="640"><rect width="480" height="640" fill="${colors[i]}"/><circle cx="340" cy="165" r="70" fill="#fff9e8"/><path d="M0 430L150 210L300 430L400 280L480 400V640H0Z" fill="#849da7"/><path d="M0 550L240 335L480 565V640H0Z" fill="#526d7c"/><path d="M0 580Q230 500 480 585V640H0Z" fill="#bfd3d1"/></svg>`,{headers:{'content-type':'image/svg+xml'}});
   });
   win=new BrowserWindow({show:false,useContentSize:true,width:1568,height:1004,webPreferences:{offscreen:true,contextIsolation:true,sandbox:true,backgroundThrottling:false,preload:path.join(__dirname,'layout-preload.cjs')}});
-  const js=code=>win.webContents.executeJavaScript(code,true),settle=()=>new Promise(r=>setTimeout(r,180));
-  await win.loadFile(path.resolve('dist/index.html'));await settle();await js(`[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('NAS 备份')).click()`);await settle();
+  const js=async code=>{try{return await win.webContents.executeJavaScript(code,true);}catch(error){throw new Error('NAS layout script failed: '+code+'\n'+error.stack);}},settle=()=>new Promise(r=>setTimeout(r,180));
+  const ready=async expression=>{for(let attempt=0;attempt<100;attempt++){if(await js(expression))return;await settle();}throw new Error('NAS UI did not become ready: '+expression);};
+  await win.loadFile(path.resolve('dist/index.html'));await ready(`!!document.querySelector('.main-nav button')`);await js(`[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('NAS 备份')).click()`);await ready(`!!document.getElementById('nas-tab-all')&&!!document.querySelector('.card-checkbox')`);
   for(const tab of ['all','collection','author']){
    await js(`document.getElementById('nas-tab-${tab}').click()`);await settle();
    if(tab==='author'){await js(`document.querySelector('[aria-label="NAS 作者 墨白"]').click()`);await settle();}
