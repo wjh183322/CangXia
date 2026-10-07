@@ -19,6 +19,20 @@ jobs:
       - run: node node_modules/electron/install.js
       - run: npm test
       - run: npm run test:ui
+      - name: Check NAS layout at desktop and small window sizes
+        run: |
+          npm run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./node_modules/.bin/electron.cmd tests/nas-layout.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backup-ui-checks
+          path: |
+            .test-output/nas-ui-*.png
+            .test-output/nas-layout-result.json
+          retention-days: 14
       - name: Build matching component
         shell: pwsh
         run: ./scripts/build-cover-helper.ps1 -Python python
