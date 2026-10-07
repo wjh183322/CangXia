@@ -1,5 +1,5 @@
 import {WorkCreators} from './creator-ui.jsx';
-import {creatorIndex,creatorKey,workCreators} from '../shared/creators.mjs';
+import {creatorIndex,creatorKey,workCreators,CREATOR_INFO_VERSION} from '../shared/creators.mjs';
 import {nasLibrary,nasWorks} from './nas-library.mjs';
 import {NASTabs,NASSidebar,NASSourceBadge} from './nas-ui.jsx';
 import {DefectRepairPanel} from './defect-repair-ui.jsx';
@@ -48,7 +48,7 @@ function App() {
   const creatorRequest=useRef(0),activeCreator=useRef(null);
   const profiles=useMemo(()=>creatorIndex(data.creatorProfiles||[]),[data.creatorProfiles]);
   async function refreshCreators(id,force=false){const request=++creatorRequest.current;activeCreator.current=id;setCreatorRefreshing(true);setCreatorMessage('');try{const result=await api.refreshWorkCreators(id,{force});if(request===creatorRequest.current){const next=await api.state();if(request===creatorRequest.current){setData(next);setCreatorMessage(result?.message||'作者信息已更新');}}}catch(e){if(request===creatorRequest.current)setCreatorMessage(e.message);}finally{if(request===creatorRequest.current){activeCreator.current=null;setCreatorRefreshing(false);}}}
-  useEffect(()=>{++creatorRequest.current;setCreatorMessage('');setCreatorRefreshing(false);const w=data.works.find(w=>w.id===detailId);if(w&&(!w.creatorsCheckedAt||Date.now()-Date.parse(w.creatorsCheckedAt)>7*86400000||workCreators(w,profiles).some(a=>!a.uniqueId))&&api.refreshWorkCreators&&data.collector.connected&&data.storage?.writable&&!data.queue.running&&!data.collector.busy&&!data.flatQueue?.running&&!data.localRemoval?.running&&!data.nasRemoval?.running)void refreshCreators(w.id);return()=>{if(detailId&&activeCreator.current===detailId){activeCreator.current=null;void api.stopWorkCreators?.(detailId).catch(()=>{});}++creatorRequest.current;};},[detailId,data.collector.connected,data.storage?.writable]);
+  useEffect(()=>{++creatorRequest.current;setCreatorMessage('');setCreatorRefreshing(false);const w=data.works.find(w=>w.id===detailId);if(w&&(w.coAuthorsState==='unknown'||w.creatorInfoVersion!==CREATOR_INFO_VERSION||!w.creatorsCheckedAt||Date.now()-Date.parse(w.creatorsCheckedAt)>7*86400000||workCreators(w,profiles).some(a=>!a.uniqueId))&&api.refreshWorkCreators&&data.collector.connected&&data.storage?.writable&&!data.queue.running&&!data.collector.busy&&!data.flatQueue?.running&&!data.localRemoval?.running&&!data.nasRemoval?.running)void refreshCreators(w.id);return()=>{if(detailId&&activeCreator.current===detailId){activeCreator.current=null;void api.stopWorkCreators?.(detailId).catch(()=>{});}++creatorRequest.current;};},[detailId,data.collector.connected,data.storage?.writable]);
   const [importPreview,setImportPreview]=useState(null);
   const storage=data.storage||{mode:'backup',writable:false},readOnly=!storage.writable;
   const [coverRefresh,setCoverRefresh]=useState(0);

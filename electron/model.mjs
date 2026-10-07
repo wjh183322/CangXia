@@ -1,4 +1,4 @@
-import {normalizeCreator,parseCoCreators} from '../shared/creators.mjs';
+import {normalizeCreator,parseCoCreators,CREATOR_INFO_VERSION} from '../shared/creators.mjs';
 import path from 'node:path';
 export { selectWorks } from './filter.mjs';
 
@@ -73,7 +73,7 @@ export function parseWork(raw,{fullDetail=false}={}) {
   const coverVariants=[['origin_cover',v.origin_cover||v.originCover],['cover_original_scale',v.cover_original_scale],['cover',v.cover]].map(([source,value])=>({source,urls:urls(value),width:Number(value?.width||0),height:Number(value?.height||0)})).filter(x=>x.urls.length);
   return {
     id, name, title: String(raw.item_title || raw.title || ''), caption: String(raw.caption || ''), description: desc, tags: [...tags], rawTags: { textExtra: raw.text_extra || [], challenges: raw.cha_list || [] },
-    author,...(coAuthors!==null||fullDetail?{coAuthors:coAuthors||[],creatorsCheckedAt:new Date().toISOString()}:{}),
+    author,...(coAuthors!==null||fullDetail?{...(coAuthors!==null?{coAuthors}:{}),coAuthorsState:coAuthors!==null?'verified':'unknown',creatorInfoVersion:CREATOR_INFO_VERSION,creatorsCheckedAt:new Date().toISOString()}:{}),
     type: images.length ? 'images' : 'video', images, videoUrls: [...new Set(candidates)], coverVariants,
     coverUrls: original.length ? original : staticCover, coverSource: original.length ? (v.origin_cover || v.originCover ? 'origin_cover' : 'cover_original_scale') : 'cover',
     thumbnail: staticCover[0] || original[0] || images[0]?.urls[0] || '',

@@ -1,4 +1,4 @@
-import {creatorIndex,workCreators,sameCreator,normalizeCreator,mergeCreator} from '../shared/creators.mjs';
+import {creatorIndex,workCreators,sameCreator,normalizeCreator,mergeCreator,CREATOR_INFO_VERSION} from '../shared/creators.mjs';
 const fresh=time=>!!time&&Date.now()-Date.parse(time)<7*86400000;
 export class CreatorDetails{
  constructor(collector){this.collector=collector;this.store=collector.store;this.attempts=new Map();this.running=false;}
@@ -9,7 +9,8 @@ export class CreatorDetails{
   await c.ready;c.assertNotCoolingDown();if(!await c.isAuthenticated())throw Error('连接抖音账号后可补充作者信息');this.attempts.set(id,Date.now());c.cancelled=false;
   const controller=new AbortController(),key='creators:'+id,previousController=c.syncController;c.syncController=controller;this.running=true;this.controller=controller;this.activeId=id;
   try{
-  const messages=[];if(force||!fresh(work.creatorsCheckedAt))try{work=await c.resolveWork(id,{backgroundOnly:true,signal:controller.signal});}catch(error){messages.push(error.message);if(!c.status.connected||c.cancelled||controller.signal.aborted)throw error;}
+  const messages=[];if(force||work.coAuthorsState==='unknown'||work.creatorInfoVersion!==CREATOR_INFO_VERSION||!fresh(work.creatorsCheckedAt))try{work=await c.resolveWork(id,{backgroundOnly:true,signal:controller.signal});}catch(error){messages.push(error.message);if(!c.status.connected||c.cancelled||controller.signal.aborted)throw error;}
+  if(work.coAuthorsState==='unknown')messages.push('当前接口未返回共创信息，已有共创记录已保留');
   c.waiters.set(key,{reject:()=>controller.abort(new Error('作者信息更新已停止'))});
   const creators=workCreators(work,creatorIndex(this.store.creatorProfiles())),resolved=[];let requested=0;
   for(const person of creators){

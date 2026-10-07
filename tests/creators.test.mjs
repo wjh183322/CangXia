@@ -12,7 +12,8 @@ test('stable-ID filtering includes co-created work and ignores same-nickname str
 });
 test('partial list refresh preserves co-creators and cached handles; verified detail can remove an old co-creator',async t=>{
  const s=await setup(t);s.upsertWork(raw);s.rememberCreator({...co,unique_id:'37386365831'});s.upsertWork({aweme_id:raw.aweme_id,author:{uid:raw.author.uid}});assert.equal(s.work(raw.aweme_id).coAuthors.length,1);assert.equal(s.work(raw.aweme_id).author.uniqueId,'ffff1111fff');assert.equal(workCreators(s.work(raw.aweme_id),creatorIndex(s.creatorProfiles()))[1].uniqueId,'37386365831');
- s.upsertWork({aweme_id:raw.aweme_id,author:raw.author},{fullDetail:true});assert.deepEqual(s.work(raw.aweme_id).coAuthors,[]);
+ s.upsertWork({aweme_id:raw.aweme_id,author:raw.author},{fullDetail:true});assert.equal(s.work(raw.aweme_id).coAuthors.length,1);assert.equal(s.work(raw.aweme_id).coAuthorsState,'unknown');
+ s.upsertWork({aweme_id:raw.aweme_id,author:raw.author,cooperation_info:{co_creators:[]}},{fullDetail:true});assert.deepEqual(s.work(raw.aweme_id).coAuthors,[]);assert.equal(s.work(raw.aweme_id).coAuthorsState,'verified');
 });
 test('co-creator homepage membership accepts the shared item without altering collections',async t=>{
  const s=await setup(t);s.authorSources.add(co.sec_uid,{user:{...co,unique_id:'37386365831'}});const source=s.authorSources.start(co.sec_uid);s.authorSources.apply(source,{items:[raw],next:null,complete:true});assert.deepEqual(s.authorSources.snapshot().authorMembers[co.sec_uid],[raw.aweme_id]);assert.deepEqual(s.snapshot().members.__all__,[]);assert.equal(s.snapshot().creatorProfiles.find(a=>a.secUid===co.sec_uid).uniqueId,'37386365831');

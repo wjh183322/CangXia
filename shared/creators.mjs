@@ -1,4 +1,5 @@
 const value=(v,max=240)=>v===undefined||v===null||v===0||v==='0'?'':String(v).trim().slice(0,max);
+export const CREATOR_INFO_VERSION=2;
 export function normalizeCreator(raw={}){return {uid:value(raw.uid||raw.user_id),secUid:value(raw.sec_uid||raw.secUid),uniqueId:value(raw.unique_id||raw.uniqueId)||value(raw.short_id||raw.shortId),nickname:value(raw.nickname||raw.name,120)||'未知作者',...(raw.role_title||raw.roleTitle?{roleTitle:value(raw.role_title||raw.roleTitle,100)}:{})};}
 export function creatorKey(a){return a?.uid?'uid:'+a.uid:a?.secUid?'sec:'+a.secUid:a?.uniqueId?'handle:'+a.uniqueId:'';}
 export function sameCreator(a,b){if(!a||!b)return false;if(a.uid&&b.uid&&a.uid!==b.uid)return false;if(a.secUid&&b.secUid&&a.secUid!==b.secUid)return false;return !!((a.uid&&a.uid===b.uid)||(a.secUid&&a.secUid===b.secUid));}

@@ -1,3 +1,4 @@
+import {webCreatorParams} from '../shared/douyin-web.mjs';
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 
@@ -5,6 +6,7 @@ const ROUTES=new Set(['/aweme/v1/web/user/profile/self/','/aweme/v1/web/collects
 const failure=(code,message)=>Object.assign(new Error(message),{code});
 export function apiRequest(route,{params={},method='GET',form}={}){
  if(!ROUTES.has(route)||method!==(route==='/aweme/v1/web/aweme/listcollection/'?'POST':'GET'))throw failure('BROWSER_ROUTE','不支持的读取接口');
+ params=webCreatorParams(route,params);
  const url=new URL(route,'https://www.douyin.com');for(const [k,v]of Object.entries({device_platform:'webapp',aid:'6383',channel:'channel_pc_web',...params}))url.searchParams.set(k,String(v));
  return {url:url.href,method,body:form?new URLSearchParams(form).toString():null};
 }

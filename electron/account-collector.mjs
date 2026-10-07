@@ -1,3 +1,4 @@
+import {webCreatorParams} from '../shared/douyin-web.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, parseWork, sleep } from './model.mjs';
 import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
@@ -129,6 +130,7 @@ export class Collector{
   async finishLogin(){await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前任务');await this.applyAuth(await this.browser.credentials());return true;}
   async importConfig(text){await this.ready;if(this.busy||this.waiters.size)throw new Error('请先停止当前任务');await this.applyAuth(parseReferenceConfig(text));return true;}
   async request(path,{params={},method='GET',form,signal,allowGuest=false,quiet=false}={}){
+    params=webCreatorParams(path,params);
     const record=event=>{if(!quiet)this.onDiagnostic(event);};
     await this.ready;this.assertNotCoolingDown();if(!API_PATHS.has(path))throw new Error('不支持的读取接口');
     if(!allowGuest&&!(await this.isAuthenticated())){this.needsLogin('登录会话需要更新，请重新扫码或在专用浏览器完成验证');throw new Error('登录会话需要更新，请重新扫码或完成验证');}
