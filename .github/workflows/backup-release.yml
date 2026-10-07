@@ -28,6 +28,12 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/check-backup-package.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/backup-package-smoke.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/backup-desktop-test.mjs --packaged
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem release/backup -Filter '*.exe' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name } | Set-Content release/backup/SHA256-desktop.txt
       - uses: actions/upload-artifact@v4
         with:

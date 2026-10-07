@@ -32,6 +32,7 @@ import { isDouyinURL, requireInside } from './model.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appVersion=JSON.parse(fs.readFileSync(path.join(here,'..','package.json'),'utf8')).version;
 const smoke = process.argv.includes('--smoke');
+const packageSmoke=process.argv.includes('--package-smoke')&&!!process.env.CANGXIA_BACKUP_TEST_PROFILE;
 const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
 if (smoke || sampleProbe || qrProbe) app.setPath('userData', path.resolve('.test-output', qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
@@ -92,7 +93,7 @@ try {
   process.on('uncaughtExceptionMonitor',error=>diagnostics.record({event:'uncaught',name:error.name,code:error.code}));
   app.on('child-process-gone',(_event,details)=>diagnostics.record({event:'child-process-gone',reason:details.reason,exitCode:details.exitCode}));
   const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !packageSmoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -327,6 +328,12 @@ try {
   if (process.env.CANGXIA_DEV === '1') await window.loadURL('http://127.0.0.1:5173');
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
   startupLoading=false;
+  if(packageSmoke){
+    const data=await window.webContents.executeJavaScript('window.cangxia.state()');
+    if(!app.isPackaged||data.version!==appVersion||data.storage.mode!=='backup'||data.works.length!==0)throw new Error('安装包启动检查失败');
+    fs.writeFileSync(path.join(app.getPath('userData'),'package-smoke.json'),JSON.stringify({ok:true,version:appVersion,packaged:app.isPackaged,preload:true}));
+    app.quit();return;
+  }
   void collector.ready.then(async()=>{await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];notify();await backup.start();}).then(()=>restoreBackupAuth()).catch(()=>{});
   window.on('close',event=>{if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}if(localRemoval?.running)return;if(!quitting&&!readLocked()&&!loggingOut&&!flatQueue.hasUnfinished()&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
   window.on('focus', notify);

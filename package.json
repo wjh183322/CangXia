@@ -1,6 +1,6 @@
 {
   "name": "cangxia-backup",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "description": "藏匣备份版 · 本地优先与 NAS 后台同步",
   "author": "CangXia",
   "private": true,
@@ -43,8 +43,7 @@
       "electron/**/*",
       "assets/**/*",
       "package.json",
-      "shared/**/*",
-      "!electron/nas-*"
+      "shared/**/*"
     ],
     "asar": true,
     "extraResources": [
