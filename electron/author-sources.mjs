@@ -1,3 +1,4 @@
+import {normalizeCreator,sameCreator,workCreators} from '../shared/creators.mjs';
 import {createHash} from 'node:crypto';
 import {safeName,parseWork,isMediaURL} from './model.mjs';
 
@@ -49,8 +50,8 @@ export class AuthorSources{
     if(!u||String(u.sec_uid||'')!==id||!/^\d+$/.test(String(u.uid||'')))throw new Error('未获得匹配的作者信息，未添加作者');
     const old=this.get(id);if(old?.uid&&old.uid!==String(u.uid))throw new Error('作者身份信息不一致，已保留原记录');
     const nickname=String(u.nickname||'未命名作者').slice(0,120),hash=createHash('sha256').update(id).digest('hex').slice(0,10);
-    const a={...old,id,uid:String(u.uid),name:nickname,archived:false,uniqueId:String(u.unique_id||u.short_id||''),avatar:(u.avatar_thumb?.url_list||[]).find(isMediaURL)||'',url:`https://www.douyin.com/user/${id}`,folder:old?.folder||`作者作品/${safeName(nickname,32)}-${hash}`,reportedCount:Number.isSafeInteger(u.aweme_count)&&u.aweme_count>=0?u.aweme_count:null,updatedAt:new Date().toISOString()};
-    this.save(a);return a;
+    const a={...old,id,uid:String(u.uid),name:nickname,archived:false,uniqueId:normalizeCreator(u).uniqueId,avatar:(u.avatar_thumb?.url_list||[]).find(isMediaURL)||'',url:`https://www.douyin.com/user/${id}`,folder:old?.folder||`作者作品/${safeName(nickname,32)}-${hash}`,reportedCount:Number.isSafeInteger(u.aweme_count)&&u.aweme_count>=0?u.aweme_count:null,updatedAt:new Date().toISOString()};
+    this.store.rememberCreator(u);this.save(a);return a;
   }
   ids(id,table='author_members'){if(!['author_members','author_scan'].includes(table))throw new Error('无效作者列表');return this.store.rows(`SELECT work_id FROM ${table} WHERE author_id=? ORDER BY position`,[id]).map(r=>r.work_id);}
   order(id){const scan=this.ids(id,'author_scan'),seen=new Set(scan);return [...scan,...this.ids(id).filter(x=>!seen.has(x))];}
@@ -68,7 +69,7 @@ export class AuthorSources{
     this.store.db.run('BEGIN');try{
       for(const raw of result.items){
         signal?.throwIfAborted();const w=parseWork(raw);
-        if(!w||(!w.author.secUid&&!w.author.uid)||(w.author.secUid&&w.author.secUid!==a.id)||(w.author.uid&&w.author.uid!==a.uid))throw new Error('列表含有无法核实作者的作品，本页未写入');
+        if(!w||!workCreators(w).some(person=>sameCreator(person,{uid:a.uid,secUid:a.id})))throw new Error('列表含有无法核实作者的作品，本页未写入');
         const duplicate=this.store.rows('SELECT 1 FROM author_scan WHERE author_id=? AND work_id=?',[a.id,w.id]).length>0;
         if(!duplicate&&taken>=limit)break;
         const known=this.store.rows('SELECT 1 FROM author_members WHERE author_id=? AND work_id=?',[a.id,w.id]).length>0;

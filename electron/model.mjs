@@ -1,3 +1,4 @@
+import {normalizeCreator,parseCoCreators} from '../shared/creators.mjs';
 import path from 'node:path';
 export { selectWorks } from './filter.mjs';
 
@@ -47,10 +48,11 @@ function urls(value) {
   const list = value?.url_list || value?.urlList || (typeof value === 'string' ? [value] : []);
   return list.filter(isMediaURL).map(u => u.replace(/^http:/, 'https:'));
 }
-export function parseWork(raw) {
+export function parseWork(raw,{fullDetail=false}={}) {
   const id = String(raw.aweme_id || raw.awemeId || '');
   if (!/^\d+$/.test(id)) return null;
-  const author = raw.author || {};
+  const author = normalizeCreator(raw.author || {});
+  const coAuthors=parseCoCreators(raw,author);
   const desc = String(raw.desc ?? raw.caption ?? '');
   const name = String(raw.item_title || raw.preview_title || raw.title || desc.replace(/#[^\s#]+/g, '').trim() || desc || '未命名作品');
   const tags = new Set();
@@ -71,7 +73,7 @@ export function parseWork(raw) {
   const coverVariants=[['origin_cover',v.origin_cover||v.originCover],['cover_original_scale',v.cover_original_scale],['cover',v.cover]].map(([source,value])=>({source,urls:urls(value),width:Number(value?.width||0),height:Number(value?.height||0)})).filter(x=>x.urls.length);
   return {
     id, name, title: String(raw.item_title || raw.title || ''), caption: String(raw.caption || ''), description: desc, tags: [...tags], rawTags: { textExtra: raw.text_extra || [], challenges: raw.cha_list || [] },
-    author: { uid: String(author.uid || ''), secUid: String(author.sec_uid || author.secUid || ''), uniqueId: String(author.unique_id || author.uniqueId || author.short_id || ''), nickname: String(author.nickname || '未知作者') },
+    author,...(coAuthors!==null||fullDetail?{coAuthors:coAuthors||[],creatorsCheckedAt:new Date().toISOString()}:{}),
     type: images.length ? 'images' : 'video', images, videoUrls: [...new Set(candidates)], coverVariants,
     coverUrls: original.length ? original : staticCover, coverSource: original.length ? (v.origin_cover || v.originCover ? 'origin_cover' : 'cover_original_scale') : 'cover',
     thumbnail: staticCover[0] || original[0] || images[0]?.urls[0] || '',

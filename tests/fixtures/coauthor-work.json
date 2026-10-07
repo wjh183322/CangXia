@@ -1,0 +1,31 @@
+{
+  "aweme_id": "7693112789354787251",
+  "desc": "我拍我拍我拍拍拍",
+  "author": {
+    "uid": "77712723605",
+    "sec_uid": "MS4wLjABAAAA7jD34DuP_UptkFDY3juaQq92nVtWaLzAkH5-_nc4Y6A",
+    "nickname": "白起.",
+    "unique_id": "ffff1111fff",
+    "short_id": "1231486928"
+  },
+  "cooperation_info": {
+    "accepted_nums": 1,
+    "co_creators": [
+      {
+        "uid": "4042257896837535",
+        "sec_uid": "MS4wLjABAAAAccdrBRQ3whxEOPB4dWUGCgbedH99rsPrdCEpsSvZKSN6k5cEhmAaVXkovT8ynS_Z",
+        "nickname": "偷懒噜",
+        "invite_status": 1,
+        "role_id": 13,
+        "role_title": "出镜"
+      }
+    ]
+  },
+  "video": {
+    "play_addr": {
+      "url_list": [
+        "https://v3.douyinvod.com/fixture.mp4"
+      ]
+    }
+  }
+}

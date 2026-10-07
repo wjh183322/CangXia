@@ -1,3 +1,4 @@
+import {CreatorDetails} from './creator-details.mjs';
 import {LocalRemoval} from './local-removal.mjs';
 import {NASRemoval} from './nas-removal.mjs';
 import {HDCover,bestCover} from './hd-cover.mjs';
@@ -42,13 +43,13 @@ else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getP
 fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let backup,defectRepair,localRemoval,nasRemoval,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
+let backup,defectRepair,localRemoval,nasRemoval,creatorDetails,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
 const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
 const readLocked=()=>readStarting||!!collector?.busy;
-const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send('cangxia:notice','请先点击“停止读取”，保存进度后再关闭软件');};
+const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send('cangxia:notice',creatorDetails?.running?'请先点击“停止更新”，再关闭软件':'请先点击“停止读取”，保存进度后再关闭软件');};
 const deleteIntents=new Map();
 const stateTransfers=new Map();
 const inFlightActions=new Set();
@@ -69,7 +70,7 @@ function handler(name, action) {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
       if(localRemoval?.running&&!['state','stateChunk','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
       if(nasRemoval?.running&&!['state','stateChunk','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync','stopDefectRepair','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
+      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
       if(backupBusy&&!['state','stateChunk','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
       if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
@@ -112,6 +113,7 @@ try {
   // Local browsing must not wait for cookie restoration or account checks.
   collector.ready=collector.ready.catch(()=>collector.update('attention','登录状态未恢复，请重新连接原账号')).finally(()=>startupStage('session-ready'));
   backup.fetchCover=(url,options)=>collector.fetchMedia(url,options);
+  creatorDetails=new CreatorDetails(collector);
   const authorReader=new AuthorReader(collector,{fetchLink:redirectHeaders(net,httpProfile)});
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   queue.hdCovers=new HDCover({store,helper:app.isPackaged?path.join(process.resourcesPath,'cover-helper','CangXiaCover.exe'):path.resolve('.test-output/cover-helper-dist/CangXiaCover/CangXiaCover.exe')});
@@ -270,6 +272,8 @@ try {
     return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};});
   });
   handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
+  handler('stopWorkCreators',id=>{if(!/^\d+$/.test(id))throw Error('作品标识无效');return creatorDetails.cancel(id);});
+  handler('refreshWorkCreators',async(id,options={})=>{if(!/^\d+$/.test(id)||!options||typeof options!=='object'||(options.force!==undefined&&typeof options.force!=='boolean'))throw Error('作者信息请求无效');return foregroundRead(()=>creatorDetails.refresh(id,options));});
   handler('addAuthor',async text=>foregroundRead(()=>authorReader.add(text)));
   handler('readAuthor',async options=>{if(!options||typeof options!=='object')throw new Error('作者读取选项无效');return foregroundRead(()=>authorReader.read(options));});
   handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});

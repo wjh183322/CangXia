@@ -1,3 +1,4 @@
+import {normalizeCreator,creatorKey,sameCreator,mergeCreator} from '../shared/creators.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {SqliteStore} from './sqlite-store.mjs';
@@ -21,6 +22,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS downloads (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS backup_downloads (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_tags (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS creator_profiles (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS members_order ON members(collection_id,rank);
       CREATE TABLE IF NOT EXISTS sync_runs(collection_id TEXT PRIMARY KEY,body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sync_items(collection_id TEXT NOT NULL,work_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(collection_id,work_id));
@@ -79,20 +81,27 @@ export class Store {
   }
   invalidateViews(){this.viewCache.clear();this.revision++;}
   close() { this.save(); this.db.close(); }
-  upsertWork(raw) {
-    const next = parseWork(raw); if (!next) return null;
+  creatorProfiles(){return [...this.all('authors').map(a=>({uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name})),...this.all('creator_profiles')];}
+  cachedCreator(person){const key=creatorKey(person);if(!key)return null;let p=this.get('creator_profiles',key);if(!p&&person.secUid)p=this.rows("SELECT body FROM creator_profiles WHERE json_extract(body,'$.secUid')=? LIMIT 1",[person.secUid]).map(r=>JSON.parse(r.body))[0];if(!p&&person.secUid){const a=this.get('authors',person.secUid);if(a)p={uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name};}return p&&sameCreator(person,p)?p:null;}
+  rememberCreator(raw){const p=normalizeCreator(raw),key=creatorKey(p);if(!key||(!p.uid&&!p.secUid))return;const cached={...mergeCreator(this.cachedCreator(p)||{},p),fetchedAt:new Date().toISOString()};delete cached.roleTitle;this.put('creator_profiles',key,cached);const source=p.secUid?this.get('authors',p.secUid):null;if(source&&sameCreator(p,{uid:source.uid,secUid:source.id}))this.put('authors',source.id,{...source,uniqueId:p.uniqueId||source.uniqueId,name:p.nickname==='未知作者'?source.name:p.nickname});}
+  upsertWork(raw,options={}) {
+    const next = parseWork(raw,options); if (!next) return null;
     const old = this.work(next.id);
     if (old) {
       for (const key of ['title','caption','description','thumbnail']) if (!next[key]) next[key] = old[key];
       if (next.name === '未命名作品') next.name = old.name;
       if (!('text_extra' in raw || 'textExtra' in raw || 'cha_list' in raw || 'desc' in raw || 'caption' in raw)) { next.tags = old.tags; next.rawTags = old.rawTags; }
-      for (const key of ['uid','secUid','uniqueId','nickname']) if (!next.author[key] || next.author[key] === '未知作者') next.author[key] = old.author[key];
+      next.author=mergeCreator(old.author,next.author);
+      if(next.coAuthors)next.coAuthors=next.coAuthors.map(a=>{const previous=old.coAuthors?.find(p=>sameCreator(p,a));return previous?mergeCreator(previous,a):a;});
       if (!next.videoUrls.length) next.videoUrls = old.videoUrls || [];
       if (!next.coverUrls.length) { next.coverUrls = old.coverUrls || []; next.coverSource = old.coverSource; }
       if (!next.images.length && old.type === 'images') { next.images = old.images; next.type = old.type; }
       if (!next.author.uid && !next.author.secUid) next.author = old.author;
     }
-    this.put('works', next.id, { ...old, ...next }); return next;
+    const cached=this.cachedCreator(next.author);if(cached)next.author=mergeCreator(cached,next.author);
+    if(next.coAuthors)next.coAuthors=next.coAuthors.map(a=>mergeCreator(this.cachedCreator(a)||{},a));
+    if(options.fullDetail&&next.author.uniqueId)this.rememberCreator(next.author);
+    this.put('works', next.id, { ...old, ...next }); return this.work(next.id);
   }
   discoverCollections(list, complete = false) {
     const seen = new Set();
@@ -309,6 +318,6 @@ export class Store {
       members[c.id] = localMembers[c.id].filter(id=>!hidden.has(id));
       pendingMembers[c.id] = localPendingMembers[c.id].filter(id=>!hidden.has(id));
     }
-    return { works, collections, members, pendingMembers,localMembers,localPendingMembers,...this.authorSources.snapshot(backups),collectionReadInfo:this.collectionReads.snapshot(), readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.3.0' };
+    return { works, creatorProfiles:this.creatorProfiles(), collections, members, pendingMembers,localMembers,localPendingMembers,...this.authorSources.snapshot(backups),collectionReadInfo:this.collectionReads.snapshot(), readLimit:this.getSetting('readLimit')||20, rootLocked:this.hasSavedFiles(), root: this.root, account: this.getSetting('account') || (this.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null), version: '0.3.0' };
   }
 }

@@ -218,7 +218,7 @@ export class Collector{
     await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){
       const controller=new AbortController();const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;combined.throwIfAborted();this.waiters.set(id,{reject:()=>controller.abort()});
-      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const w=this.store.upsertWork(raw);this.store.save();this.notify();return w;}
+      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const w=this.store.upsertWork(raw,{fullDetail:true});this.store.save();this.notify();return w;}
       catch(e){if(e.sourceDeleted)this.markUnavailable(id);if(backgroundOnly&&this.status.needsLogin)e.code='AUTH_REQUIRED';throw e;}
       finally{this.waiters.delete(id);this.scheduleBrowserIdle();}
     }
@@ -230,7 +230,7 @@ export class Collector{
     try{
       cleanup=await this.browser.observeWork(id,(url,status,text)=>{
         if(this.closed||!this.waiters.has(id))return;
-        try{if(status!==200)return;const data=parsePlatformJSON(text);const raw=data.aweme_detail;if(!raw||String(raw.aweme_id)!==id)return;const w=this.store.upsertWork(raw);this.store.save();const p=this.waiters.get(id);this.waiters.delete(id);clearTimeout(p.timer);p.resolve(w);this.notify();}catch{}
+        try{if(status!==200)return;const data=parsePlatformJSON(text);const raw=data.aweme_detail;if(!raw||String(raw.aweme_id)!==id)return;const w=this.store.upsertWork(raw,{fullDetail:true});this.store.save();const p=this.waiters.get(id);this.waiters.delete(id);clearTimeout(p.timer);p.resolve(w);this.notify();}catch{}
       });
       this.userAgent=this.browser.userAgent;this.profile.setUserAgent(this.userAgent);
       return await result;
