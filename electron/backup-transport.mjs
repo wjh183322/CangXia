@@ -21,13 +21,13 @@ export class BackupTransport{
   const mod=url.protocol==='https:'?https:http;
   return new Promise((resolve,reject)=>{let timer,receivedHeaders=false;const started=Date.now();
    const mark=error=>{error.nasRequest={path:diagnosticPath(route),method,attempt,reusedSocket:!!req.reusedSocket,receivedHeaders,elapsedMs:Date.now()-started};this.record({event:'nas-request-error',...error.nasRequest,code:error.code,reason:error.message});return error;};
-   const req=mod.request(url,{method,agent:this.agent,signal,headers:{authorization:'Bearer '+this.token,'x-device-id':this.deviceId,'x-cangxia-protocol':String(PROTOCOL),'x-lease-token':this.leaseToken,'accept-encoding':'gzip',...(payload?{'content-length':payload.length}:{}),...headers}},res=>{receivedHeaders=true;clearTimeout(timer);res.once('error',mark);resolve(res);});
+   const req=mod.request(url,{method,agent:this.agent,signal,headers:{authorization:'Bearer '+this.token,'x-device-id':this.deviceId,'x-cangxia-protocol':String(PROTOCOL),'x-cangxia-deletion-aware':'1','x-lease-token':this.leaseToken,'accept-encoding':'gzip',...(payload?{'content-length':payload.length}:{}),...headers}},res=>{receivedHeaders=true;clearTimeout(timer);res.once('error',mark);resolve(res);});
    req.on('error',error=>{clearTimeout(timer);reject(mark(error));});
    timer=setTimeout(()=>req.destroy(Object.assign(new Error('NAS 服务连接超时'),{code:'NAS_CONNECT_TIMEOUT'})),timeout);req.setTimeout(timeout,()=>req.destroy(Object.assign(new Error('NAS 服务响应超时'),{code:'NAS_RESPONSE_TIMEOUT'})));req.end(payload);
   });
  }
  async json(method,route,options={}){
-  const safe=method==='GET'||(method==='POST'&&route==='/v1/commit'&&options.data?.requestId)||(method==='POST'&&route==='/v1/lease'&&options.data?.leaseToken);
+  const safe=method==='GET'||(method==='POST'&&['/v1/commit','/v1/backup-delete','/v1/backup-enable'].includes(route)&&options.data?.requestId)||(method==='POST'&&route==='/v1/lease'&&options.data?.leaseToken);
   for(let attempt=0;;attempt++)try{
    const res=await this.request(method,route,{...options,attempt}),chunks=[];let total=0;for await(const chunk of res){total+=chunk.length;if(total>32*1024*1024){res.destroy();throw new Error('NAS 响应过大');}chunks.push(chunk);}let body=Buffer.concat(chunks);if(res.headers['content-encoding']==='gzip')body=gunzipSync(body,{maxOutputLength:32*1024*1024});let data;try{data=JSON.parse(body);}catch{throw new Error('NAS 服务返回了无效数据');}if(res.statusCode<200||res.statusCode>=300)throw Object.assign(new Error(data.error||'NAS 请求失败'),{status:res.statusCode});return data;
   }catch(error){if(!safe||attempt>=2||!transientNASFailure(error)||options.signal?.aborted)throw error;await this.retry(error,route,method,attempt,options.signal);}

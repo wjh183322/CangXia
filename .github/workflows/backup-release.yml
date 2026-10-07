@@ -1,0 +1,88 @@
+name: Release backup desktop and server
+on:
+  push:
+    tags: ['backup-v*']
+permissions:
+  contents: read
+jobs:
+  desktop:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --ignore-scripts
+      - run: node node_modules/electron/install.js
+      - run: npm test
+      - run: npm run test:ui
+      - name: Build matching component
+        shell: pwsh
+        run: ./scripts/build-cover-helper.ps1 -Python python
+      - name: Test desktop integration and package
+        run: |
+          npm run test:backup-desktop
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem release/backup -Filter '*.exe' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name } | Set-Content release/backup/SHA256-desktop.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backup-desktop-release
+          path: |
+            release/backup/*.exe
+            release/backup/SHA256-desktop.txt
+          retention-days: 14
+  server:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - name: Build and validate service image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./backup-server/package.json').version")
+          docker build -f backup-server/Dockerfile -t "cangxia-backup-server:$version" .
+          docker run --rm -v "$PWD:/workspace:ro" -w /workspace --entrypoint node "cangxia-backup-server:$version" --test tests/nas-removal.test.mjs tests/backup-author.test.mjs tests/backup.test.mjs
+          docker run -d --name nas-smoke -p 127.0.0.1:18443:8443 "cangxia-backup-server:$version"
+          trap 'docker rm -fv nas-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2' >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2'
+          mkdir server-release
+          docker save "cangxia-backup-server:$version" > "server-release/CangXia-Backup-Server-$version.tar"
+          sha256sum server-release/*.tar > server-release/SHA256-server.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backup-server-release
+          path: server-release/
+          retention-days: 14
+  publish:
+    needs: [desktop, server]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: backup-*-release
+          path: release-files
+          merge-multiple: true
+      - name: Publish verified files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release create "$tag" --verify-tag --prerelease --title "藏匣备份版 ${tag#backup-v} 预览" --notes-file "docs/releases/$tag.md" release-files/*

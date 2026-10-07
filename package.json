@@ -1,6 +1,6 @@
 {
   "name": "cangxia-backup",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "藏匣备份版 · 本地优先与 NAS 后台同步",
   "author": "CangXia",
   "private": true,
@@ -25,11 +25,12 @@
     "electron": "44.3.0",
     "electron-builder": "26.15.3",
     "jsdom": "^30.0.1",
-    "vite": "8.3.0",
+    "lucide-react": "^0.577.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "lucide-react": "^0.577.0",
-    "sql.js": "1.14.2"
+    "selfsigned": "5.5.0",
+    "sql.js": "1.14.2",
+    "vite": "8.3.0"
   },
   "build": {
     "appId": "local.cangxia.backup",
@@ -46,7 +47,12 @@
       "!electron/nas-*"
     ],
     "asar": true,
-    "extraResources": [{"from":".test-output/cover-helper-dist/CangXiaCover","to":"cover-helper"}],
+    "extraResources": [
+      {
+        "from": ".test-output/cover-helper-dist/CangXiaCover",
+        "to": "cover-helper"
+      }
+    ],
     "electronDist": "node_modules/electron/dist",
     "win": {
       "target": [

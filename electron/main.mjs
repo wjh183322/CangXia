@@ -1,4 +1,5 @@
 import {LocalRemoval} from './local-removal.mjs';
+import {NASRemoval} from './nas-removal.mjs';
 import {HDCover,bestCover} from './hd-cover.mjs';
 import { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, session, safeStorage, screen } from 'electron';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +41,7 @@ else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getP
 fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let backup,defectRepair,localRemoval,removalExit=false,backupBusy=false,exitApproved=false;
+let backup,defectRepair,localRemoval,nasRemoval,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
 const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
@@ -50,7 +51,7 @@ const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send
 const deleteIntents=new Map();
 const stateTransfers=new Map();
 const inFlightActions=new Set();
-function runtimeState(){return {localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state(),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing},syncProgress:store.syncProgress?.()||[]};}
+function runtimeState(){return {nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state(),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing},syncProgress:store.syncProgress?.()||[]};}
 function snapshot() { return feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
@@ -66,6 +67,7 @@ function handler(name, action) {
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
       if(localRemoval?.running&&!['state','stateChunk','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if(nasRemoval?.running&&!['state','stateChunk','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
       if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync','stopDefectRepair','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
       if(backupBusy&&!['state','stateChunk','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
@@ -75,7 +77,7 @@ function handler(name, action) {
     finally{if(entered)inFlightActions.delete(name);}
   });
 }
-function ensureIdle() { if (localRemoval?.running || backupBusy || readLocked() || loggingOut || collector.authenticating || collector.verifyingIdentity || queue.running || flatQueue?.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
+function ensureIdle() { if (nasRemoval?.running || localRemoval?.running || backupBusy || readLocked() || loggingOut || collector.authenticating || collector.verifyingIdentity || queue.running || flatQueue?.running || collector.waiters.size) throw new Error('请先暂停下载并等待当前读取或账号核验结束，再进行此操作'); }
 async function foregroundRead(action){ensureIdle();readStarting=true;try{return await backup.withForegroundRead(action);}finally{readStarting=false;notify();}}
 function confirmFlatExit(){
  if(exitPrompt)return;exitPrompt=true;
@@ -94,12 +96,12 @@ try {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  window.on('close',event=>{if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}if(startupLoading)startupClosing=true;});
+  window.on('close',event=>{if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}if(startupLoading)startupClosing=true;});
   window.on('closed',()=>{if(!quitting)app.quit();});
   await window.loadFile(path.join(here,'startup.html'));startupStage('window-visible');
   if(quitting||window.isDestroyed())return;
   store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣备份版'));
-  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onDiagnostic:diagnostics.record,onUnavailable:()=>{if(!backup?.localReadDepth)collector?.stop();queue?.pause();flatQueue?.pauseAll();},isIdle:()=>!collector?.busy&&!collector?.authenticating&&!collector?.verifyingIdentity&&!queue?.running&&!flatQueue?.running&&!readStarting&&!loggingOut&&!backupBusy&&!localRemoval?.running});
+  backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onDiagnostic:diagnostics.record,onUnavailable:()=>{if(!backup?.localReadDepth)collector?.stop();queue?.pause();flatQueue?.pauseAll();},isIdle:()=>!collector?.busy&&!collector?.authenticating&&!collector?.verifyingIdentity&&!queue?.running&&!flatQueue?.running&&!readStarting&&!loggingOut&&!backupBusy&&!localRemoval?.running&&!nasRemoval?.running});
   startupStage('library-open');
   if(quitting||window.isDestroyed())return;
   feed=new SnapshotFeed(store);
@@ -117,6 +119,11 @@ try {
   queue.onIdle=()=>backup.afterDownloads();
   localRemoval=new LocalRemoval({store,trash:dir=>shell.trashItem(dir),before:async()=>{backup.cancel();if(backup.syncing)await backup.syncing.catch(()=>{});if(backup.checking)await backup.checking.catch(()=>{});},after:()=>{queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();notify();if(!removalExit)backup.deferSync();},notify});
   handler('cancelLocalRemoval',()=>localRemoval.cancel());
+  nasRemoval=new NASRemoval({store,backup,notify});
+  handler('prepareNASRemoval',(selected,action='delete')=>{ensureIdle();backup.assertWritable();if(!['delete','enable'].includes(action))throw Error('NAS 操作无效');if(!backup.status.backupDeletion)throw Error('请先将 NAS 服务更新至 0.2.1，保留原 data 目录');const targets=ids(selected).filter(id=>{const d=store.get('backup_downloads',id);return action==='delete'?d&&!d.backupDeleted:d?.backupDeleted;});if(action==='enable'&&targets.some(id=>!store.download(id)?.assets?.some(a=>a.kind!=='metadata'&&store.assetExists(store.download(id),a))))throw Error('请先下载本地媒体，再重新启用 NAS 备份');const token=randomUUID();deleteIntents.set(token,{kind:'nas',action,libraryId:backup.meta.libraryId,ids:targets,expires:Date.now()+600000});return {token,action,count:targets.length};});
+  handler('confirmNASRemoval',token=>{ensureIdle();const intent=deleteIntents.get(token);if(!intent||intent.kind!=='nas'||intent.libraryId!==backup.meta.libraryId||intent.expires<Date.now())throw Error('NAS 操作确认已过期');deleteIntents.delete(token);return nasRemoval.start(intent.ids,intent.action);});
+  handler('cancelNASRemoval',()=>nasRemoval.cancel());
+  handler('resumeNASRemoval',()=>{ensureIdle();return nasRemoval.start([],undefined,true);});
   defectRepair=new DefectRepair({store,backup,collector,queue,profile,runForeground:foregroundRead,onChange:notify});
   handler('inspectDefects',()=>{ensureIdle();return defectRepair.scan();});
   handler('startDefectRepair',selected=>{ensureIdle();backup.assertWritable();return defectRepair.start(ids(selected));});
@@ -321,9 +328,9 @@ try {
   else await window.loadFile(path.join(here, '..', 'dist', 'index.html'));
   startupLoading=false;
   void collector.ready.then(async()=>{await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];notify();await backup.start();}).then(()=>restoreBackupAuth()).catch(()=>{});
-  window.on('close',event=>{if(localRemoval?.running)return;if(!quitting&&!readLocked()&&!loggingOut&&!flatQueue.hasUnfinished()&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
+  window.on('close',event=>{if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}if(localRemoval?.running)return;if(!quitting&&!readLocked()&&!loggingOut&&!flatQueue.hasUnfinished()&&!exitApproved&&(backup.syncing||(backup.config&&backup.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');}});
   window.on('focus', notify);
-  window.on('close',event=>{if(localRemoval?.running)return;if(!quitting&&readLocked()){event.preventDefault();lockedNotice();return;}if(loggingOut){event.preventDefault();window.webContents.send('cangxia:notice','正在退出登录，请等待登录信息清理完成');return;}if(!quitting&&!exitConfirmed&&flatQueue.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}qrLogin?.cancel();});
+  window.on('close',event=>{if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}if(localRemoval?.running)return;if(!quitting&&readLocked()){event.preventDefault();lockedNotice();return;}if(loggingOut){event.preventDefault();window.webContents.send('cangxia:notice','正在退出登录，请等待登录信息清理完成');return;}if(!quitting&&!exitConfirmed&&flatQueue.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}qrLogin?.cancel();});
   window.webContents.on('render-process-gone',(_event,details)=>{qrLogin?.cancel();diagnostics.record({event:'render-process-gone',reason:details.reason,exitCode:details.exitCode});collector.stop();queue.pause();flatQueue.pauseAll();void dialog.showMessageBox(window,{type:'warning',message:'界面进程已退出，已提交的读取进度仍保留',detail:'可以重新加载界面后继续。诊断记录保存在本机 diagnostics 目录。',buttons:['重新加载','退出'],defaultId:0,cancelId:1}).then(({response})=>{if(response===0)window.reload();else app.quit();});});
   if(qrProbe){
     await qrLogin.start();const deadline=Date.now()+35000;
@@ -374,9 +381,11 @@ try {
 });
 app.on('window-all-closed', () => app.quit());
 app.on('second-instance',()=>{if(window&&!window.isDestroyed()){if(window.isMinimized())window.restore();window.show();window.focus();}});
+function stopNASForExit(){if(nasExit)return;nasExit=true;nasRemoval.cancel();void nasRemoval.wait().finally(()=>{nasExit=false;app.quit();});}
 function stopRemovalForExit(){if(removalExit)return;removalExit=true;localRemoval.cancel();void localRemoval.wait().finally(()=>{removalExit=false;app.quit();});}
 app.on('before-quit', event => {
   if(quitting)return;
+  if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}
   if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}
   if(readLocked()||loggingOut){event.preventDefault();if(readLocked())lockedNotice();return;}
   if(!exitConfirmed&&flatQueue?.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}

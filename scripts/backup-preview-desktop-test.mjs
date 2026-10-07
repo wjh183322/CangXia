@@ -1,7 +1,8 @@
+import {writeTestCertificate} from '../tests/test-certificate.mjs';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawn,execFileSync} from 'node:child_process';import {createRequire} from 'node:module';import {randomBytes,X509Certificate} from 'node:crypto';
 import {createBackupServer} from '../backup-server/server.mjs';import {Store} from '../electron/store.mjs';import {BackupClient} from '../electron/backup-client.mjs';
 const require=createRequire(import.meta.url),base=fs.mkdtempSync(path.join(os.tmpdir(),'cangxia-preview-e2e-')),key=path.join(base,'key.pem'),cert=path.join(base,'cert.pem');
-execFileSync(process.env.OPENSSL||'C:\\Program Files\\Git\\usr\\bin\\openssl.exe',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost'],{stdio:'ignore'});
+await writeTestCertificate(base);
 const token=randomBytes(32).toString('hex'),server=createBackupServer({dataDir:path.join(base,'server'),token,tls:{key:fs.readFileSync(key),cert:fs.readFileSync(cert)}});const address=await server.listen(),settings={url:'https://127.0.0.1:'+address.port,token,fingerprint:new X509Certificate(fs.readFileSync(cert)).fingerprint256,deviceName:'fresh desktop',intervalMinutes:60};
 const source=path.join(base,'source'),store=await Store.open(path.join(source,'library.sqlite'),path.join(base,'source-media')),client=new BackupClient(store,source,{vault:{seal:s=>s,open:s=>s}});
 let code=1;

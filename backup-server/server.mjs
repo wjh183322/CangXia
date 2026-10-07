@@ -1,3 +1,4 @@
+import {createBackupActions} from './backup-actions.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import http from 'node:http';import https from 'node:https';import {randomUUID,randomBytes,timingSafeEqual,createHash} from 'node:crypto';import {gzipSync,gunzipSync} from 'node:zlib';import {DatabaseSync} from 'node:sqlite';import {pipeline} from 'node:stream/promises';
 import {PROTOCOL,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
 import {openBackupDatabase} from './database.mjs';
@@ -22,9 +23,11 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const get=key=>{const r=db.prepare('SELECT value FROM meta WHERE key=?').get(key);return r?JSON.parse(r.value):null;},set=(key,value)=>db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(key,JSON.stringify(value));
  if(!get('libraryId')){set('libraryId',randomUUID());set('revision',0);}
  set('schemaVersion',PROTOCOL);
- let lease=null;const busyUploads=new Set();
+ let lease=null;const busyUploads=new Set(),activeReads=new Map(),gcBusy=new Set();
  const validLease=req=>{const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
- const status=()=>({protocol:PROTOCOL,libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
+ const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true},libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
+ const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy});
+ const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
  const handler=async(req,res)=>{
   try{
@@ -40,6 +43,8 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     db.prepare('INSERT OR REPLACE INTO devices VALUES(?,?)').run(input.deviceId,input.name);send(req,res,200,{...status(),leaseToken:lease.token,leaseMs});return;
    }
    if(route==='/v1/lease'&&req.method==='DELETE'){validLease(req);lease=null;send(req,res,200,{ok:true});return;}
+   if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){const input=await json(req),device=validLease(req);const result=await actions.execute(route.endsWith('delete')?'delete':'enable',input,device,lease.name);send(req,res,200,result);return;}
+   const actionReceipt=route.match(/^\/v1\/backup-actions\/([a-f0-9-]{36})$/);if(actionReceipt&&req.method==='GET'){const row=db.prepare('SELECT device,result FROM backup_actions WHERE request=?').get(actionReceipt[1]);if(!row||row.device!==req.headers['x-device-id'])throw error(404,'未找到 NAS 操作回执');send(req,res,200,JSON.parse(row.result));return;}
    if(route==='/v1/changes'&&req.method==='GET'){
     const since=Number(url.searchParams.get('since')||0),revision=get('revision');if(!Number.isSafeInteger(since)||since<0||since>revision)throw error(409,'同步基础状态无效');
     const offset=Number(url.searchParams.get('offset')||0),through=Number(url.searchParams.get('through')||revision);if(!Number.isSafeInteger(offset)||offset<0||through!==revision)throw error(409,'同步期间 NAS 记录已变化，请重新检查');
@@ -51,7 +56,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     const input=await json(req),device=validLease(req),request=input.requestId||randomUUID();if(!/^[a-f0-9-]{36}$/.test(request))throw error(400,'提交标识无效');const requestHash=contentHash({libraryId:input.libraryId,baseRevision:input.baseRevision,changes:input.changes});const previous=db.prepare('SELECT * FROM commits WHERE request=?').get(request);if(previous){if(previous.device!==device||previous.requestHash!==requestHash)throw error(409,'提交标识被用于不同内容');send(req,res,200,{...status(),ackRevision:previous.revision,requestId:request});return;}
     if(input.libraryId!==get('libraryId')||input.baseRevision!==get('revision'))throw error(409,'NAS 已有其他更新，未覆盖任何记录');
     if(!Array.isArray(input.changes)||input.changes.length>100000)throw error(400,'变更数量无效');const seen=new Set();
-    for(const entry of input.changes){try{validateEntry(entry);}catch(e){throw error(400,e.message);}const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);const assets=entry.table==='downloads'&&entry.body?entry.body.assets:entry.table==='works'&&entry.body?.backupCover?[entry.body.backupCover]:[];for(const a of assets){const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
+    for(const entry of input.changes){try{validateEntry(entry);}catch(e){throw error(400,e.message);}const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);if(actions.deleted(entry.key)&&((entry.table==='works'&&entry.body?.backupCover)||(entry.table==='downloads'&&(!entry.body||entry.body.assets.length)&&entry.body?.backupDeleted!==false)))throw error(409,'此作品的 NAS 备份已删除，请手动重新启用备份后再上传');const assets=entry.table==='downloads'&&entry.body?entry.body.assets:entry.table==='works'&&entry.body?.backupCover?[entry.body.backupCover]:[];for(const a of assets){if(gcBusy.has(a.sha256))throw error(409,'媒体正在清理，请稍后重试');const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
     const proposed=new Map(input.changes.map(e=>[e.table+':'+e.key,e.body]));const present=(table,id)=>proposed.has(table+':'+id)?proposed.get(table+':'+id)!==null:!!db.prepare('SELECT 1 FROM records WHERE kind=? AND id=? AND body IS NOT NULL').get(table,id);
     for(const e of input.changes)if(e.body&&e.table==='author_members'&&(!present('authors',e.body.authorId)||!present('works',e.body.workId)))throw error(409,'作者或作品资料尚未提交');
     for(const e of input.changes)if(e.body&&e.table==='downloads'&&e.body.home?.kind==='author'&&(!present('authors',e.body.home.id)||!present('works',e.key)))throw error(409,'作者文件归属尚未提交');
@@ -63,9 +68,10 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    }
    const match=route.match(/^\/v1\/(uploads|objects)\/([a-f0-9]{64})$/);
    if(match){const [,kind,sha]=match,file=objectPath(sha),partial=path.join(dataDir,'uploads',sha+'.part');
+    if(kind==='uploads'&&actions.deletedHash(sha)&&req.headers['x-cangxia-deletion-aware']!=='1')throw error(409,'此媒体所属的 NAS 备份已删除，请更新客户端并手动重新启用备份');
     if(kind==='uploads'&&req.method==='GET'){validLease(req);const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);let offset=0;try{offset=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}send(req,res,200,{complete:!!known,size:known?.size||0,offset:known?known.size:offset});return;}
     if(kind==='uploads'&&req.method==='PUT'){
-     validLease(req);if(busyUploads.has(sha))throw error(409,'此文件正在上传');busyUploads.add(sha);
+     validLease(req);if(busyUploads.has(sha)||gcBusy.has(sha))throw error(409,'此文件正在处理');db.prepare('DELETE FROM garbage WHERE sha=?').run(sha);busyUploads.add(sha);
      try{const total=Number(req.headers['upload-length']),offset=Number(req.headers['upload-offset']);if(!Number.isSafeInteger(total)||total<=0||total>100*1024**3||!Number.isSafeInteger(offset)||offset<0)throw error(400,'上传长度无效');
       const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(known){if(known.size!==total)throw error(409,'文件长度冲突');send(req,res,200,{complete:true,offset:total,size:total});return;}
       let actual=0;try{actual=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}if(offset!==actual)throw error(409,'上传位置已变化，请重新检查进度');
@@ -75,13 +81,14 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
      }finally{busyUploads.delete(sha);}
     }
     if(kind==='objects'&&req.method==='GET'){
+     if(gcBusy.has(sha))throw error(409,'备份文件正在清理');
      const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(!known)throw error(404,'备份文件不存在');const range=req.headers.range;let start=0;if(range){const m=String(range).match(/^bytes=(\d+)-$/);if(!m||(start=Number(m[1]))>=known.size)throw error(416,'下载范围无效');}
-     res.writeHead(range?206:200,{'content-type':'application/octet-stream','content-length':known.size-start,'accept-ranges':'bytes','etag':sha,...(range?{'content-range':`bytes ${start}-${known.size-1}/${known.size}`}:{})});await pipeline(fs.createReadStream(file,{start}),res);return;
+     activeReads.set(sha,(activeReads.get(sha)||0)+1);try{res.writeHead(range?206:200,{'content-type':'application/octet-stream','content-length':known.size-start,'accept-ranges':'bytes','etag':sha,...(range?{'content-range':`bytes ${start}-${known.size-1}/${known.size}`}:{})});await pipeline(fs.createReadStream(file,{start}),res);}finally{const n=activeReads.get(sha)-1;if(n)activeReads.set(sha,n);else activeReads.delete(sha);}return;
     }
    }
    throw error(404,'接口不存在');
   }catch(e){if(res.headersSent){res.destroy();return;}send(req,res,e.status||500,{error:e.status?e.message:'备份服务暂时无法处理请求'});}
  };
  const server=tls?https.createServer(tls,handler):http.createServer(handler);server.requestTimeout=120000;server.headersTimeout=15000;
- return {server,db,status,migrationBackup,async listen(port=0,host='127.0.0.1'){if(!tls&&!['127.0.0.1','::1'].includes(host))throw new Error('非 HTTPS 只允许本机测试');await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});return server.address();},async close(){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));db.close();}};
+ return {server,db,status,migrationBackup,collectGarbage:actions.collect,async listen(port=0,host='127.0.0.1'){if(!tls&&!['127.0.0.1','::1'].includes(host))throw new Error('非 HTTPS 只允许本机测试');await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});return server.address();},async close(){clearInterval(garbageTimer);server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await actions.collect().catch(()=>{});db.close();}};
 }
