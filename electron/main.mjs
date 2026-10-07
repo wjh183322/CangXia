@@ -317,7 +317,7 @@ try {
     return {token,kind,count:selectedIds.length,invalid,backup:true};
   });
   handler('confirmDelete',async token=>{
-    ensureIdle();const intent=deleteIntents.get(token);if(!intent||intent.expires<Date.now())throw new Error('删除确认已过期，请重新选择');
+    ensureIdle();const intent=deleteIntents.get(token);if(!intent||!['local','records'].includes(intent.kind)||intent.expires<Date.now())throw new Error('删除确认类型无效或已过期，请重新选择');
     deleteIntents.delete(token);
     if(intent.kind==='records'){if(intent.authorScope)store.authorSources.hide(intent.authorScope,intent.ids);else store.deleteReadRecords(intent.ids);notify();return true;}
     const records=intent.ids.map(id=>store.download(id)).filter(Boolean);
