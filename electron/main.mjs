@@ -113,7 +113,7 @@ try {
   queue = new DownloadQueue(store, collector, (url, options) => collector.fetchMedia(url, options), notify);
   queue.hdCovers=new HDCover({store,helper:app.isPackaged?path.join(process.resourcesPath,'cover-helper','CangXiaCover.exe'):path.resolve('.test-output/cover-helper-dist/CangXiaCover/CangXiaCover.exe')});
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
-  queue.backupRestore=(job,signal)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d));
+  queue.backupRestore=(job,signal,options)=>backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d),options);
   queue.onIdle=()=>backup.afterDownloads();
   localRemoval=new LocalRemoval({store,trash:dir=>shell.trashItem(dir),before:async()=>{backup.cancel();if(backup.syncing)await backup.syncing.catch(()=>{});if(backup.checking)await backup.checking.catch(()=>{});},after:()=>{queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();notify();if(!removalExit)backup.deferSync();},notify});
   handler('cancelLocalRemoval',()=>localRemoval.cancel());
@@ -269,12 +269,12 @@ try {
   handler('stopSync', () => {if(defectRepair.running)defectRepair.stop();else collector.stop();});
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
-  handler('download', selected => { if (collector.busy || (collector.waiters.size&&!queue.running) || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected)); return true; });
+  handler('download', (selected,options={}) => {if(!options||typeof options!=='object'||(options.source!==undefined&&!['douyin','nas'].includes(options.source)))throw Error('下载来源无效');const source=options.source||'douyin'; if (collector.busy || (collector.waiters.size&&!queue.running) || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(source==='douyin'&&store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length&&!store.isDownloaded(id)))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected),{source}); return true; });
   handler('setDownloadConcurrency',value=>{queue.setConcurrency(value);return true;});
   handler('pause', () => queue.pause());
   handler('repairVideoCover',selected=>{if(collector.busy||flatQueue.running)throw Error('请等待当前读取或单独下载结束');backup.assertWritable();const requested=ids(selected),targets=requested.filter(id=>{const d=store.download(id);return store.work(id)?.type==='video'&&d?.assets?.some(a=>a.key==='video'&&store.assetExists(d,a));});if(!targets.length)throw Error('所选作品没有完整的本地视频，请先下载视频');return {queued:queue.enqueue(targets,{coverOnly:true}),skipped:requested.length-targets.length};});
   handler('cancelDownloads',selected=>queue.cancel(selected===null?null:ids(selected)));
-  handler('resume', () => { if (collector.busy || flatQueue.running) throw new Error('请等待同步完成或暂停单独下载');if(store.getSetting('loggedOut')&&queue.jobs.some(j=>j.state==='waiting'&&!store.get('backup_downloads',j.id)?.assets?.length))throw new Error('请登录原账号后再继续下载未备份的作品');queue.resume(); });
+  handler('resume', () => { if (collector.busy || flatQueue.running) throw new Error('请等待同步完成或暂停单独下载');if(store.getSetting('loggedOut')&&queue.jobs.some(j=>j.state==='waiting'&&j.source!=='nas'&&!j.coverOnly&&!store.get('backup_downloads',j.id)?.assets?.length&&!store.isDownloaded(j.id)))throw new Error('请登录原账号后再继续下载未备份的作品');queue.resume(); });
   handler('refreshFiles',async()=>{if(!collector.busy&&!queue.running)await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();await backup.changed();notify();return snapshot();});
   handler('chooseRoot', async value => {
     ensureIdle();

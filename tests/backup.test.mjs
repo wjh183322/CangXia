@@ -94,6 +94,11 @@ test('same device stale lease is identified and safely reacquired after expiry',
  clock+=91000;await b.check();assert.equal(b.status.writable,true);assert.ok(b.transport.leaseToken);assert.notEqual(b.transport.leaseToken,a.transport.leaseToken);
 });
 
+test('NAS fallback fills only failed media and keeps a successfully downloaded Douyin file',async t=>{
+ const f=await fixture(t),a=await f.client('PC-A',true);a.store.upsertWork({aweme_id:'123',desc:'source fixture',video:{play_addr:{url_list:['https://v3.douyinvod.com/new.mp4']},cover:{url_list:['https://p3.douyinpic.com/new.png']}}});const original=a.store.download('123');fs.writeFileSync(path.join(original.path,'cover.png'),previewPNG);original.assets.push({key:'cover',kind:'image',file:'cover.png',size:previewPNG.length});a.store.put('downloads','123',original);await a.sync();await a.release();const b=await f.client('PC-B'),remoteBefore=b.store.get('backup_downloads','123'),restored=[];const get=b.transport.download.bind(b.transport);b.transport.download=async(asset,...args)=>{restored.push(asset.key);return get(asset,...args);};
+ const q=new DownloadQueue(b.store,{resolveWork:async()=>b.store.work('123')},async url=>url.includes('douyinvod')?new Response('fresh-douyin-video',{headers:{'content-type':'video/mp4'}}):new Response('',{status:404}),()=>{});q.backupRestore=(j,s,options)=>b.restoreWork(j,s,(w,d)=>q.metadata(w,d),options);await q.saveWork({id:'123',source:'douyin'},new AbortController().signal);const d=b.store.download('123');assert.deepEqual(restored,['cover']);assert.equal(d.state,'complete');assert.equal(fs.readFileSync(path.join(d.path,d.assets.find(a=>a.key==='video').file),'utf8'),'fresh-douyin-video');assert.deepEqual(b.store.get('backup_downloads','123'),remoteBefore);
+});
+
 test('extra cover asset and frame provenance survive NAS sync without replacing original media',async t=>{
  const f=await fixture(t),a=await f.client('PC-A',true),d=a.store.download('123'),key='cover-hd-'+sha256(previewPNG).slice(0,16);
  fs.writeFileSync(path.join(d.path,'frame.png'),previewPNG);d.assets.push({key,kind:'image',file:'frame.png',size:previewPNG.length,width:1,height:1,source:'video_frame'});d.hdCover={status:'ready',source:'video_frame',key,width:1,height:1,match:{seconds:1}};a.store.put('downloads','123',d);await a.sync();

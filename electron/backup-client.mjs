@@ -1,3 +1,4 @@
+import {inspectWorkFiles} from './repair-check.mjs';
 import {preparePreviews,missingPreviews,validPreview} from './backup-previews.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import os from 'node:os';import {randomUUID,createHash} from 'node:crypto';
 import {BackupTransport,normalizeEndpoint,normalizeFingerprint} from './backup-transport.mjs';import {exportRecords,hashes,changesSince,applyChanges,recordId} from './backup-model.mjs';import {contentHash,PROTOCOL,validHome,commitBatches} from '../shared/backup-protocol.mjs';import {requireInside} from './model.mjs';
@@ -111,10 +112,32 @@ export class BackupClient{
   const stamp=[stat.size,stat.mtimeMs,stat.ctimeMs].join(':'),cached=this.meta.files?.[file];if(cached?.stamp===stamp)return cached.sha===asset.sha256;
   const hash=createHash('sha256');for await(const chunk of fs.createReadStream(file,{signal}))hash.update(chunk);const sha=hash.digest('hex');this.meta.files||={};this.meta.files[file]={stamp,sha};return sha===asset.sha256;
  }
- async restoreWork(job,signal,metadata){
-  const remote=this.store.get('backup_downloads',job.id);if(!remote?.assets?.length)return false;this.assertWritable();if(this.store.download(job.id))this.store.relocate(job.id);const target=this.store.destination(job.id),old=this.store.download(job.id);this.store.assertDirectory(target.dir);fs.mkdirSync(target.dir,{recursive:true});const assets=[];
-  for(const a of remote.assets){const existing=old?.assets?.find(v=>v.key===a.key);if(existing&&old.path===target.dir&&await this.verifiedFile(requireInside(old.path,path.join(old.path,existing.file)),a,signal)){assets.push({...existing,sha256:a.sha256});continue;}let name=a.file,file=requireInside(target.dir,path.join(target.dir,name));if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name='backup-'+a.sha256.slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name=randomUUID().slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));}}if(!(await this.verifiedFile(file,a,signal)))await this.transport.download(a,file,{signal,onProgress:(n,total)=>{job.phase='transferring';job.message=`从 NAS 下载 ${a.file} · ${(n/1048576).toFixed(1)} / ${(total/1048576).toFixed(1)} MB`;job.progress=Math.round(n/total*95);this.emit();}});assets.push({...a,file:name});}
-  signal.throwIfAborted();const d={...remote,path:target.dir,collectionId:target.collectionId,home:target.home,assets};let metadataName='作品信息.json';if(fs.existsSync(path.join(target.dir,metadataName))&&!old?.assets?.some(a=>a.key==='metadata'&&a.file===metadataName)){metadataName='backup-'+job.id+'-'+randomUUID().slice(0,8)+'-作品信息.json';}const info=requireInside(target.dir,path.join(target.dir,metadataName)),temporary=info+'.tmp';fs.writeFileSync(temporary,JSON.stringify(metadata(this.store.work(job.id),d),null,2));fs.renameSync(temporary,info);d.assets.push({key:'metadata',file:metadataName,kind:'metadata',size:fs.statSync(info).size});this.store.put('downloads',job.id,d);this.store.save();return d.state==='complete';
+ async restoreWork(job,signal,metadata,{missingOnly=false}={}){
+  const remote=this.store.get('backup_downloads',job.id);if(!remote?.assets?.length)return false;
+  this.assertWritable();if(this.store.download(job.id))this.store.relocate(job.id);
+  const target=this.store.destination(job.id),old=this.store.download(job.id);this.store.assertDirectory(target.dir);fs.mkdirSync(target.dir,{recursive:true});
+  const local=(old?.path===target.dir?old?.assets||[]:[]).filter(a=>this.store.assetExists(old,a));
+  const assets=missingOnly?[...local]:local.filter(a=>a.key==='metadata');
+  const d={...remote,...(missingOnly?old||{}:{}),id:job.id,path:target.dir,collectionId:target.collectionId,home:target.home,state:'partial',assets};
+  const remember=()=>{this.store.put('downloads',job.id,d);this.store.save();};
+  for(const a of remote.assets){
+   signal.throwIfAborted();if(a.kind==='metadata')continue;
+   // A Douyin fallback fills gaps only. Never replace a successful local transfer.
+   if(missingOnly&&assets.some(v=>v.key===a.key))continue;
+   const existing=local.find(v=>v.key===a.key);
+   if(existing&&await this.verifiedFile(requireInside(target.dir,path.join(target.dir,existing.file)),a,signal)){assets.push({...existing,...a,file:existing.file});remember();continue;}
+   let name=a.file,file=requireInside(target.dir,path.join(target.dir,name));
+   if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name='backup-'+a.sha256.slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name=randomUUID().slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));}}
+   if(!(await this.verifiedFile(file,a,signal)))await this.transport.download(a,file,{signal,onProgress:(n,total)=>{job.phase='transferring';job.activeSource='nas';job.message=`从 NAS 下载 ${a.file} · ${(n/1048576).toFixed(1)} / ${(total/1048576).toFixed(1)} MB`;job.progress=Math.round(n/total*95);this.emit();}});
+   assets.push({...a,file:name});remember();
+  }
+  signal.throwIfAborted();
+  const ownedMetadata=local.find(a=>a.key==='metadata');let metadataName=ownedMetadata?.file||'作品信息.json';
+  if(!ownedMetadata&&fs.existsSync(path.join(target.dir,metadataName)))metadataName='backup-'+job.id+'-'+randomUUID().slice(0,8)+'-作品信息.json';
+  const info=requireInside(target.dir,path.join(target.dir,metadataName)),temporary=info+'.tmp';fs.writeFileSync(temporary,JSON.stringify(metadata(this.store.work(job.id),d),null,2));fs.renameSync(temporary,info);
+  d.assets=[...assets.filter(a=>a.key!=='metadata'),{key:'metadata',file:metadataName,kind:'metadata',size:fs.statSync(info).size}];d.state=remote.state;remember();
+  if(missingOnly){const check=inspectWorkFiles(this.store,job.id);d.state=check.status==='complete'?'complete':'partial';if(d.state==='complete')d.lastError='';d.coverSource=d.assets.find(a=>a.key==='cover')?.source||d.coverSource;remember();}
+  return d.state==='complete';
  }
  async acceptRemote(){if(this.status.phase!=='conflict')throw new Error('当前没有待处理冲突');await this.renew();const update=await this.fetchChanges(0);if(update.libraryId!==this.meta.libraryId)throw new Error('备份库标识不一致');const recovery=path.join(this.profile,'recovery');fs.mkdirSync(recovery,{recursive:true});const file=path.join(recovery,Date.now()+'.sqlite');fs.writeFileSync(file,this.store.db.export());
   this.applying=true;try{applyChanges(this.store,update.changes,{replace:true});}finally{this.applying=false;}this.meta={libraryId:update.libraryId,baseRevision:update.revision,baseline:hashes(update.changes.filter(e=>e.body!==null)),files:{},dirty:false,mediaSignature:this.mediaSignature()};this.persist();this.status={...this.status,recovery:file,connected:true,writable:true,phase:'synced',message:'已保留本机恢复副本，并更新为 NAS 的记录',lastSync:update.lastSync,pending:false};this.installTimers();this.emit();return this.status;
