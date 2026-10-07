@@ -11,7 +11,7 @@ function refresh(source){
  const store={rows:(sql,args=[])=>db.prepare(sql).all(...args),all:table=>db.prepare('SELECT body FROM '+table).all().map(r=>JSON.parse(r.body)),getSetting:key=>{const r=db.prepare('SELECT value FROM settings WHERE key=?').get(key);return r?JSON.parse(r.value):null;}};
  db.exec('BEGIN');try{
   entries=exportRecords(store);digests={};for(const entry of entries)digests[recordId(entry)]=contentHash(entry.body);
-  const backed=new Set(entries.filter(e=>e.table==='downloads'&&(e.body.assets?.some(validPreview)||e.body.backupDeleted)).map(e=>e.key));
+  const backed=new Set(entries.filter(e=>e.table==='downloads'&&(e.body.assets?.some(validPreview)||e.body.backupDeleted||e.body.backupRemoved)).map(e=>e.key));
   covers=entries.filter(e=>e.table==='works'&&!e.body.readHidden&&e.body.thumbnail&&!validPreview(e.body.backupCover)&&!backed.has(e.key));
   localWorks=new Set(store.all('downloads').map(d=>d.id));db.exec('COMMIT');version=next;
  }catch(error){db.exec('ROLLBACK');version=-1;throw error;}

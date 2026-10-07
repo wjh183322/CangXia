@@ -1,6 +1,6 @@
 services:
   cangxia-backup:
-    image: cangxia-backup-server:0.2.1
+    image: cangxia-backup-server:0.2.2
     container_name: cangxia-backup-server
     restart: unless-stopped
     ports:

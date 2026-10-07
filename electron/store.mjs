@@ -295,7 +295,7 @@ export class Store {
       if(this.viewCache.has(id))return this.viewCache.get(id);
       const w=this.work(id);
       const d = downloads.get(w.id);
-      const view={ ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:backups.has(w.id)&&!backups.get(w.id).backupDeleted,backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      const view={ ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:!!backups.get(w.id)?.assets?.length&&!backups.get(w.id).backupDeleted,backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
       this.viewCache.set(id,view);return view;
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);

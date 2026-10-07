@@ -64,7 +64,7 @@ export class BackupClient{
   if(this.checking)return this.checking;if(!this.canSync())throw new Error('请等待读取和下载结束后再比对 NAS');if(this.syncing)throw new Error('正在同步，请等待完成');if(!this.transport)this.transport=this.makeTransport();if(!this.transport)throw new Error('请先填写备份服务连接信息');
   this.checking=(async()=>{this.status={...this.status,phase:'checking',writable:false,message:'正在与 NAS 比对同步状态…'};this.emit();try{
    const remote=await this.transport.json('GET','/v1/status');if(remote.protocol!==PROTOCOL)throw Object.assign(new Error('请先升级 NAS 备份服务至 0.2.0（协议 2），现有数据和连接配置可保留'),{code:'PROTOCOL_MISMATCH'});if(this.meta.libraryId&&this.meta.libraryId!==remote.libraryId)throw new Error('这是另一份 NAS 备份库，未覆盖本机资料');
-   this.status.backupDeletion=!!remote.capabilities?.backupDeletion;
+   this.status.backupDeletion=!!remote.capabilities?.backupDeletion;this.status.automaticRebackup=!!remote.capabilities?.automaticRebackup;
    if(this.meta.pendingBackupAction){try{const receipt=await this.transport.json('GET','/v1/backup-actions/'+this.meta.pendingBackupAction.data.requestId);await this.acceptBackupAction(receipt);}catch(e){if(e.status!==404)throw e;delete this.meta.pendingBackupAction;this.persist();}}
    if(this.meta.pendingCommit){try{const ack=await this.transport.json('GET','/v1/commits/'+this.meta.pendingCommit.request.requestId);if(ack.requestHash!==await this.analyzer.content(this.commitContent(this.meta.pendingCommit.request)))throw new Error('提交确认与本机待确认内容不同');await this.acceptCommit(this.meta.pendingCommit,ack.revision);}catch(e){if(e.status!==404)throw e;}}
    const existing=await this.analysis();const localChanged=this.meta.baseRevision===null?this.store.rows('SELECT 1 FROM works LIMIT 1').length>0:existing.changes.length>0||this.meta.dirty||this.mediaDirty();
@@ -91,7 +91,7 @@ export class BackupClient{
  }
  commitContent(request){return {libraryId:request.libraryId,baseRevision:request.baseRevision,changes:request.changes};}
  async backupAction(action,ids){
-  this.assertWritable();const head=await this.renew();if(!head.capabilities?.backupDeletion)throw Error('请先将 NAS 备份服务更新至 0.2.1，保留原 data 目录');
+  this.assertWritable();const head=await this.renew();if(!head.capabilities?.automaticRebackup)throw Error('请先将 NAS 备份服务更新至 0.2.2，保留原 data 目录');
   if(this.meta.pendingCommit){const pending=this.meta.pendingCommit,result=await this.transport.json('POST','/v1/commit',{data:pending.request});await this.acceptCommit(pending,result.ackRevision??result.revision);}
   if(this.meta.pendingBackupAction){const pending=this.meta.pendingBackupAction;try{await this.acceptBackupAction(await this.transport.json('GET','/v1/backup-actions/'+pending.data.requestId));}catch(e){if(e.status!==404)throw e;await this.acceptBackupAction(await this.transport.json('POST',pending.route,{data:pending.data}));}}
   const latest=await this.renew();if(latest.revision!==this.meta.baseRevision)throw Error('NAS 已有其他更新，请重新检查后再删除');
