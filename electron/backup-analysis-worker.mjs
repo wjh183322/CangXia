@@ -3,6 +3,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {exportRecords,recordId} from './backup-model.mjs';
 import {contentHash} from '../shared/backup-protocol.mjs';
 import {validPreview} from './backup-previews.mjs';
+import {sendAnalysisResult} from './backup-analysis-transfer.mjs';
 
 let db,file,version=-1,entries=[],digests={},covers=[],localWorks=new Set();
 function refresh(source){
@@ -16,7 +17,8 @@ function refresh(source){
   localWorks=new Set(store.all('downloads').map(d=>d.id));db.exec('COMMIT');version=next;
  }catch(error){db.exec('ROLLBACK');version=-1;throw error;}
 }
-parentPort.on('message',message=>{
+parentPort.on('message',async message=>{
+ if(message.ack!==undefined)return;
  try{
   let result;
   if(message.command==='content')result={hash:contentHash(message.value)};
@@ -25,10 +27,14 @@ parentPort.on('message',message=>{
   }else{
    refresh(message.file);const changes=entries.filter(e=>message.baseline[recordId(e)]!==digests[recordId(e)]),deletions=[];
    for(const key of Object.keys(message.baseline))if(!(key in digests)){const colon=key.indexOf(':');deletions.push({table:key.slice(0,colon),key:key.slice(colon+1),body:null});}
+   const pendingRecords=changes.filter(e=>e.table!=='downloads').length+deletions.filter(e=>e.table!=='downloads').length;
+   if(message.summary)result={changeCount:changes.length+deletions.length,pendingCovers:covers.length,pendingRecords};
+   else{
    const prepared=new Map(changes.map(e=>[recordId(e),e]));for(const entry of covers)prepared.set(recordId(entry),entry);
    for(const entry of entries)if(entry.table==='downloads'||(entry.table==='works'&&localWorks.has(entry.key)))prepared.set(recordId(entry),entry);
-   result={changes:[...changes,...deletions],deletions,entries:[...prepared.values()],pendingCovers:covers.length,pendingRecords:changes.filter(e=>e.table!=='downloads').length+deletions.filter(e=>e.table!=='downloads').length};
+   result={...(message.prepare?{}:{changes:[...changes,...deletions]}),deletions,entries:[...prepared.values()],pendingCovers:covers.length,pendingRecords};
+   }
   }
-  const payload=new TextEncoder().encode(JSON.stringify(result));parentPort.postMessage({id:message.id,payload},[payload.buffer]);
- }catch(error){parentPort.postMessage({id:message.id,error:error.message,code:error.code});}
+  await sendAnalysisResult(parentPort,message.id,result);
+ }catch(error){parentPort.postMessage({id:message.id,error:error.message,code:error.code,stack:error.stack});}
 });

@@ -1,6 +1,23 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {Store} from '../electron/store.mjs';import {BackupAnalysis} from '../electron/backup-analysis.mjs';import {exportRecords,hashes,changesSince} from '../electron/backup-model.mjs';
 import {BackupClient} from '../electron/backup-client.mjs';
+import {MessageChannel} from 'node:worker_threads';
+import {sendAnalysisResult,receiveAnalysisPart} from '../electron/backup-analysis-transfer.mjs';
+
+test('analysis transfer chunks arrays and hash maps with consumption backpressure',async()=>{
+ const {port1,port2}=new MessageChannel(),result={entries:Array.from({length:80},(_,i)=>({id:String(i),text:'中文'.repeat(70)})),hashes:Object.fromEntries(Array.from({length:80},(_,i)=>[String(i),'x'.repeat(64)])),deletions:[],pendingCovers:0},received={};
+ let count=0,releaseFirst,firstResolve,doneResolve;const first=new Promise(r=>firstResolve=r),done=new Promise(r=>doneResolve=r);
+ port2.on('message',message=>{if(message.done){doneResolve();return;}count++;assert.ok(message.payload.byteLength<1024);receiveAnalysisPart(received,message.payload);const acknowledge=()=>port2.postMessage({ack:message.id,sequence:message.sequence});if(count===1){releaseFirst=acknowledge;firstResolve();}else acknowledge();});
+ try{const sending=sendAnalysisResult(port1,1,result,{maxBytes:512});await first;await new Promise(r=>setImmediate(r));assert.equal(count,1,'sender must wait for acknowledgements');releaseFirst();await sending;await done;assert.ok(count>40);assert.deepEqual(received,result);}finally{port1.close();port2.close();}
+});
+
+test('state checks use summary inspection and preparation does not duplicate changed works',async t=>{
+ const {store,analysis}=await fixture(t);store.upsertWork(raw('1'));store.upsertWork(raw('2'));store.ingestMembers('__all__',['1','2'],true);
+ const full=await analysis.inspect({}),summary=await analysis.inspect({},{summary:true});assert.equal(summary.changeCount,full.changes.length);assert.equal(summary.pendingRecords,full.pendingRecords);assert.equal(summary.pendingCovers,full.pendingCovers);assert.ok(!('entries' in summary));assert.ok(!('changes' in summary));
+ const prepared=await analysis.inspect({},{prepare:true});assert.deepEqual(prepared.entries,full.entries);assert.deepEqual(prepared.deletions,full.deletions);assert.ok(!('changes' in prepared));
+ const baseline=hashes(exportRecords(store));store.db.run('DELETE FROM works WHERE id=?',['1']);const removed=await analysis.inspect(baseline,{summary:true}),expected=await analysis.inspect(baseline);assert.equal(removed.changeCount,expected.changes.length);assert.equal(removed.pendingRecords,expected.pendingRecords);
+ const client=Object.create(BackupClient.prototype);client.store=store;client.meta={baseRevision:1,baseline};client.analyzer=analysis;const lightweight=await client.analysis();assert.ok(!('entries' in lightweight));const preparation=await client.analysis(true);assert.ok(Array.isArray(preparation.entries));assert.ok(!('changes' in preparation));
+});
 test('coalesced inspection restarts when records or the accepted baseline change',async()=>{let release,calls=0;const client=Object.create(BackupClient.prototype);client.store={revision:1};client.meta={baseRevision:1,baseline:{}};client.analyzer={inspect:async()=>{calls++;if(calls===1)return new Promise(r=>release=r);return {pendingCovers:0,entries:[]};}};const first=client.analysis(),second=client.analysis();client.store.revision=2;client.meta.baseRevision=2;release({pendingCovers:1,entries:[]});const results=await Promise.all([first,second]);assert.equal(calls,2);assert.ok(results.every(r=>r.pendingCovers===0&&r.analyzedRevision===2&&r.analyzedBase===2));});
 async function fixture(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-analysis-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media')),analysis=new BackupAnalysis(store.file);t.after(async()=>{await analysis.close();store.close();assert.equal(path.dirname(dir),os.tmpdir());fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});});return {store,analysis};}
 const raw=id=>({aweme_id:String(id),desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:['https://v3.douyinvod.com/'+id+'.mp4']}}});
