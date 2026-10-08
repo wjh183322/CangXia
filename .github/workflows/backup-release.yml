@@ -40,6 +40,8 @@ jobs:
         run: |
           npm run test:backup-desktop
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run test:backup-preview
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/check-backup-package.mjs

@@ -3,6 +3,8 @@ import syncFs from 'node:fs';
 import {randomUUID} from 'node:crypto';
 import path from 'node:path';
 import {bestCover} from './hd-cover.mjs';
+import {readCachedPreview,fetchPreviewImage} from './backup-previews.mjs';
+import {isMediaURL} from './model.mjs';
 
 // Cover reads are allowed on a read-only client and never create download records.
 export class BackupCovers {
@@ -15,11 +17,28 @@ export class BackupCovers {
     if(this.active<3)this.active++;else await new Promise(resolve=>this.waiters.push(resolve));
     try{return await action();}finally{const next=this.waiters.shift();if(next)next();else this.active--;}
   }
-  async get(id){
+  async fromDouyin(id){
+    const file=path.join(this.client.profile,'covers',id+'.jpg');
+    if(await readCachedPreview(file,this.controller.signal))return file;
+    const work=this.client.store.work(id),url=[work?.thumbnail,...(work?.coverUrls||[]),...(work?.images?.[0]?.urls||[])].find(isMediaURL);
+    if(!url||!this.client.fetchCover)return null;
+    const key='douyin:'+id;
+    if(!this.pending.has(key))this.pending.set(key,this.slot(async()=>{
+      this.controller.signal.throwIfAborted();
+      const signal=AbortSignal.any([this.controller.signal,AbortSignal.timeout(2500)]);
+      const result=await fetchPreviewImage(this.client.fetchCover,url,signal);signal.throwIfAborted();
+      await fs.mkdir(path.dirname(file),{recursive:true});const temporary=file+'.'+randomUUID()+'.tmp';
+      try{await fs.writeFile(temporary,result.bytes,{flag:'wx'});this.controller.signal.throwIfAborted();await fs.rename(temporary,file);}finally{await fs.rm(temporary,{force:true});}
+      return file;
+    }).finally(()=>this.pending.delete(key)));
+    return this.pending.get(key);
+  }
+  async get(id,{preferDouyin=false}={}){
+    id=String(id);if(!/^\d+$/.test(id))throw Error('封面作品标识无效');
     const assets=this.client.store.get('backup_downloads',id)?.assets||[];
     const candidates=[bestCover(this.client.store.get('backup_downloads',id)),this.client.store.work(id)?.backupCover,assets.find(a=>a.key==='cover'),assets.find(a=>a.key==='image-0'),...assets.filter(a=>a.kind==='image')];
     const asset=candidates.find(a=>a?.kind==='image'&&/^[a-f0-9]{64}$/.test(a.sha256)&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=20*1024*1024);
-    if(!asset)return null;
+    if(!asset){if(preferDouyin){try{const file=await this.fromDouyin(id);if(file)this.clearProblem(id);return file;}catch(error){if(!this.controller.signal.aborted)this.reportProblem(id,'抖音封面暂不可用：'+(error.code||error.message),'source');throw error;}}return null;}
     const extension=path.extname(asset.file||'').toLowerCase();
     const suffix=['.jpg','.jpeg','.png','.webp','.gif','.avif'].includes(extension)?extension:'.img';
     const directory=path.join(this.client.profile,'covers','backup');
@@ -28,6 +47,9 @@ export class BackupCovers {
     const localFiles=[path.join(this.client.profile,'covers','previews',asset.sha256+suffix),file];
     if(/^\d+$/.test(String(id)))localFiles.push(path.join(this.client.profile,'covers',id+'.jpg'));
     for(const local of localFiles)if(await this.client.verifiedFile(local,asset,this.controller.signal)){this.clearProblem(id);return local;}
+    // Display may use a newer platform preview. Strict NAS repair/restore callers
+    // retain the default, which must return bytes matching the NAS object hash.
+    if(preferDouyin){try{const online=await this.fromDouyin(id);if(online){this.clearProblem(id);return online;}}catch{}this.controller.signal.throwIfAborted();}
     if(!this.client.status.connected||!this.client.transport){this.reportProblem(id,'NAS 未连接，本机暂无可用封面缓存');return null;}
     if(!this.pending.has(file))this.pending.set(file,this.slot(async()=>{
       this.controller.signal.throwIfAborted();

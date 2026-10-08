@@ -182,7 +182,6 @@ try {
   qrProfile.setPermissionCheckHandler((_wc,permission,origin)=>permission==='storage-access'&&isDouyinURL(origin||''));
   qrLogin=new QrLogin({profile:qrProfile,chromiumVersion:process.versions.chrome,onChange:notify,onAuthenticated:(auth,options)=>collector.applyAuth(auth,true,options),onLimit:()=>collector.holdAccess(),createWindow:()=>new VerificationView({parent:()=>window,partition:'persist:cangxia-popup-login',onVisibility:(inline,pageId,panelFound=false)=>qrLogin.update({inline,pageId,panelFound,pageRevision:(qrLogin.state().pageRevision||0)+1})})});
   const cacheRoot = path.join(profile, 'covers'); fs.mkdirSync(cacheRoot, { recursive: true });
-  const cachePending = new Map();
   protocol.handle('app-media', async request => {
     try {
       const u = new URL(request.url); const parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -199,22 +198,9 @@ try {
       } else if (u.hostname === 'cover') {
         const d = store.download(id), cover = bestCover(d)||d?.assets.find(a => a.key === 'image-0');
         if (cover && store.assetExists(d, cover)) file = requireInside(d.path, path.join(d.path, cover.file));
-        else if(store.work(id)?.backupCover||store.get('backup_downloads',id)?.assets?.some(a=>a.kind==='image')) {
-          file=await backup.covers.get(id);
+        else {
+          file=await backup.covers.get(id,{preferDouyin:true});
           if(!file)return new Response('',{status:404,headers:{'cache-control':'no-store'}});
-        } else {
-          file = requireInside(cacheRoot, path.join(cacheRoot, id + '.jpg'));
-          if (!fs.existsSync(file)) {
-            if(!backup.status.writable)return new Response('',{status:404});
-            if (!cachePending.has(id)) cachePending.set(id, (async () => {
-              const w = store.work(id); if (!w?.thumbnail) throw new Error('无封面');
-              const r = await collector.fetchMedia(w.thumbnail, { signal: AbortSignal.timeout(12000) });
-              if (!r.ok || !r.headers.get('content-type')?.startsWith('image/')) throw new Error('封面不可用');
-              const bytes = Buffer.from(await r.arrayBuffer()); if (bytes.length > 20000000) throw new Error('封面过大');
-              fs.writeFileSync(file, bytes);
-            })().finally(() => cachePending.delete(id)));
-            await cachePending.get(id);
-          }
         }
       } else return new Response('', { status: 404 });
       return await net.fetch(pathToFileURL(file).href, { headers: request.headers });

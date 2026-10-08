@@ -17,6 +17,23 @@ test('read-only work previews survive a completely fresh PC without login and ne
 });
 test('legacy local cover cache is included in backup without contacting Douyin',async t=>{const f=await fixture(t),a=await f.client('PC-A');readOnlyWork(a.store);fs.mkdirSync(path.join(a.profile,'covers'));fs.writeFileSync(path.join(a.profile,'covers','456.jpg'),previewPNG);a.fetchCover=async()=>{throw Error('must use cached preview');};await a.sync();const b=await f.client('PC-B');assert.deepEqual(fs.readFileSync(await b.covers.get('456')),previewPNG);});
 
+test('browsing prefers Douyin on a cache miss without changing NAS records; strict repair still returns NAS bytes',async t=>{
+ const f=await fixture(t),a=await f.client('PC-A');readOnlyWork(a.store);a.fetchCover=async()=>new Response(previewPNG,{headers:{'content-type':'image/png'}});await a.sync();await a.release();const b=await f.client('PC-B');const before=JSON.stringify(b.store.work('456')),online=Buffer.concat([previewPNG,Buffer.from('new platform preview')]);let platformCalls=0,nasCalls=0;const download=b.transport.download.bind(b.transport);b.transport.download=async(...args)=>{nasCalls++;return download(...args);};b.fetchCover=async()=>{platformCalls++;return new Response(online,{headers:{'content-type':'image/png'}});};
+ const [first,second]=await Promise.all([b.covers.get('456',{preferDouyin:true}),b.covers.get('456',{preferDouyin:true})]);assert.equal(first,second);assert.equal(platformCalls,1);assert.equal(nasCalls,0);assert.deepEqual(fs.readFileSync(first),online);assert.equal(JSON.stringify(b.store.work('456')),before);assert.equal(b.store.all('downloads').length,0);await b.covers.get('456',{preferDouyin:true});assert.equal(platformCalls,1);
+ assert.deepEqual(fs.readFileSync(await b.covers.get('456')),previewPNG);assert.equal(nasCalls,1);assert.equal(platformCalls,1);
+});
+test('expired Douyin cover falls back to NAS without invalidating login or blocking local browsing',async t=>{
+ const f=await fixture(t),a=await f.client('PC-A');readOnlyWork(a.store);a.fetchCover=async()=>new Response(previewPNG,{headers:{'content-type':'image/png'}});await a.sync();await a.release();const b=await f.client('PC-B');let tried=0;b.fetchCover=async()=>{tried++;return new Response('',{status:403});};const file=await b.covers.get('456',{preferDouyin:true});assert.deepEqual(fs.readFileSync(file),previewPNG);assert.equal(tried,1);assert.equal(b.status.writable,true);assert.equal(b.covers.problems.size,0);
+ b.fetchCover=async()=>{throw Error('cached NAS cover must be used before any network request');};assert.equal(await b.covers.get('456',{preferDouyin:true}),file);
+});
+test('slow Douyin cover is bounded before NAS fallback',async t=>{
+ const f=await fixture(t),a=await f.client('PC-A');readOnlyWork(a.store);a.fetchCover=async()=>new Response(previewPNG,{headers:{'content-type':'image/png'}});await a.sync();await a.release();const b=await f.client('PC-B');let aborted=false;b.fetchCover=async(_url,{signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(signal.reason);},{once:true}));const start=Date.now();const file=await b.covers.get('456',{preferDouyin:true});assert.equal(aborted,true);assert.ok(Date.now()-start<5000);assert.deepEqual(fs.readFileSync(file),previewPNG);
+});
+test('platform-only browsing uses bounded concurrency and works without a NAS asset record',async t=>{
+ const f=await fixture(t),a=await f.client('PC-A');for(let i=0;i<7;i++)readOnlyWork(a.store,String(500+i));a.status.writable=false;a.status.connected=false;let active=0,peak=0,requests=0;a.fetchCover=async()=>{requests++;active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,20));active--;return new Response(previewPNG,{headers:{'content-type':'image/png'}});};
+ const files=await Promise.all(Array.from({length:7},(_,i)=>a.covers.get(String(500+i),{preferDouyin:true})));assert.equal(requests,7);assert.equal(peak,3);assert.ok(files.every(file=>fs.readFileSync(file).equals(previewPNG)));assert.equal(a.store.all('downloads').length,0);assert.equal(a.store.all('backup_downloads').length,0);
+});
+
 test('prepared local previews display offline without a redundant NAS transfer or download record',async t=>{
  const f=await fixture(t),a=await f.client('PC-A');readOnlyWork(a.store);a.fetchCover=async()=>new Response(previewPNG,{headers:{'content-type':'image/png'}});await a.sync();a.unavailable('offline fixture');
  a.transport.download=async()=>{throw Error('must use prepared local preview');};const file=await a.covers.get('456');assert.ok(file.includes(path.join('covers','previews')));assert.deepEqual(fs.readFileSync(file),previewPNG);assert.equal(a.store.all('downloads').length,0);assert.equal(a.status.connected,false);
