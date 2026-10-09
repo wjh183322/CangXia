@@ -19,7 +19,7 @@ export function nasLibrary(data){
  const authors=[...authorIds].map(([id,ids])=>{const a=authorInfo.get(id),work=byId.get(ids.values().next().value);return {id,name:a?.name||work?.author?.nickname||'已移除作者',uniqueId:a?.uniqueId||'',removed:!a||!!a.archived,count:ids.size,ids:[...ids]};}).sort((a,b)=>Number(a.removed)-Number(b.removed)||a.name.localeCompare(b.name,'zh-CN')||a.id.localeCompare(b.id));
  const ordered=[],seen=new Set();for(const id of [...(data.localMembers||data.members||{})[TOTAL]||[],...all.map(w=>w.id)])if(byId.has(id)&&!seen.has(id)){ordered.push(byId.get(id));seen.add(id);}
  const objects=new Map();for(const w of all)for(const asset of [...w.backupRecord.assets,w.backupCover].filter(Boolean))if(asset.sha256&&!objects.has(asset.sha256))objects.set(asset.sha256,asset.size||0);
- return {all:ordered,byId,collections,authors,collectionAll,authorAll,counts:{all:all.length,collection:collectionAll.size,author:authorAll.size},bytes:[...objects.values()].reduce((n,size)=>n+size,0)};
+ return {all:ordered,byId,collections,authors,collectionAll,authorAll,counts:{all:all.length,collection:collectionAll.size,author:authorAll.size},bytes:data.nasOverview?.bytes??[...objects.values()].reduce((n,size)=>n+size,0)};
 }
 export function nasWorks(library,tab,{collection='',author=''}={}){
  let ids;if(tab==='author')ids=author?new Set(library.authors.find(a=>a.id===author)?.ids||[]):library.authorAll;

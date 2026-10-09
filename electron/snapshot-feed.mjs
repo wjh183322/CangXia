@@ -1,10 +1,10 @@
 import {arrayPatch,membershipFields} from './state-patch.mjs';
 const compact=w=>({...w,thumbnail:undefined});
 export class SnapshotFeed {
-  constructor(store){this.store=store;this.previous=null;this.revision=-1;}
+  constructor(store,{light=false}={}){this.store=store;this.light=light;this.previous=null;this.revision=-1;}
   frame(runtime,{full=false}={}){
     if(!full&&this.previous&&this.revision===this.store.revision)return {delta:true,...runtime};
-    const state=this.store.snapshot({cache:true}),revision=this.store.revision;
+    const state=this.light?this.store.lightViews.snapshot():this.store.snapshot({cache:true}),revision=this.store.revision;
     if(full||!this.previous){if(!this.previous){this.previous=state;this.revision=revision;}return {...state,works:state.works.map(compact),libraryRevision:revision,...runtime};}
     const baseRevision=this.revision;this.revision=revision;const prior=this.previous;this.previous=state;const oldWorks=new Map(prior.works.map(w=>[w.id,w])),changedWorks=[],removedWorks=[];
     for(const w of state.works){if(oldWorks.get(w.id)!==w)changedWorks.push(compact(w));oldWorks.delete(w.id);}for(const id of oldWorks.keys())removedWorks.push(id);

@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const methods = ['flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','checkQrLogin','setQrPageBounds','showQrExternalPage','finishLogin','logout','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','cancelDownloads','repairVideoCover','setDownloadConcurrency','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','prepareNASRemoval','confirmNASRemoval','cancelNASRemoval','resumeNASRemoval','cancelLocalRemoval','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted','confirmLegacyAccount','openDiagnostics'];
 const api = {};
 methods.push('stopWorkCreators','refreshWorkCreators','configureBackup','checkBackup','syncBackup','cancelBackup','acceptRemoteBackup','openBackupRecovery','previewExistingLibrary','importExistingLibrary','finishBackupExit');
-methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage');
+methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck');
 methods.push('addAuthor','readAuthor','archiveAuthor');
 methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
 methods.push('reportCoverStatus');

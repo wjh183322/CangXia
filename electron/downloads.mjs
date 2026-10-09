@@ -90,6 +90,7 @@ export class DownloadQueue {
           const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
           task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(()=>{
             if(task.cancelled)return;
+            this.store.fileStates?.confirmWritten(job.id);
             job.state='complete';job.progress=100;job.message='文件已保存';
           },e=>{
             if(task.cancelled)return;

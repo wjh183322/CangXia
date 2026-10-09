@@ -1,0 +1,29 @@
+import {setImmediate as yieldLoop} from 'node:timers/promises';
+const person=p=>p&&Object.fromEntries(['uid','secUid','uniqueId','nickname','roleTitle'].filter(k=>p[k]!==undefined).map(k=>[k,p[k]]));
+const base=w=>({...Object.fromEntries(['id','name','title','caption','description','type','tags','readHidden','remoteState','checkedAt','publishedAt','duration','width','height','backupCover','coAuthorsState','creatorInfoVersion'].filter(k=>w[k]!==undefined).map(k=>[k,w[k]])),author:person(w.author),coAuthors:(w.coAuthors||[]).map(person),images:[],imageCount:w.images?.length||0,light:true});
+const local=d=>({id:d.id,state:d.state,collectionId:d.collectionId,coverSource:d.coverSource,coverWarning:d.coverWarning,hdCover:d.hdCover,bytes:(d.assets||[]).reduce((n,a)=>n+(a.size||0),0),hasMedia:d.assets?.some(a=>a.kind!=='metadata'),hasVideo:d.assets?.some(a=>a.key==='video')});
+const backed=d=>({id:d.id,state:d.state,collectionId:d.collectionId,home:d.home,backupDeleted:d.backupDeleted,backupRemoved:d.backupRemoved,hdCover:d.hdCover,assets:(d.assets||[]).map(a=>({sha256:a.sha256,size:a.size,kind:a.kind}))});
+export class WorkViews{
+ constructor(store){this.store=store;this.bases=new Map();this.locals=new Map();this.backups=new Map();this.tags=new Map();this.cache=new Map();this.changed=new Set();}
+ invalidate(table,id,body){this.cache.delete(id);if(!this.ready){this.changed.add(id);return;}if(table==='works'){if(JSON.stringify(this.bases.get(id)?.backupCover)!==JSON.stringify(body.backupCover))this.overview=null;this.bases.set(id,base(body));}if(table==='downloads')this.locals.set(id,local(body));if(table==='backup_downloads'){this.backups.set(id,backed(body));this.overview=null;}if(table==='local_tags')this.tags.set(id,body.tags||[]);}
+ async prepare(){
+  if(this.ready)return;if(this.loading)return this.loading;
+  this.loading=(async()=>{for(const [table,target,convert]of [['works',this.bases,base],['downloads',this.locals,local],['backup_downloads',this.backups,backed],['local_tags',this.tags,v=>v.tags||[]]]){let n=0;for(const row of this.store.db.iterate('SELECT id,body FROM '+table)){target.set(row.id,convert(JSON.parse(row.body)));if(++n%250===0)await yieldLoop();}}
+   this.ready=true;for(const id of this.changed)for(const table of ['works','downloads','backup_downloads','local_tags']){const row=this.store.get(table,id);if(row)this.invalidate(table,id,row);}this.changed.clear();
+  })().finally(()=>this.loading=null);return this.loading;
+ }
+ reset(){this.cache.clear();if(!this.ready)return;for(const [table,map]of [['works',this.bases],['downloads',this.locals],['backup_downloads',this.backups],['local_tags',this.tags]]){const ids=new Set(this.store.rows('SELECT id FROM '+table).map(r=>r.id));for(const id of map.keys())if(!ids.has(id))map.delete(id);}this.overview=null;}
+ view(id){
+  if(this.cache.has(id))return this.cache.get(id);const w=this.bases.get(id);if(!w)return null;const d=this.locals.get(id),b=this.backups.get(id),files=this.store.fileStates.get(id),media=!!d?.hasMedia,unknown=!files||files.status==='unknown';
+  const record=d?{id,state:d.state,collectionId:d.collectionId,coverSource:d.coverSource,coverWarning:d.coverWarning,hdCover:d.hdCover,assets:d.hasVideo?[{key:'video',kind:'video',exists:unknown||files?.assets.video?.exists||false}]:[]}:null;
+  const backup=b?{...b,assets:b.assets.length?[{key:'media',kind:'media'}]:[]}:null;
+  const result={...w,localTags:this.tags.get(id)||[],downloaded:!!files&&files.status==='complete',local:media&&(unknown||files.local),localBytes:files?.bytes??d?.bytes??0,localStatus:media?(!files?'checking':files.status):'none',backedUp:!!b?.assets.length&&!b.backupDeleted,localRecord:record,backupRecord:backup};this.cache.set(id,result);return result;
+ }
+ nasOverview(works){if(this.overview)return this.overview;const objects=new Map();for(const w of works)if(w.backedUp)for(const a of [...this.backups.get(w.id).assets,w.backupCover].filter(Boolean))if(a.sha256&&!objects.has(a.sha256))objects.set(a.sha256,a.size||0);return this.overview={bytes:[...objects.values()].reduce((a,b)=>a+b,0)};}
+ snapshot(){
+  if(!this.ready)throw Error('轻量资料索引尚未准备完成');const s=this.store,works=[...this.bases.keys()].map(id=>this.view(id)),collections=s.all('collections').sort((a,b)=>a.rank-b.rank),members={},pendingMembers={},localMembers={},localPendingMembers={},hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
+  for(const c of collections){const rows=s.orderedMemberRows(c.id),ordered=s.collectionReads.managed(c.id)?s.collectionReads.order(c.id,rows):s.sync.order(c.id,rows);localMembers[c.id]=ordered.map(r=>r.work_id);localPendingMembers[c.id]=ordered.filter(r=>r.rank===null).map(r=>r.work_id);members[c.id]=localMembers[c.id].filter(id=>!hidden.has(id));pendingMembers[c.id]=localPendingMembers[c.id].filter(id=>!hidden.has(id));}
+  return {works,creatorProfiles:s.creatorProfiles(),collections,members,pendingMembers,localMembers,localPendingMembers,...s.authorSources.snapshot(this.backups),collectionReadInfo:s.collectionReads.snapshot(),nasOverview:this.nasOverview(works),readLimit:s.getSetting('readLimit')||20,rootLocked:this.locals.size>0,root:s.root,account:s.getSetting('account')||(s.getSetting('sessionConnected')?{uid:'',nickname:'抖音已连接'}:null)};
+ }
+ async detail(id){const s=this.store,w=s.work(id);if(!w)return null;await s.fileStates.check([id]);const d=s.download(id),b=s.get('backup_downloads',id),files=s.fileStates.get(id);return {...w,localTags:s.get('local_tags',id)?.tags||[],downloaded:files?.status==='complete',local:!!d?.assets?.length&&(files?.local||files?.status==='unknown'),backedUp:!!b?.assets?.length&&!b.backupDeleted,backupRecord:b,localRecord:d?{...d,assets:d.assets.map(a=>({...a,url:`app-media://asset/${id}/${encodeURIComponent(a.file)}`,exists:files?.assets[a.key]?.exists||false}))}:null};}
+}

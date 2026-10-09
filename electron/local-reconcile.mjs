@@ -30,7 +30,7 @@ export class LocalReconcile{
  }
  async validate(dir){
   const root=path.resolve(this.store.root);let current=requireInside(root,dir);
-  for(;;){try{const stat=await fs.lstat(current);if(stat.isSymbolicLink())throw Error('媒体目录包含符号链接，请选择普通文件夹');}catch(e){if(e.code!=='ENOENT')throw e;}if(current===root)break;current=path.dirname(current);}
+  for(;;){try{const stat=await fs.lstat(current);if(stat.isSymbolicLink())throw Error('媒体目录包含符号链接，请选择普通文件夹');}catch(e){if(e.code!=='ENOENT')throw e;}if(key(current)===key(root))break;const parent=path.dirname(current);if(parent===current)throw Error('无法确认保存目录边界');current=parent;}
  }
  async exists(file){try{await fs.lstat(file);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}}
  async metadata(id){

@@ -11,6 +11,8 @@ import {validHome} from '../shared/backup-protocol.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
 import {LocalReconcile} from './local-reconcile.mjs';
 import {DownloadTasks} from './download-tasks.mjs';
+import {FileStates} from './file-states.mjs';
+import {WorkViews} from './work-views.mjs';
 
 export class Store {
   static async open(file, defaultRoot) {
@@ -36,6 +38,7 @@ export class Store {
     s.collectionReads.init();
     s.localReconcile.init();
     s.downloadTasks=new DownloadTasks(s);s.downloadTasks.init();
+    s.fileStates.init();
     db.run(`CREATE INDEX IF NOT EXISTS members_work ON members(work_id,collection_id);
       CREATE INDEX IF NOT EXISTS members_display ON members(collection_id,(rank IS NULL),rank,work_id);
       CREATE INDEX IF NOT EXISTS author_members_work ON author_members(work_id,author_id);
@@ -46,7 +49,7 @@ export class Store {
     s.collectionReads.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this); }
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this); }
   syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
   rows(sql, args = []) {
     return this.db.all(sql,args);
@@ -56,6 +59,8 @@ export class Store {
     if(table==='collections'&&old&&(old.name!==body.name||old.folder!==body.folder))this.localReconcile.scope(String(id));
     this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]);
     if(['works','downloads','backup_downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++;
+    if(table==='downloads')this.fileStates.invalidate(String(id));
+    this.lightViews?.invalidate(table,String(id),body);
     const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','checkedAt'];
     if(table==='local_tags'||table==='works'&&(!old||metadataKeys.some(key=>JSON.stringify(old[key])!==JSON.stringify(body[key]))))this.localReconcile.mark(String(id));
   }
@@ -96,8 +101,8 @@ export class Store {
     this.revision++;
     this.backup?.changed();
   }
-  invalidateViews(){this.viewCache.clear();this.revision++;}
-  close() { this.save(); this.db.close(); }
+  invalidateViews(){this.viewCache.clear();this.lightViews?.reset();this.revision++;}
+  close() { void this.fileStates.close();this.save(); this.db.close(); }
   creatorProfiles(){return [...this.all('authors').map(a=>({uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name})),...this.all('creator_profiles')];}
   cachedCreator(person){const key=creatorKey(person);if(!key)return null;let p=this.get('creator_profiles',key);if(!p&&person.secUid)p=this.rows("SELECT body FROM creator_profiles WHERE json_extract(body,'$.secUid')=? LIMIT 1",[person.secUid]).map(r=>JSON.parse(r.body))[0];if(!p&&person.secUid){const a=this.get('authors',person.secUid);if(a)p={uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name};}return p&&sameCreator(person,p)?p:null;}
   rememberCreator(raw){const p=normalizeCreator(raw),key=creatorKey(p);if(!key||(!p.uid&&!p.secUid))return;const cached={...mergeCreator(this.cachedCreator(p)||{},p),fetchedAt:new Date().toISOString()};delete cached.roleTitle;this.put('creator_profiles',key,cached);const source=p.secUid?this.get('authors',p.secUid):null;if(source&&sameCreator(p,{uid:source.uid,secUid:source.id}))this.put('authors',source.id,{...source,uniqueId:p.uniqueId||source.uniqueId,name:p.nickname==='未知作者'?source.name:p.nickname});}
