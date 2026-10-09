@@ -260,7 +260,7 @@ try {
   handler('startRepairs',selected=>{ensureIdle();if(store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length))throw new Error('请登录原账号后再补齐未备份的作品');const report=inspectRepairs(store,ids(selected));const missing=report.items.filter(i=>i.status==='missing');if(missing.length)queue.enqueue(missing.map(i=>i.id));return {...report,started:missing.length};});
   handler('sync', async(options = {}) => {
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
-    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};});
+    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
   });
   handler('confirmCollectionRead',options=>foregroundRead(async()=>{if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=await store.reconcilePending();notify();if(errors.length)throw Error(errors.join('；'));return true;}));
   handler('resumeReconcile',()=>foregroundRead(async()=>{

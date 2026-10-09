@@ -46,6 +46,16 @@ try{
  await act(async()=>{emptyAction.click();await settle();});check('disconnected empty action opens the login dialog',document.querySelector('.modal h2').textContent==='登录抖音'&&!!document.querySelector('.login-panel'));
  await aria('关闭弹窗');window.cangxia.startQrLogin=previousQr;
  await act(async()=>{[...document.querySelectorAll('.sidebar>.collection-nav')].find(b=>b.textContent.startsWith('收藏')).click();await settle();});
+ const previousDirectorySync=window.cangxia.sync;
+ store.discoverCollections([{collects_id:'11',collects_name:'穹'},{collects_id:'12',collects_name:'穹'}]);
+ await act(async()=>{notify(data());await settle();});await aria('添加收藏夹');
+ check('distinct folders with the same name remain separately selectable',document.querySelectorAll('.collection-picker label').length===4&&[...document.querySelectorAll('.collection-picker strong')].filter(el=>el.textContent==='穹').length===2);
+ await act(async()=>{[...document.querySelectorAll('.collection-picker label')].find(el=>el.querySelector('strong').textContent==='穹').querySelector('input').click();await settle();});
+ window.cangxia.sync=async options=>{assert.equal(options.discoverOnly,true);store.discoverCollections([{collects_id:'9',collects_name:'测试收藏夹'},{collects_id:'10',collects_name:'空收藏夹'},{collects_id:'12',collects_name:'穹'}],true);return {collector:{phase:'done',busy:false,message:'收藏夹目录已读取'},collections:store.all('collections')};};
+ await click('读取账号里的收藏夹');
+ check('read result refreshes the open folder picker without a delayed state notification',document.querySelector('.modal h2').textContent==='添加自建收藏夹'&&[...document.querySelectorAll('.collection-picker strong')].filter(el=>el.textContent==='穹').length===1);
+ check('removed folder selection is discarded immediately after refresh',[...document.querySelectorAll('.modal-footer button')].find(b=>b.textContent.trim()==='添加  个收藏夹').disabled);
+ await aria('关闭弹窗');window.cangxia.sync=previousDirectorySync;
  const jump=async(location,value)=>{
    await act(async()=>{const input=document.querySelector(`[aria-label="${location}跳转页码"]`);Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));await settle();});
    await act(async()=>{document.querySelector(`[aria-label="${location}页码跳转"]`).dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await settle();});

@@ -150,7 +150,9 @@ export class Store {
     this.save();
   }
   setAdded(ids) {
-    for (const id of ids) { const c = this.collection(id); if (c) this.put('collections', id, { ...c, added: true }); }
+    const collections=[...new Set(ids)].map(id=>this.get('collections',id));
+    if(collections.some(c=>!c||c.remoteMissing))throw new Error('所选收藏夹已不在当前目录中，请重新读取收藏夹后再选择');
+    for (const c of collections) this.put('collections', c.id, { ...c, added: true });
     this.save();
   }
   orderedMemberRows(id) {

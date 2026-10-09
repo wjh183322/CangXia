@@ -58,6 +58,16 @@ test('unknown pagination is partial and never inferred complete from a short pag
 test('nested collection formats preserve exact string IDs',()=>{
   const p=pageResult({data:{collects:[{collects_id_str:'9007199254740993001',title:'自建夹'}],has_more:0}},'collects_list');assert.equal(p.complete,true);const c=normalizeCollections(p.items)[0];assert.equal(c.collects_id,'9007199254740993001');assert.equal(c.collects_name,'自建夹');
 });
+test('complete folder discovery hides removed IDs without collapsing same names or erasing saved members',async t=>{
+ const {store}=await setup(t);let complete=false;
+ const a=adapter(store,async()=>new Response(JSON.stringify({collects_list:[{collects_id_str:'12',collects_name:'穹'}],...(complete?{has_more:0}:{})})));
+ store.discoverCollections([{collects_id:'11',collects_name:'穹'},{collects_id:'12',collects_name:'穹'}],true);store.setAdded(['11']);store.upsertWork(raw('1'));store.ingestMembers('11',['1'],true);
+ await a.collector.importConfig(config());await a.collector.sync({discoverOnly:true});
+ assert.equal(store.all('collections').filter(c=>c.name==='穹'&&!c.remoteMissing).length,2);
+ complete=true;await a.collector.sync({discoverOnly:true});
+ assert.equal(store.all('collections').filter(c=>c.name==='穹'&&!c.remoteMissing).length,1);assert.equal(store.collection('11').remoteMissing,true);assert.deepEqual(store.snapshot().members['11'],['1']);
+ assert.throws(()=>store.setAdded(['12','11']),/当前目录/);assert.equal(store.collection('12').added,false);assert.throws(()=>store.setAdded(['99']),/当前目录/);
+});
 test('unconnected sync never starts a browser or sends account requests',async t=>{
   const {store}=await setup(t);const a=adapter(store);await a.collector.sync();assert.equal(a.calls.length,0);assert.equal(a.browser.opened,undefined);assert.match(a.collector.status.message,/先点击/);
 });
