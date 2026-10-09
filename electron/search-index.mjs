@@ -14,6 +14,7 @@ export class SearchIndex{
   const localTags=work.localTags,unchanged=old&&old.base===base&&old.localTags===localTags&&old.profile===this.profile;
   const people=unchanged?old.people:workCreators(base,this.profile),text=unchanged?old.text:[base.name,base.title,base.description,...people.flatMap(a=>[a.nickname,a.uniqueId,a.uid,a.secUid]),...(base.tags||[]),...localTags].join(' ').toLocaleLowerCase();
   const keys=new Set(['type:'+work.type,'download:'+(work.downloaded?'complete':['checking','unknown'].includes(work.localStatus)?'checking':'missing'),...(work.tags||[]).map(t=>'tag:'+t),...localTags.map(t=>'localtag:'+t)]);
+  if(work.localStatus==='none')keys.add('download:unsaved');
   for(const person of people)for(const [prefix,value]of [['uid',person.uid],['sec',person.secUid],['handle',person.uniqueId]])if(value){keys.add('creator:'+prefix+':'+value);keys.add('creator:'+value);}
   this.remove(id);for(const key of keys)this.bucket(key).add(id);this.rows.set(id,{base,localTags,profile:this.profile,people,text,keys});
   if(this.stored.get(id)!==text){this.store.db.run('INSERT INTO search_rows(id,text) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text',[id,text]);this.stored.set(id,text);}
@@ -27,7 +28,7 @@ export class SearchIndex{
  }
  async query(ids,options={}){
   const {query='',type='all',tags=[],tagMode='any',localTags=[],localTagMode='any',author='',downloaded='all'}=options;
-  if(typeof query!=='string'||query.length>6000||!['all','video','images'].includes(type)||!['all','complete','missing','checking'].includes(downloaded)||typeof author!=='string'||![tags,localTags].every(a=>Array.isArray(a)&&a.length<=1000&&a.every(t=>typeof t==='string'&&t.length<=256))||![tagMode,localTagMode].every(m=>['any','all'].includes(m)))throw Error('搜索筛选参数无效');
+  if(typeof query!=='string'||query.length>6000||!['all','video','images'].includes(type)||!['all','unsaved','complete','missing','checking'].includes(downloaded)||typeof author!=='string'||![tags,localTags].every(a=>Array.isArray(a)&&a.length<=1000&&a.every(t=>typeof t==='string'&&t.length<=256))||![tagMode,localTagMode].every(m=>['any','all'].includes(m)))throw Error('搜索筛选参数无效');
   await this.prepare();const filters=[];if(type!=='all')filters.push(this.bucket('type:'+type));if(author)filters.push(this.bucket('creator:'+author));if(downloaded!=='all')filters.push(this.bucket('download:'+downloaded));
   for(const [selected,prefix,mode]of [[tags,'tag:',tagMode],[localTags,'localtag:',localTagMode]])if(selected.length){if(mode==='all')for(const value of selected)filters.push(this.bucket(prefix+value));else{const union=new Set();for(const value of selected)for(const id of this.bucket(prefix+value))union.add(id);filters.push(union);}}
   const text=query.trim().toLocaleLowerCase();if(this.fts&&Array.from(text).length>=3&&!text.includes('\0')){try{const phrase='"'+text.replaceAll('"','""')+'"';filters.push(new Set(this.store.rows('SELECT search_rows.id FROM search_fts JOIN search_rows ON search_rows.rowid=search_fts.rowid WHERE search_fts MATCH ?',[phrase]).map(r=>r.id)));}catch{/* Exact cached substring matching remains available. */}}

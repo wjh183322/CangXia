@@ -44,6 +44,10 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     for(let i=0;i<120;i++){data=await call('state');if(data.queue.transferring===6)simultaneous=true;if(!data.queue.running)break;await new Promise(r=>setTimeout(r,50));}
     const completedPage=await call('downloadPage',{tab:'complete',page:1,pageSize:50});
     check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&completedPage.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).length===6);
+    const report=await call('previewDownloads',['100002','100009']);check('native selection preview separates complete old media from unsaved works',report.selected===2&&report.unsaved===1&&report.complete===1);
+    const oldMedia=await call('workDetail','100002'),oldFile=path.join(oldMedia.localRecord.path,oldMedia.localRecord.assets.find(a=>a.kind==='image').file),oldStamp=fs.statSync(oldFile).mtimeMs;
+    const selectedDownload=await call('download',['100002','100009'],{source:'douyin',scope:'unsaved'});for(let i=0;i<120&&(await call('state')).queue.running;i++)await new Promise(r=>setTimeout(r,50));
+    check('native new-only download queues one work and leaves the old media file untouched',selectedDownload.queued===1&&fs.statSync(oldFile).mtimeMs===oldStamp&&(await call('workDetail','100009')).downloaded);
   }finally{http.fetch=savedFetch;await call('setDownloadConcurrency',3);}
   const cancelFetch=http.fetch;let blockedTransfers=0;
   http.fetch=async(url,options={})=>{if(options.headers?.['Accept-Encoding']!=='identity')return new Response(mediaBytes,{headers:{'content-type':'image/png'}});blockedTransfers++;return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));};

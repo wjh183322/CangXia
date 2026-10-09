@@ -27,6 +27,7 @@ import {verifyAccountIdentity} from './account-identity.mjs';
 import { SystemBrowser } from './system-browser.mjs';
 import { QrLogin } from './qr-login.mjs';
 import { DownloadQueue } from './downloads.mjs';
+import {planDownloads} from './download-selection.mjs';
 import { FlatDownloadQueue } from './flat-downloads.mjs';
 import { isDouyinURL, requireInside } from './model.mjs';
 
@@ -279,7 +280,17 @@ try {
   handler('stopSync', () => {store.localReconcile.stop();if(defectRepair.running)defectRepair.stop();else collector.stop();});
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
-  handler('download', (selected,options={}) => {if(!options||typeof options!=='object'||(options.source!==undefined&&!['douyin','nas'].includes(options.source)))throw Error('下载来源无效');const source=options.source||'douyin'; if (collector.busy || (collector.waiters.size&&!queue.running) || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(source==='douyin'&&store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length&&!store.isDownloaded(id)))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected),{source}); return true; });
+  handler('previewDownloads',selected=>planDownloads(store,queue,ids(selected)).report);
+  handler('download', async(selected,options={}) => {
+    if(!options||typeof options!=='object'||(options.source!==undefined&&!['douyin','nas'].includes(options.source)))throw Error('下载来源无效');const source=options.source||'douyin',requested=ids(selected);
+    if(collector.busy||(collector.waiters.size&&!queue.running)||flatQueue.running)throw Error('请等待读取完成或暂停单独下载后再下载');
+    if(source==='nas')return {queued:queue.enqueue(requested,{source})};
+    let plan=planDownloads(store,queue,requested,{scope:options.scope||'missing'});
+    if(store.getSetting('loggedOut')&&plan.ids.some(id=>!store.get('backup_downloads',id)?.assets?.length))throw Error('请登录原账号后再下载未备份的作品');
+    const removed=plan.excludedTasks.length?(await queue.cancel(plan.excludedTasks)).cancelled:0;
+    plan=planDownloads(store,queue,requested,{scope:options.scope||'missing'});
+    const queued=plan.ids.length?queue.enqueue(plan.ids,{source}):0;return {...plan.report,queued,removed};
+  });
   handler('setDownloadConcurrency',value=>{queue.setConcurrency(value);return true;});
   handler('pause', () => queue.pause());
   handler('repairVideoCover',selected=>{if(collector.busy||flatQueue.running)throw Error('请等待当前读取或单独下载结束');backup.assertWritable();const requested=ids(selected),targets=requested.filter(id=>{const d=store.download(id);return store.work(id)?.type==='video'&&d?.assets?.some(a=>a.key==='video'&&store.assetExists(d,a));});if(!targets.length)throw Error('所选作品没有完整的本地视频，请先下载视频');return {queued:queue.enqueue(targets,{coverOnly:true}),skipped:requested.length-targets.length};});
