@@ -29,6 +29,23 @@ const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
 try{
  await act(async()=>{await import('../.test-output/dom-build/main.js');await settle();});
  check('20 cards per page',document.querySelectorAll('.work-card').length===20);
+ // An empty, selected folder must offer reading when the account is connected.
+ const emptyFolder=store.collection('9');store.put('collections','10',{...emptyFolder,id:'10',name:'空收藏夹',count:0});
+ await act(async()=>{notify({...data(),collector:{phase:'done',connected:true,message:'已连接'}});await settle();});
+ await act(async()=>{document.querySelector('.collection-list button[title="空收藏夹"]').click();await settle();});
+ let emptyAction=document.querySelector('.empty-state .button.primary');
+ check('connected empty folder offers synchronization and matching guidance',emptyAction.textContent.trim()==='同步收藏'&&document.querySelector('.empty-state p').textContent.includes('当前收藏夹'));
+ await act(async()=>{emptyAction.click();await settle();});
+ check('empty folder synchronization opens options for that folder without login',document.querySelector('.modal h2').textContent==='读取「空收藏夹」'&&!!document.querySelector('.collection-read-setup')&&!document.querySelector('.login-panel'));
+ await aria('关闭弹窗');
+ await act(async()=>{notify({...data(),storage:{mode:'backup',writable:false},collector:{connected:true}});await settle();});
+ check('connected empty action respects the same NAS write guard',document.querySelector('.empty-state .button.primary').disabled);
+ await act(async()=>{notify(data());await settle();});emptyAction=document.querySelector('.empty-state .button.primary');
+ check('disconnected empty folder still offers account connection',emptyAction.textContent.trim()==='连接抖音账号'&&!emptyAction.disabled);
+ const previousQr=window.cangxia.startQrLogin;window.cangxia.startQrLogin=async()=>{};window.cangxia.cancelQrLogin=async()=>{};
+ await act(async()=>{emptyAction.click();await settle();});check('disconnected empty action opens the login dialog',document.querySelector('.modal h2').textContent==='登录抖音'&&!!document.querySelector('.login-panel'));
+ await aria('关闭弹窗');window.cangxia.startQrLogin=previousQr;
+ await act(async()=>{[...document.querySelectorAll('.sidebar>.collection-nav')].find(b=>b.textContent.startsWith('收藏')).click();await settle();});
  const jump=async(location,value)=>{
    await act(async()=>{const input=document.querySelector(`[aria-label="${location}跳转页码"]`);Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));await settle();});
    await act(async()=>{document.querySelector(`[aria-label="${location}页码跳转"]`).dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await settle();});
