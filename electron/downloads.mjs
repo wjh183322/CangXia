@@ -64,7 +64,7 @@ export class DownloadQueue {
     const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
     for (const id of [...new Set(ids)]) {
       if(busy.has(id))continue;
-      const w = this.store.work(id); if (!w) continue;
+      const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;
       added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source });
     }
     const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;

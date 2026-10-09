@@ -19,6 +19,11 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   check('NAS cover decodes without local media or Douyin credentials',image.width===1&&image.height===1&&!(await call('state')).works[0].local&&!fs.existsSync(path.join(process.env.CANGXIA_BACKUP_TEST_PROFILE,'login-state.bin')));
   await call('download',['123'],{source:'nas'});const end=Date.now()+15000;do{await new Promise(r=>setTimeout(r,100));data=await call('state');}while(data.queue.running&&Date.now()<end);
   check('download restores from NAS without a Douyin login',data.works[0].local&&data.works[0].downloaded);while((await call('state')).storage.syncing)await new Promise(r=>setTimeout(r,100));
+  const largeCheck=call('checkRepairs',Array.from({length:10000},(_,i)=>String(900000000+i)));let checkingState=await call('state');
+  check('native background check leaves state IPC responsive while work is pending',checkingState.repairCheck.running&&checkingState.repairCheck.total===10000);
+  await assert.rejects(call('download',['123']),/停止检查/);const stopCheck=await call('cancelRepairs'),stoppedCheck=await largeCheck;
+  check('native cancellation stops unchecked works without adding queue tasks',stopCheck.phase==='cancelled'&&stoppedCheck.checked<10000&&(await call('state')).queue.counts.waiting===0);
+  const completeCheck=await call('checkRepairs',['123']);check('native file report is bounded and identifies complete restored files',completeCheck.complete===1&&completeCheck.checked===1&&completeCheck.items.length===0);
   await call('setTags','123',['desktop-tag']);data=await call('state');check('local tag edit does not wait for NAS upload',data.works[0].localTags.includes('desktop-tag')&&data.storage.pending);
   await call('syncBackup');await win.webContents.executeJavaScript(`document.querySelector('[aria-label="设置"]').click()`);await new Promise(r=>setTimeout(r,300));const text=await win.webContents.executeJavaScript(`document.querySelector('.backup-connection').open=true;document.querySelector('.modal').innerText`);
   check('settings display sync time, device and connection controls',text.includes('上次同步')&&text.includes('最近提交电脑')&&text.includes('NAS 服务地址'));

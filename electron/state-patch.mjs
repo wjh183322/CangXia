@@ -3,7 +3,7 @@ export function arrayPatch(before=[],after=[]){let start=0;while(start<before.le
 export function mergeState(before,update){
   if(!update?.delta)return update;
   if(update.baseRevision!==undefined&&before.libraryRevision!==update.baseRevision){
-    const runtime={};for(const field of ['storage','collector','queue','flatQueue','qr','syncProgress','nasRemoval','localRemoval','defectRepair'])if(update[field]!==undefined)runtime[field]=update[field];
+    const runtime={};for(const field of ['storage','collector','queue','flatQueue','qr','syncProgress','nasRemoval','localRemoval','defectRepair','repairCheck'])if(update[field]!==undefined)runtime[field]=update[field];
     return {...before,...runtime,...(before.libraryRevision>=update.libraryRevision?{}:{needsFullState:true})};
   }
   const {delta,baseRevision,changedWorks=[],removedWorks=[],membershipPatches={},...rest}=update;

@@ -7,6 +7,7 @@ methods.push('addAuthor','readAuthor','archiveAuthor');
 methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
 methods.push('reportCoverStatus');
 methods.push('previewDownloads');
+methods.push('cancelRepairs','repairPage');
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);
