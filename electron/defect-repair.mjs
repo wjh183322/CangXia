@@ -26,7 +26,7 @@ export class DefectRepair{
   const issues=[],problem=this.backup.covers.problems?.get(id),asset=previewAsset(this.store,work);
   if(!this.store.get('backup_downloads',id)?.backupDeleted&&!this.store.get('backup_downloads',id)?.backupRemoved){if(problem)issues.push({kind:'cover',label:'封面异常',reason:problem.reason});
   else if(!asset&&(!work.thumbnail||(!this.backup.meta.dirty&&this.backup.meta.baseRevision!==null)))issues.push({kind:'cover',label:'封面待补',reason:work.thumbnail?'封面尚未成功备份':'缺少封面地址'});}
-  const download=this.store.download(id),failed=this.queue.jobs.find(j=>j.id===id&&j.state==='failed');
+  const indexed=this.queue.taskRows?.byId.get(id);const download=this.store.download(id),failed=this.queue.taskRows?(indexed?.state==='failed'?indexed:null):this.queue.jobs.find(j=>j.id===id&&j.state==='failed');
   if(download||failed){const files=inspectWorkFiles(this.store,id);if(files.status==='missing')issues.push({kind:'files',label:'文件缺失或异常',reason:files.missing.map(m=>`${m.label}：${m.reason}`).join('；')});else if(files.status==='error')issues.push({kind:files.error.includes('缺少原始图片数量')?'metadata':'blocked',label:files.error.includes('缺少原始图片数量')?'作品信息不完整':'暂时无法检查文件',reason:files.error});}
   return issues.length?{id,name:work.name,author:work.author?.nickname||'',url:work.url,issues}:null;
  }

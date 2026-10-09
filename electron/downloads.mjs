@@ -22,18 +22,21 @@ function extension(contentType, kind) {
 export class DownloadQueue {
   constructor(store, collector, fetchMedia, notify) {
     Object.assign(this, { store, collector, fetchMedia, notify });
+    this.taskRows=store.downloadTasks;
     this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,source:j.source==='nas'?'nas':'douyin',state:j.state==='running'?'waiting':j.state}));
     this.running=false;this.paused=this.jobs.some(j=>j.state==='waiting');this.active=new Map();this.resolveTail=Promise.resolve();this.cursor=0;
     const saved=store.getSetting('downloadConcurrency');this.concurrency=Number.isInteger(saved)&&saved>=1&&saved<=6?saved:3;
   }
-  state() { return { jobs: this.jobs.map(({ id, title, state, progress, message, phase,coverOnly,source,activeSource }) => ({ id, title, state, progress, message, phase,coverOnly,source:source||'douyin',activeSource })), paused: this.paused, running: this.running, concurrency:this.concurrency, active:this.active.size, transferring:this.jobs.filter(j=>j.state==='running'&&j.phase==='transferring').length, pauseReason:this.pauseReason||'' }; }
+  get jobs(){return this.taskRows?.jobs||this.legacyJobs||[];}
+  set jobs(value){if(this.taskRows)this.taskRows.replace(value);else this.legacyJobs=value;}
+  state({summary=false}={}) { const jobs=summary&&this.taskRows?[...this.taskRows.bucket('running')].map(id=>this.taskRows.byId.get(id)):this.jobs;return { summary,revision:this.taskRows?.revision||0,counts:this.taskRows?.counts(),total:this.jobs.length,jobs: jobs.map(({ id, title, state, progress, message, phase,coverOnly,source,activeSource }) => ({ id, title, state, progress, message, phase,coverOnly,source:source||'douyin',activeSource })), paused: this.paused, running: this.running, concurrency:this.concurrency, active:this.active.size, transferring:jobs.filter(j=>j.state==='running'&&j.phase==='transferring').length, pauseReason:this.pauseReason||'' }; }
   setConcurrency(value){
     if(!Number.isInteger(value)||value<1||value>6)throw new Error('同时下载数量应为 1 至 6');
     this.concurrency=value;this.store.setSetting('downloadConcurrency',value);this.store.save();this.wake?.();this.notify();
   }
   clearCompleted(ids) {
-    const selected=new Set(ids);
-    this.jobs=this.jobs.filter(j=>j.state!=='complete'||!selected.has(j.id));
+    const selected=ids===null?null:new Set(ids);
+    this.jobs=this.jobs.filter(j=>j.state!=='complete'||selected&&!selected.has(j.id));
     this.cursor=0;this.emit(true);this.store.save();
   }
   async cancel(ids=null){
@@ -50,7 +53,7 @@ export class DownloadQueue {
   emit(force=false) {
     // Asset checkpoints remain durable; avoid serializing a 30,000-job queue on every byte update.
     if(force||!this.lastPersist||Date.now()-this.lastPersist>=5000){
-      this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message,coverOnly,source})=>({id,title,state,progress,message,coverOnly,source:source||'douyin'})));this.lastPersist=Date.now();
+      if(this.taskRows)this.taskRows.flush();else this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message,coverOnly,source})=>({id,title,state,progress,message,coverOnly,source:source||'douyin'})));this.lastPersist=Date.now();
     }
     this.notify();
   }

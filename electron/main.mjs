@@ -53,7 +53,7 @@ const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send
 const deleteIntents=new Map();
 const stateTransfers=new Map();
 const inFlightActions=new Set();
-function runtimeState(){return {nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state(),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing},syncProgress:store.syncProgress?.()||[]};}
+function runtimeState(){return {nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state({summary:true}),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing,reconcile:store.localReconcile.state()},syncProgress:store.syncProgress?.()||[]};}
 function snapshot() { return feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
@@ -65,13 +65,13 @@ function ids(value) {
 }
 function handler(name, action) {
   ipcMain.handle('cangxia:' + name, async (event, ...args) => {
-    const guarded=!['state','stateChunk','startupReady','reportCoverStatus'].includes(name);let entered=false;
+    const guarded=!['state','stateChunk','downloadPage','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if(localRemoval?.running&&!['state','stateChunk','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
-      if(nasRemoval?.running&&!['state','stateChunk','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
-      if(backupBusy&&!['state','stateChunk','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
+      if(localRemoval?.running&&!['state','stateChunk','downloadPage','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if(nasRemoval?.running&&!['state','stateChunk','downloadPage','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
+      if((readLocked()||loggingOut)&&!['state','stateChunk','downloadPage','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
+      if(backupBusy&&!['state','stateChunk','downloadPage','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
       if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
       return { ok: true, data: await action(...args) };
@@ -236,7 +236,7 @@ try {
       for(const operation of [()=>qrProfile.clearStorageData(),()=>qrProfile.clearCache()])try{await operation();}catch{failed=true;}
       collector.status.logoutIncomplete=failed;notify();
       if(failed)throw new Error('已断开登录，部分登录缓存未清理完成，请重试清理');
-      return {loggedOut:true,collector:{...collector.status,busy:false},queue:queue.state(),flatQueue:flatQueue.state()};
+      return {loggedOut:true,collector:{...collector.status,busy:false},queue:queue.state({summary:true}),flatQueue:flatQueue.state()};
     }finally{loggingOut=false;notify();}
   });
   handler('importLoginConfig', async value=>{ensureIdle();const file=absolutePath(value),stat=fs.lstatSync(file);if(!file.toLowerCase().endsWith('.json')||!stat.isFile()||stat.isSymbolicLink())throw new Error('请选择普通 JSON 配置文件');if(stat.size>2*1024*1024)throw new Error('配置文件过大');await collector.importConfig(fs.readFileSync(file,'utf8'));return true;});
@@ -257,14 +257,21 @@ try {
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
     return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot()};});
   });
-  handler('confirmCollectionRead',options=>{ensureIdle();if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=store.reconcile();notify();if(errors.length)throw Error(errors.join('；'));return true;});
+  handler('confirmCollectionRead',options=>foregroundRead(async()=>{if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=await store.reconcilePending();notify();if(errors.length)throw Error(errors.join('；'));return true;}));
+  handler('resumeReconcile',()=>foregroundRead(async()=>{
+    collector.busy=true;collector.cancelled=false;collector.stopRequested=false;collector.syncController=new AbortController();
+    collector.status.readProgress={name:'本地作品整理',mode:'organize',checked:0,added:0,startedAt:Date.now(),stage:'organizing'};
+    try{const errors=await store.reconcilePending({signal:collector.syncController.signal,onProgress:p=>collector.readProgress({stage:'organizing',organizing:p})});if(errors.length)throw Error(errors.join('；'));}
+    finally{collector.busy=false;collector.syncController=null;collector.readProgress({stage:'finished'});notify();}
+  }));
   handler('stopWorkCreators',id=>{if(!/^\d+$/.test(id))throw Error('作品标识无效');return creatorDetails.cancel(id);});
   handler('refreshWorkCreators',async(id,options={})=>{if(!/^\d+$/.test(id)||!options||typeof options!=='object'||(options.force!==undefined&&typeof options.force!=='boolean'))throw Error('作者信息请求无效');return foregroundRead(()=>creatorDetails.refresh(id,options));});
   handler('addAuthor',async text=>foregroundRead(()=>authorReader.add(text)));
   handler('readAuthor',async options=>{if(!options||typeof options!=='object')throw new Error('作者读取选项无效');return foregroundRead(()=>authorReader.read(options));});
   handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});
-  handler('clearCompleted', selected => {queue.clearCompleted(ids(selected));return true;});
-  handler('stopSync', () => {if(defectRepair.running)defectRepair.stop();else collector.stop();});
+  handler('clearCompleted', selected => {queue.clearCompleted(selected===null?null:ids(selected));return true;});
+  handler('downloadPage', options=>queue.taskRows.page(options));
+  handler('stopSync', () => {store.localReconcile.stop();if(defectRepair.running)defectRepair.stop();else collector.stop();});
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
   handler('download', (selected,options={}) => {if(!options||typeof options!=='object'||(options.source!==undefined&&!['douyin','nas'].includes(options.source)))throw Error('下载来源无效');const source=options.source||'douyin'; if (collector.busy || (collector.waiters.size&&!queue.running) || flatQueue.running) throw new Error('请等待读取完成或暂停单独下载后再下载');if(source==='douyin'&&store.getSetting('loggedOut')&&ids(selected).some(id=>!store.get('backup_downloads',id)?.assets?.length&&!store.isDownloaded(id)))throw new Error('请登录原账号后再下载未备份的作品');queue.enqueue(ids(selected),{source}); return true; });

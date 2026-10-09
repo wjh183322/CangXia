@@ -9,6 +9,8 @@ import { TOTAL, safeName, requireInside, parseWork } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import {validHome} from '../shared/backup-protocol.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
+import {LocalReconcile} from './local-reconcile.mjs';
+import {DownloadTasks} from './download-tasks.mjs';
 
 export class Store {
   static async open(file, defaultRoot) {
@@ -32,20 +34,35 @@ export class Store {
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
     s.authorSources.init();
     s.collectionReads.init();
+    s.localReconcile.init();
+    s.downloadTasks=new DownloadTasks(s);s.downloadTasks.init();
+    db.run(`CREATE INDEX IF NOT EXISTS members_work ON members(work_id,collection_id);
+      CREATE INDEX IF NOT EXISTS members_display ON members(collection_id,(rank IS NULL),rank,work_id);
+      CREATE INDEX IF NOT EXISTS author_members_work ON author_members(work_id,author_id);
+      CREATE INDEX IF NOT EXISTS author_scan_work ON author_scan(work_id,author_id);
+      CREATE INDEX IF NOT EXISTS author_scan_order ON author_scan(author_id,position);
+      CREATE INDEX IF NOT EXISTS creator_profiles_sec ON creator_profiles(json_extract(body,'$.secUid'));`);
     s.sync.recover();
     s.collectionReads.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this); }
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this); }
   syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
   rows(sql, args = []) {
     return this.db.all(sql,args);
   }
-  put(table, id, body) { this.backup?.assertWritable();this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]);if(['works','downloads','backup_downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++; }
+  put(table, id, body) {
+    this.backup?.assertWritable();const old=['collections','works','local_tags'].includes(table)?this.get(table,id):null;
+    if(table==='collections'&&old&&(old.name!==body.name||old.folder!==body.folder))this.localReconcile.scope(String(id));
+    this.db.run(`INSERT OR REPLACE INTO ${table} (id,body) VALUES (?,?)`, [String(id), JSON.stringify(body)]);
+    if(['works','downloads','backup_downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++;
+    const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','checkedAt'];
+    if(table==='local_tags'||table==='works'&&(!old||metadataKeys.some(key=>JSON.stringify(old[key])!==JSON.stringify(body[key]))))this.localReconcile.mark(String(id));
+  }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
   all(table) { return this.rows(`SELECT body FROM ${table}`).map(r => JSON.parse(r.body)); }
-  getSetting(key) { const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
-  setSetting(key, value) { if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;if(this.backup&&!this.backup.localKey(key))this.backup.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]);if(key==='root')this.viewCache.clear();this.revision++; }
+  getSetting(key) { if(key==='downloadJobs'&&this.downloadTasks)return this.downloadTasks.present?this.downloadTasks.list():null;const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
+  setSetting(key, value) { if(key==='downloadJobs'&&this.downloadTasks){this.downloadTasks.replace(value);this.downloadTasks.flush();return;}if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;if(this.backup&&!this.backup.localKey(key))this.backup.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]);if(key==='root')this.viewCache.clear();this.revision++; }
   get root() { return this.getSetting('root'); }
   collection(id) { return this.authorSources.collection(id)||this.get('collections', id); }
   work(id) { return this.get('works', id); }
@@ -111,6 +128,7 @@ export class Store {
       const name = String(raw.collects_name || '未命名收藏夹');
       let folder = safeName(name, 52);
       if (folder === '收藏' || this.all('collections').some(c => c.id !== id && c.folder.toLowerCase() === folder.toLowerCase())) folder += '-' + id.slice(-6);
+      if(old&&(old.name!==name||old.folder!==folder))this.localReconcile.scope(id);
       this.put('collections', id, { ...old, id, name, folder, added: old?.added || false, remoteMissing: false, count: Number(raw.total_number || 0), rank: index, discoveredAt: new Date().toISOString() });
     });
     if (complete) for (const c of this.all('collections')) if (c.id !== TOTAL && !seen.has(c.id)) this.put('collections', c.id, { ...c, remoteMissing: true });
@@ -142,6 +160,8 @@ export class Store {
     this.db.run('BEGIN');
     try {
       // Each scope owns its order. A partial prefix retains the unvisited suffix without rank collisions.
+      const beforeIds=new Set(previous.map(r=>r.work_id)),afterIds=new Set([...ordered,...pending]);
+      for(const wid of new Set([...beforeIds,...afterIds]))if(beforeIds.has(wid)!==afterIds.has(wid))this.localReconcile.mark(wid);
       if(options.unhide!==false)for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}
       this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
       ordered.forEach((wid, rank) => this.db.run('INSERT INTO members VALUES (?,?,?)', [id, wid, rank]));
@@ -182,24 +202,24 @@ export class Store {
       const parent = path.dirname(part); if (parent === part) break; part = parent;
     }
   }
-  destination(id) {
+  destination(id,{owners,exists=fs.existsSync,check=true}={}) {
     const work = this.work(id); if (!work) throw new Error('作品不存在');
     const remembered=this.download(id)?.home||this.get('backup_downloads',id)?.home;
-    if(remembered&&(remembered.kind==='author'||!this.download(id))){if(!validHome(remembered))throw Error('备份目录归属无效');const dir=requireInside(this.root,path.join(this.root,remembered.folder,remembered.workFolder));this.assertDirectory(dir);if(dir.length>235)throw Error('恢复路径过长，请选择更短的下载目录');return {dir,collectionId:(remembered.kind==='author'?'author:':'')+remembered.id,home:remembered};}
+    if(remembered&&(remembered.kind==='author'||!this.download(id))){if(!validHome(remembered))throw Error('备份目录归属无效');const dir=requireInside(this.root,path.join(this.root,remembered.folder,remembered.workFolder));if(check)this.assertDirectory(dir);if(dir.length>235)throw Error('恢复路径过长，请选择更短的下载目录');return {dir,collectionId:(remembered.kind==='author'?'author:':'')+remembered.id,home:remembered};}
     const c = this.canonicalCollection(id);
     const parent = requireInside(this.root, path.join(this.root, c.folder));
     const basename = `${safeName(work.name, 52)}-${safeName(work.author.nickname, 24)}`;
     let dir = requireInside(this.root, path.join(parent, basename));
     const current = this.download(id);
-    const occupied = this.all('downloads').some(d => d.id !== id && path.resolve(d.path).toLowerCase() === dir.toLowerCase());
-    if (occupied || (fs.existsSync(dir) && path.resolve(current?.path || '.') !== dir)) dir += '-' + id;
+    const occupied = owners ? [...(owners.get(dir.toLowerCase())||[])].some(owner=>owner!==id) : this.all('downloads').some(d => d.id !== id && path.resolve(d.path).toLowerCase() === dir.toLowerCase());
+    if (occupied || (exists(dir) && path.resolve(current?.path || '.') !== dir)) dir += '-' + id;
     if (dir.length > 235) throw new Error('保存路径过长，请选择更短的下载根目录');
-    this.assertDirectory(dir);
+    if(check)this.assertDirectory(dir);
     return { dir, collectionId: c.id,home:{kind:c.id.startsWith('author:')?'author':'collection',id:c.id.startsWith('author:')?c.id.slice(7):c.id,folder:c.folder,workFolder:path.basename(dir)} };
   }
-  relocate(id) {
+  relocate(id,context) {
     const d = this.download(id); if (!d) return;
-    const target = this.destination(id);
+    const target = this.destination(id,context);
     if (path.resolve(d.path) === target.dir) { this.refreshMetadata(id); return; }
     this.assertDirectory(d.path); this.assertDirectory(target.dir);
     if (fs.existsSync(d.path)) {
@@ -226,9 +246,11 @@ export class Store {
       this.put('downloads',id,moved);
     }
   }
+  reconcilePending(options){return this.localReconcile.run(options);}
   reconcile() {
-    const errors = [];
-    for (const d of this.all('downloads')) try { this.relocate(d.id); } catch (e) { errors.push(e.message); }
+    const errors = [],owners=new Map();
+    for(const row of this.rows("SELECT id,json_extract(body,'$.path') path FROM downloads")){if(!row.path)continue;const key=path.resolve(row.path).toLowerCase();if(!owners.has(key))owners.set(key,new Set());owners.get(key).add(row.id);}
+    for (const row of this.rows('SELECT work_id,token FROM local_reconcile')) try {const before=this.download(row.work_id)?.path;this.relocate(row.work_id,{owners});const after=this.download(row.work_id)?.path;if(before)owners.get(path.resolve(before).toLowerCase())?.delete(row.work_id);if(after){const k=path.resolve(after).toLowerCase();if(!owners.has(k))owners.set(k,new Set());owners.get(k).add(row.work_id);}this.db.run('DELETE FROM local_reconcile WHERE work_id=? AND token=?',[row.work_id,row.token]);} catch (e) { errors.push(e.message); }
     this.save(); return errors;
   }
   assetExists(d, asset) {

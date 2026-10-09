@@ -108,6 +108,13 @@ try{
  queueFixture.jobs=[{id:'1000',title:'高清重试',state:'failed',coverOnly:true}];let hdRetry=[];window.cangxia.repairVideoCover=async ids=>{hdRetry=ids;return {queued:1,skipped:0};};await act(async()=>{notify({...data(),queue:queueFixture});await settle();});await click('重试');check('failed HD retry stays an explicit HD task instead of ordinary download',hdRetry.join(',')==='1000'&&document.querySelector('.job').textContent.includes('高清图补齐'));
  await aria('关闭弹窗');
  const removal={running:true,phase:'deleting',total:30,processed:2,deleted:2,failed:0,current:'fixture',message:'正在移入系统回收站'};let cancelledRemoval=0;
+ const pagedJobs=Array.from({length:125},(_,i)=>({id:String(700000+i),title:'分页任务 '+i,state:'complete'}));let pageCalls=[];
+ const pagedSummary={summary:true,revision:1,total:125,counts:{complete:125},jobs:[],paused:true,concurrency:3};
+ window.cangxia.downloadPage=async options=>{pageCalls.push(options);return {jobs:pagedJobs.slice((options.page-1)*50,options.page*50),total:125,page:options.page,pageSize:50};};
+ await act(async()=>{notify({...data(),queue:pagedSummary});document.querySelector('.downloads-nav').click();await settle();});await click('普通下载');await click('已下载 · 125');
+ check('summary queue fetches just the visible completed page',pageCalls.at(-1).tab==='complete'&&document.querySelectorAll('.job').length===50&&document.querySelector('.job strong').textContent==='分页任务 0');
+ await click('下一页');check('summary queue switches pages through the API',pageCalls.at(-1).page===2&&document.querySelector('.job strong').textContent==='分页任务 50');
+ await aria('关闭弹窗');
  window.cangxia.state=async()=>({...data(),localRemoval:removal});window.cangxia.cancelLocalRemoval=async()=>{cancelledRemoval++;Object.assign(removal,{running:false,phase:'cancelled',message:'已取消，未继续删除剩余作品'});};
  await act(async()=>{notify({...data(),localRemoval:removal});await settle();});
  check('running local deletion shows progress and offers cancellation',document.querySelector('.modal').textContent.includes('已处理 2 / 30')&&!!document.querySelector('progress')&&!document.querySelector('.modal [aria-label="关闭弹窗"]'));

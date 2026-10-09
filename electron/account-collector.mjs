@@ -196,13 +196,13 @@ export class Collector{
         if(complete||limited||run.nextCursor===null||!result.items.length)break;
         await delay();
       }
-      this.readProgress({stage:'saving'});const errors=this.store.reconcile();
+      this.readProgress({stage:'saving'});const errors=await this.store.reconcilePending({signal,onProgress:p=>this.readProgress({stage:'organizing',organizing:p})});
       needsReconcile=false;
       if(this.cancelled)return;
       this.update((complete||limited)&&!errors.length?'done':'attention',errors.length?errors.join('；'):`「${c.name}」${complete?(run.resumed?'续读到列表末尾；如收藏有变化，请再从头核对':'已读完'):limited?'部分读取完成':'读取未完整结束'} · 已检查 ${run.count} 个，新增 ${added} 个`,run.count);
     }catch(e){if(!this.cancelled)this.update('attention',e.message);}finally{
       let saveFailed=false;
-      try{if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);if(needsReconcile){const errors=this.store.reconcile();if(errors.length)this.update('attention',errors.join('；'));}}
+      try{if(run&&run.status!=='complete')this.store.sync.finish(run,false,this.cancelled?'读取已暂停':this.status.message);if(needsReconcile){const errors=await this.store.reconcilePending({signal,onProgress:p=>this.readProgress({stage:'organizing',organizing:p})});if(errors.length)this.update('attention',errors.join('；'));}}
       catch(error){saveFailed=true;this.onDiagnostic({event:'read-save-failed',name:error.name,code:error.code,reason:error.message,count:run?.count});this.update('attention',`读取已停止，收尾进度保存失败：${error.message}；已提交的页面仍保留`);}
       finally{this.busy=false;this.syncController=null;if(!saveFailed&&this.cancelled&&this.stopRequested)this.update('idle','已停止，已读取内容和进度已保留');this.readProgress({stage:'finished',finishedAt:Date.now(),stopped:this.cancelled,saveFailed});this.scheduleBrowserIdle();this.notify();}
     }

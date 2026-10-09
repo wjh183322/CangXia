@@ -38,7 +38,8 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   try{
     await call('setDownloadConcurrency',6);await call('download',['100002','100003','100004','100005','100006','100007']);let simultaneous=false;
     for(let i=0;i<120;i++){data=await call('state');if(data.queue.transferring===6)simultaneous=true;if(!data.queue.running)break;await new Promise(r=>setTimeout(r,50));}
-    check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&data.queue.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).every(j=>j.state==='complete'));
+    const completedPage=await call('downloadPage',{tab:'complete',page:1,pageSize:50});
+    check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&completedPage.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).length===6);
   }finally{http.fetch=savedFetch;await call('setDownloadConcurrency',3);}
   const cancelFetch=http.fetch;let blockedTransfers=0;
   http.fetch=async(url,options={})=>{if(options.headers?.['Accept-Encoding']!=='identity')return new Response(mediaBytes,{headers:{'content-type':'image/png'}});blockedTransfers++;return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));};
@@ -46,7 +47,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     await call('download',['100008','100010']);for(let i=0;i<100&&blockedTransfers<2;i++)await new Promise(r=>setTimeout(r,20));assert.equal(blockedTransfers,2);
     const one=await call('cancelDownloads',['100008']);data=await call('state');check('native single download cancellation leaves the other transfer and collection intact',one.cancelled===1&&!data.queue.jobs.some(j=>j.id==='100008')&&data.queue.jobs.some(j=>j.id==='100010')&&data.works.some(w=>w.id==='100008'));
     await call('cancelDownloads',null);for(let i=0;i<100;i++){data=await call('state');if(!data.queue.running)break;await new Promise(r=>setTimeout(r,20));}
-    check('native bulk cancellation retains completed downloads and NAS copies',data.queue.jobs.every(j=>j.state==='complete')&&data.works.find(w=>w.id==='123').local&&data.works.find(w=>w.id==='123').backedUp);
+    check('native bulk cancellation retains completed downloads and NAS copies',data.queue.counts.complete>=6&&data.queue.total===data.queue.counts.complete&&data.works.find(w=>w.id==='123').local&&data.works.find(w=>w.id==='123').backedUp);
   }finally{http.fetch=cancelFetch;}
   const originalTrash=shell.trashItem;let trashStarted,finishTrash;const begunTrash=new Promise(r=>trashStarted=r),trashGate=new Promise(r=>finishTrash=r);let trashCalls=0;
   shell.trashItem=async dir=>{assert.ok(dir.startsWith(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE)+path.sep));trashCalls++;trashStarted();await trashGate;await fs.promises.rename(dir,dir+'.fixture-recycled');};
@@ -59,7 +60,8 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   }finally{finishTrash?.();shell.trashItem=originalTrash;}
   check('ordinary native download and NAS restore never launch HD processing',hdProbeCalls===0);
   const hdStart=await call('repairVideoCover',['100003','100004']);for(let i=0;i<100;i++){data=await call('state');if(!data.queue.running)break;await new Promise(r=>setTimeout(r,30));}
-  check('explicit native bulk HD processing skips images and marks its own task',hdStart.queued===1&&hdStart.skipped===1&&hdProbeCalls===1&&data.queue.jobs.some(j=>j.id==='100003'&&j.coverOnly&&j.state==='complete'));
+  const hdCompleted=await call('downloadPage',{tab:'complete',page:1,pageSize:50});
+  check('explicit native bulk HD processing skips images and marks its own task',hdStart.queued===1&&hdStart.skipped===1&&hdProbeCalls===1&&hdCompleted.jobs.some(j=>j.id==='100003'&&j.coverOnly&&j.state==='complete'));
   const defectReport=await call('inspectDefects');check('native defect inspection returns typed per-work issues without starting a read',Array.isArray(defectReport.items)&&defectReport.items.every(i=>typeof i.id==='string'&&Array.isArray(i.issues))&&!(await call('state')).collector.busy);
   const defectUIWait=Date.now()+3000;while(await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').disabled")&&Date.now()<defectUIWait)await new Promise(r=>setTimeout(r,50));
   await win.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='补齐失败').click()");await new Promise(r=>setTimeout(r,250));
