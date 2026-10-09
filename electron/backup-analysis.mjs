@@ -11,5 +11,6 @@ export class BackupAnalysis{
  inspect(baseline,options={}){return this.request('inspect',{baseline,...options});}
  delta(entries,baseline,deletions=[]){return this.request('delta',{entries,baseline,deletions});}
  content(value){return this.request('content',{value}).then(result=>result.hash);}
+ media(options){return this.request('media',options);}
  async close(){this.closed=true;for(const pending of this.waiters.values())pending.reject(new Error('备份分析已关闭'));this.waiters.clear();await this.worker?.terminate();}
 }

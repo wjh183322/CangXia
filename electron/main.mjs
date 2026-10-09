@@ -53,11 +53,11 @@ const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send
 const deleteIntents=new Map();
 const stateTransfers=new Map();
 const inFlightActions=new Set();
-function runtimeState(){return {nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state({summary:true}),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing,reconcile:store.localReconcile.state(),fileCheck:store.fileStates.state()},syncProgress:store.syncProgress?.()||[]};}
-function snapshot() { return feed.frame(runtimeState(),{full:true}); }
+function runtimeState(){return {contentRevision:store.backupRevision(),nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state({summary:true}),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing,reconcile:store.localReconcile.state(),fileCheck:store.fileStates.state()},syncProgress:store.syncProgress?.()||[]};}
+function snapshot() { return backup?.applying&&feed.previous?{...feed.previous,libraryRevision:feed.revision,...runtimeState()}:feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
-  if(timer)return;timer = setTimeout(() => { timer=null;if (rendererReady && window && !window.isDestroyed()){if(!store.lightViews.ready){void store.lightViews.prepare().then(notify).catch(error=>diagnostics.record({event:'view-index-failed',reason:error.message}));return;}window.webContents.send('cangxia:change', feed.frame(runtimeState()));} }, 250);
+  if(timer)return;timer = setTimeout(() => { timer=null;if (rendererReady && window && !window.isDestroyed()){if(!store.lightViews.ready){void store.lightViews.prepare().then(notify).catch(error=>diagnostics.record({event:'view-index-failed',reason:error.message}));return;}window.webContents.send('cangxia:change', backup?.applying?{delta:true,...runtimeState()}:feed.frame(runtimeState()));} }, 250);
 }
 function ids(value) {
   if (!Array.isArray(value) || value.length > 100000 || value.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('作品选择无效');
@@ -65,13 +65,14 @@ function ids(value) {
 }
 function handler(name, action) {
   ipcMain.handle('cangxia:' + name, async (event, ...args) => {
-    const guarded=!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','startupReady','reportCoverStatus'].includes(name);let entered=false;
+    const guarded=!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if(localRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
-      if(nasRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
-      if(backupBusy&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
+      if(backup?.applying&&!['state','stateChunk','startupReady','cancelBackup','cancelFileCheck'].includes(name))throw Error('正在应用 NAS 记录，请等待当前批次完成');
+      if(localRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if(nasRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
+      if((readLocked()||loggingOut)&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
+      if(backupBusy&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
       if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
       return { ok: true, data: await action(...args) };
@@ -206,9 +207,10 @@ try {
       return await net.fetch(pathToFileURL(file).href, { headers: request.headers });
     } catch(error) {try{const u=new URL(request.url),id=u.pathname.split('/').filter(Boolean)[0];if(u.hostname==='cover'&&/^\d+$/.test(id)&&!backup.covers.problems.has(id))backup.covers.reportProblem(id,'封面显示失败：'+error.message,'display');}catch{}return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
   });
-  handler('startupReady',()=>{if(!rendererReady){rendererReady=true;startupStage('library-visible');notify();void store.fileStates.scan().catch(error=>diagnostics.record({event:'file-check-failed',reason:error.message}));}return true;});
+  handler('startupReady',()=>{if(!rendererReady){rendererReady=true;startupStage('library-visible');store.fileStates.monitor();notify();void store.fileStates.scan().catch(error=>diagnostics.record({event:'file-check-failed',reason:error.message}));}return true;});
   handler('cancelFileCheck',()=>store.fileStates.cancelScan());
   handler('workDetail',async id=>{ids([id]);return store.lightViews.detail(id);});
+  handler('filterWorks',async(selected,options)=>({ids:await store.lightViews.search.query(ids(selected),options)}));
   handler('state', async () => {
     await store.lightViews.prepare();
     const state=snapshot();if(firstState){firstState=false;startupStage('snapshot-ready');}if(state.works.length<=1000)return state;

@@ -88,9 +88,9 @@ export class DownloadQueue {
         while(!this.paused&&this.active.size<this.concurrency&&this.cursor<this.jobs.length){
           const job=this.jobs[this.cursor++];if(job.state!=='waiting'||this.active.has(job.id))continue;
           const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
-          task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(()=>{
+          task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(async()=>{
             if(task.cancelled)return;
-            this.store.fileStates?.confirmWritten(job.id);
+            job.phase='checking';try{const confirmed=await this.store.fileStates?.confirmWritten(job.id);if(this.store.fileStates&&!confirmed&&!job.coverOnly)throw Error('已保存文件的当前状态未通过确认');}catch(error){if(!task.cancelled){job.state='failed';job.message='已保存内容保留，文件确认暂未完成：'+error.message;}return;}if(task.cancelled)return;
             job.state='complete';job.progress=100;job.message='文件已保存';
           },e=>{
             if(task.cancelled)return;

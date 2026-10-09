@@ -9,7 +9,8 @@ export function selectWorks(works, { query = '', type = 'all', tags = [], tagMod
     if (type !== 'all' && w.type !== type) return false;
     if (author && !people.some(person=>matchesCreator(person,author))) return false;
     if (downloaded === 'complete' && !w.downloaded) return false;
-    if (downloaded === 'missing' && w.downloaded) return false;
+    if (downloaded === 'missing' && (w.downloaded||['checking','unknown'].includes(w.localStatus))) return false;
+    if (downloaded === 'checking' && !['checking','unknown'].includes(w.localStatus)) return false;
     const matches=(selected,actual,mode)=>!selected.length||(mode==='any'?selected.some(t=>actual.includes(t)):selected.every(t=>actual.includes(t)));
     return matches(tags,w.tags||[],tagMode)&&matches(localTags,w.localTags||[],localTagMode);
   });

@@ -13,6 +13,7 @@ import {LocalReconcile} from './local-reconcile.mjs';
 import {DownloadTasks} from './download-tasks.mjs';
 import {FileStates} from './file-states.mjs';
 import {WorkViews} from './work-views.mjs';
+import {initializeRecordJournal} from './record-journal.mjs';
 
 export class Store {
   static async open(file, defaultRoot) {
@@ -45,12 +46,21 @@ export class Store {
       CREATE INDEX IF NOT EXISTS author_scan_work ON author_scan(work_id,author_id);
       CREATE INDEX IF NOT EXISTS author_scan_order ON author_scan(author_id,position);
       CREATE INDEX IF NOT EXISTS creator_profiles_sec ON creator_profiles(json_extract(body,'$.secUid'));`);
+    initializeRecordJournal(s);
+    db.run(`CREATE TABLE IF NOT EXISTS backup_file_hashes(file TEXT PRIMARY KEY,stamp TEXT NOT NULL,sha TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS preview_file_hashes(file TEXT PRIMARY KEY,stamp TEXT NOT NULL,sha TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS backup_hash_epoch(id INTEGER PRIMARY KEY,value INTEGER NOT NULL);
+      INSERT OR IGNORE INTO backup_hash_epoch VALUES(1,0);
+      CREATE TRIGGER IF NOT EXISTS hash_epoch_insert AFTER INSERT ON backup_file_hashes BEGIN UPDATE backup_hash_epoch SET value=value+1 WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS hash_epoch_update AFTER UPDATE ON backup_file_hashes BEGIN UPDATE backup_hash_epoch SET value=value+1 WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS hash_epoch_delete AFTER DELETE ON backup_file_hashes BEGIN UPDATE backup_hash_epoch SET value=value+1 WHERE id=1; END;`);
     s.sync.recover();
     s.collectionReads.recover();
     s.save(); return s;
   }
-  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this); }
+  constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this);this.db.onRollback=()=>{this.viewCache.clear();this.lightViews.rollback();this.revision++;}; }
   syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
+  backupRevision(){return this.rows('SELECT COALESCE(MAX(seq),0) value FROM backup_changes')[0].value;}
   rows(sql, args = []) {
     return this.db.all(sql,args);
   }

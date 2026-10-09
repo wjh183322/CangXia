@@ -184,6 +184,7 @@ test('deleting completed queue history preserves library files and does not skip
   const s=await setup(t);for(const id of ['1','2','3'])s.upsertWork(raw(id));localFile(s,'1');
   const q=new DownloadQueue(s,{},async()=>{},()=>{});
   q.jobs=[{id:'1',state:'complete'},{id:'2',state:'waiting'},{id:'3',state:'waiting'}];
+  s.fileStates.confirmWritten=async()=>true; // This test replaces file transfer with a scheduler stub.
   const visited=[];q.saveWork=async job=>{visited.push(job.id);if(job.id==='2')q.clearCompleted(['1','3']);};
   await q.run();assert.deepEqual(visited,['2','3']);assert.equal(s.isDownloaded('1'),true);
   assert.deepEqual(q.jobs.map(j=>j.id),['2','3']);assert.equal(s.download('1').state,'complete');
