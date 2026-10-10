@@ -16,7 +16,7 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
   if(mode==='quick'&&!hasAnchor&&allowFullScan!==true)throw Error('没有可靠的历史对照，可能读取到列表末尾，请先确认继续');
   c.busy=true;c.cancelled=false;c.stopRequested=false;c.syncController=new AbortController();
   const signal=c.syncController.signal;
-  c.status.readProgress={mode,name:collection.name,goal:null,checked:0,added:0,restored:0,startedAt:Date.now(),stage:'preparing'};c.notify();
+  c.status.readSummary=null;c.status.readProgress={mode,name:collection.name,goal:null,checked:0,added:0,restored:0,startedAt:Date.now(),stage:'preparing'};c.notify();
   let run,failure='',saveFailed=false;
   try{
     run=reads.start(collectionId,mode,{resume});
@@ -43,8 +43,9 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
     try{
       if(run?.status==='running')reads.finish(run,c.stopRequested?'paused':'error',failure);
       if(run){const errors=await store.reconcilePending({signal,onProgress:p=>c.readProgress({stage:'organizing',checked:run.count,organizing:p})});if(errors.length)failure=errors.join('；');}
-      if(run)c.update(!failure&&['matched','end'].includes(run.outcome)?'done':c.stopRequested?'idle':'attention',failure||`${run.reason} · 已检查 ${run.count} 条，新增收藏 ${run.added} 条${run.restored?`，恢复记录 ${run.restored} 条`:''}`,run.count);
+      if(run)c.update(!failure&&['matched','end'].includes(run.outcome)?'done':c.stopRequested?'idle':'attention',failure||`${run.reason} · 本轮取得 ${run.count} 条${run.historyVersion?run.oldCount?`，前面新增 ${run.frontAdded} 条，补齐记录 ${run.filled} 条`:`，首次读入 ${run.initialAdded} 条`:`，新增记录 ${run.added} 条`}${run.restored?`，恢复记录 ${run.restored} 条`:''}`,run.count);
     }catch(error){saveFailed=true;c.onDiagnostic({event:'read-save-failed',name:error.name,code:error.code,reason:error.message,count:run?.count});c.update('attention',`读取已停止，收尾进度保存失败：${error.message}；已提交的页面仍保留`);}
+    if(run)try{c.status.readSummary={...reads.summary(run),message:c.status.message,saveFailed};try{store.readHistory.write(c.status.readSummary);}catch(error){c.onDiagnostic({event:'read-history-failed',reason:error.message});}}catch(error){c.status.readSummary=null;c.onDiagnostic({event:'read-history-failed',reason:error.message});}
     c.busy=false;c.syncController=null;c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled,saveFailed});c.scheduleBrowserIdle();c.notify();
   }
 }

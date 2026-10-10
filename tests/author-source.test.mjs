@@ -32,7 +32,7 @@ test('20-item limit includes known works, then resumes the same page without los
 });
 test('repeated pinned posts deduplicate, and reading an existing first item does not hide later new works',async t=>{
   let round=0;const f=await fixture(t,async url=>Response.json(url.searchParams.get('max_cursor')==='0'?page([raw(1),raw(round?4:2)],1,'30'):page([raw(1),raw(3)],0,'60')));
-  await f.reader.read({id:ID,readAll:true});round=1;const result=await f.reader.read({id:ID,readAll:true});assert.equal(result.added,1);assert.deepEqual(f.store.snapshot().authorMembers[ID],['1','4','3','2']);assert.equal(f.store.snapshot().members.__all__.length,0);
+  await f.reader.read({id:ID,readAll:true});round=1;const result=await f.reader.read({id:ID,readAll:true});assert.equal(result.added,1);assert.deepEqual(f.store.snapshot().authorMembers[ID],['1','4','2','3']);assert.equal(f.collector.status.readSummary.filled,1);assert.equal(f.collector.status.readSummary.notReturned,1);assert.equal(f.store.snapshot().members.__all__.length,0);
 });
 test('403 preserves prior page and durable checkpoint; relogin resumes from that page',async t=>{
   let fail=true;const f=await fixture(t,async url=>url.searchParams.get('max_cursor')==='0'?Response.json(page([raw(1)],1,'30')):fail?new Response('blocked',{status:403}):Response.json(page([raw(2)])));

@@ -1,4 +1,5 @@
 import {WorkCreators} from './creator-ui.jsx';
+import {ReadSummary,ReadHistoryPanel} from './read-history-ui.jsx';
 import {creatorIndex,creatorKey,workCreators} from '../shared/creators.mjs';
 import {nasLibrary,nasWorks} from './nas-library.mjs';
 import {NASTabs,NASSidebar,NASSourceBadge} from './nas-ui.jsx';
@@ -10,7 +11,7 @@ import {CollectionReadSetup} from './collection-read-ui.jsx';
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {mergeState} from '../electron/state-patch.mjs';
 import { createRoot } from 'react-dom/client';
-import { Archive, ArrowDownToLine, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronRight, Cloud, Download, Filter, ExternalLink, Film, Folder, FolderHeart, FolderOpen, HardDrive, Heart, Image as ImageIcon, Info, LayoutGrid, Link, LoaderCircle, MoreHorizontal, Pause, Play, Plus, RefreshCw, Search, Settings, Settings2, ShieldCheck, Tag, Trash2, X, CircleHelp, CircleAlert, Monitor, Square, StopCircle, LogOut, Users } from 'lucide-react';
+import { Archive, ArrowDownToLine, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronRight, Cloud, Download, Filter, ExternalLink, Film, Folder, FolderHeart, FolderOpen, HardDrive, Heart, Image as ImageIcon, Info, LayoutGrid, Link, LoaderCircle, MoreHorizontal, Pause, Play, Plus, RefreshCw, Search, Settings, Settings2, ShieldCheck, Tag, Trash2, X, CircleHelp, CircleAlert, Monitor, Square, StopCircle, LogOut, Users, ListChecks } from 'lucide-react';
 import { selectWorks, TOTAL } from '../electron/filter.mjs';
 import './style.css';
 import {BackupPanel,BackupStatus} from './backup-ui.jsx';
@@ -19,7 +20,7 @@ import { SoundProvider, VolumeControl, MediaVideo, CoverAction, Viewer, TagRow, 
 
 const preview = !window.cangxia;
 const blank = { works: [], collections: [{ id: TOTAL, name: '收藏', added: true, count: 0 }], members: { [TOTAL]: [] }, root: '下载 / 藏匣', account: null, version: '0.3.0', collector: { phase: 'idle', message: '尚未连接账号', count: 0 }, queue: { jobs: [], paused: false } };
-const api = window.cangxia || Object.fromEntries(['cancelRepairs','repairPage','previewDownloads','stopWorkCreators','refreshWorkCreators','checkBackup','syncBackup','inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair','addAuthor','readAuthor','flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','cancelDownloads','repairVideoCover','setDownloadConcurrency','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','prepareNASRemoval','confirmNASRemoval','cancelNASRemoval','resumeNASRemoval','cancelLocalRemoval','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'].map(k => [k, async () => { if (k === 'state' || k === 'refreshFiles') return blank; throw new Error('浏览器仅用于界面预览，请在 Windows 桌面程序中操作'); }]));
+const api = window.cangxia || Object.fromEntries(['readHistoryRuns','readHistoryItems','clearReadHistory','cancelRepairs','repairPage','previewDownloads','stopWorkCreators','refreshWorkCreators','checkBackup','syncBackup','inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair','addAuthor','readAuthor','flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','finishLogin','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','cancelDownloads','repairVideoCover','setDownloadConcurrency','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','prepareNASRemoval','confirmNASRemoval','cancelNASRemoval','resumeNASRemoval','cancelLocalRemoval','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted'].map(k => [k, async () => { if (k === 'state' || k === 'refreshFiles') return blank; throw new Error('浏览器仅用于界面预览，请在 Windows 桌面程序中操作'); }]));
 const fmt = n => Number(n || 0).toLocaleString('zh-CN');
 const time = ms => `${Math.floor(ms / 60000).toString().padStart(2,'0')}:${Math.floor(ms / 1000 % 60).toString().padStart(2,'0')}`;
 const size = bytes => bytes > 1073741824 ? (bytes / 1073741824).toFixed(1) + ' GB' : (bytes / 1048576).toFixed(1) + ' MB';
@@ -67,6 +68,7 @@ function App() {
   const workScroll=useRef(null);
   const [deleteIntent,setDeleteIntent]=useState(null),[repairReport,setRepairReport]=useState(null),[defectReport,setDefectReport]=useState(null);
   const [coverPlan,setCoverPlan]=useState(null);
+  const [readSummary,setReadSummary]=useState(null);
   const [downloadPlan,setDownloadPlan]=useState(null);
   async function prepareDownloads(ids){const report=await api.previewDownloads(ids);setDownloadPlan({ids:[...ids],...report});setModal('downloadSelection');}
   async function submitDownloads(scope){const result=await api.download(downloadPlan.ids,{source:'douyin',scope});setSelected(new Set());setModal(null);setDownloadPlan(null);setToast(`新加入 ${result?.queued||0} 个下载任务${result?.existing?`，${result.existing} 个已在队列`:''}${result?.removed?`；已移除 ${result.removed} 个本次无需下载的旧任务`:''}`);}
@@ -144,14 +146,14 @@ function App() {
   async function beginRead(options){
     setAccountMenu(false);setStoppingRead(false);setReadLaunch({mode:options.discoverOnly?'folders':options.mode||'quick',name:options.discoverOnly?'收藏夹目录':current.name,goal:null,checked:0,added:0,stage:'preparing',startedAt:Date.now()});
     if(!options.discoverOnly)setModal(null);
-    try{const result=await api.sync(options);if(result?.collector){setData(old=>({...old,...result}));setToast(result.collector.message);}}finally{setReadLaunch(null);setStoppingRead(false);}
+    try{const result=await api.sync(options);if(result?.collector){setData(old=>({...old,...result}));if(result.readSummary&&!options.discoverOnly){setReadSummary(result.readSummary);setModal('readSummary');}else setToast(result.collector.message);}}finally{setReadLaunch(null);setStoppingRead(false);}
   }
   async function stopReading(){setStoppingRead(true);try{await api.stopSync();}catch(e){setStoppingRead(false);setToast(e.message);}}
   async function logout(pause=false){setAccountMenu(false);setLoggingOut(true);try{const result=await api.logout(pause);if(result.needsPause){setModal('logoutConfirm');return;}setData(old=>({...old,collector:result.collector,queue:result.queue,flatQueue:result.flatQueue}));setModal(null);setToast('已退出登录，本地资料和进度已保留');}finally{setLoggingOut(false);}}
 
   async function authorAction(method,input){
     setStoppingRead(false);setReadLaunch({mode:input?.readAll?'all':'partial',source:'author',name:method==='addAuthor'?'作者信息':authorSource?.name||'作者作品',goal:input?.readAll?null:input?.limit,processed:0,checked:0,added:0,stage:'preparing',startedAt:Date.now()});setModal(null);
-    try{const result=await api[method](input);if(result?.id){setAuthorSourceId(result.id);changeMode('author');}setData(await api.state());if(method==='addAuthor'&&result?.id)setModal('authorRead');}
+    try{const result=await api[method](input);if(result?.id){setAuthorSourceId(result.id);changeMode('author');}setData(await api.state());if(method==='addAuthor'&&result?.id)setModal('authorRead');if(method==='readAuthor'&&result?.readSummary){setReadSummary(result.readSummary);setModal('readSummary');}}
     finally{setReadLaunch(null);setStoppingRead(false);}
   }
   function chooseAuthor(id){changeMode('author');setAuthorSourceId(id);}
@@ -193,7 +195,7 @@ function App() {
       </>}
       <button className="downloads-nav" onClick={()=>{setDownloadTab(data.flatQueue?.batches?.length?'flat':'normal');setModal('downloads');}}><ArrowDownToLine size={18}/><span>下载管理</span>{activeJobCount>0&&<b>{activeJobCount}</b>}</button>
       <div className="storage-card"><div className="storage-title"><HardDrive size={16}/><span>本机存储</span><span className="local-dot"/></div><strong>{size(totalBytes)} <small>已保存 · {fmt(totalLocal)} 个作品</small></strong><button className="root-path" title={data.root} onClick={()=>act(()=>api.openRoot())}>{data.root}<FolderOpen size={13}/></button><button className="storage-settings" onClick={()=>setModal('settings')}>存储设置<ChevronRight size={13}/></button></div>
-      <div className="sidebar-footer"><ShieldCheck size={13}/> 本机使用 · NAS 后台备份</div>
+      <button className="sidebar-footer read-log-nav" onClick={()=>setModal('readLogs')}><ListChecks size={14}/>读取日志</button>
     </aside>
     <main className="main-content">
       <header className="topbar"><div className="breadcrumb">我的资料库 <ChevronRight size={13}/><span>{mode==='author'?'作者主页':mode==='account'?'账号收藏':mode==='backup'?'NAS 备份':'本地媒体库'}</span></div><div className="top-actions">{preview&&<span className="preview-badge">浏览器界面预览</span>}<BackupStatus storage={storage} onOpen={()=>setModal('settings')}/><VolumeControl/><button className="icon-button" aria-label="设置" onClick={()=>setModal('settings')}><Settings size={19}/></button><button className="icon-button" aria-label="使用帮助" onClick={()=>setModal('help')}><CircleHelp size={19}/></button><span className="top-divider"/><div className="account-controls"><button className="account-button" disabled={pending} aria-expanded={accountMenu} onClick={()=>data.collector.connected||data.collector.needsLogin||data.collector.logoutIncomplete?setAccountMenu(!accountMenu):setModal('login')}><span className="avatar">{data.collector.connected?(data.account?.nickname?.slice(0,1)||'抖'):<Cloud size={17}/>}</span><span>{data.collector.connected?(data.account?.nickname||'抖音已连接'):'连接抖音账号'}</span><ChevronDown size={14}/></button>{accountMenu&&<><button className="account-dismiss" aria-label="关闭账号菜单" onClick={()=>setAccountMenu(false)}/><div className="account-menu" role="menu"><strong>{data.account?.nickname||'抖音账号'}</strong><small>退出后，本地资料仍会保留</small>{!data.collector.connected&&<button role="menuitem" onClick={()=>{setAccountMenu(false);setModal('login');}}><Cloud size={16}/>登录原账号</button>}<button role="menuitem" onClick={()=>act(()=>logout())}><LogOut size={16}/>{data.collector.logoutIncomplete?'重试清理登录信息':'退出登录'}</button></div></>}</div></div></header>
@@ -245,6 +247,8 @@ function App() {
     {modal==='backupConflict'&&<Modal title="处理双方更新" onClose={()=>setModal('settings')}><div className="modal-content"><p>本机和 NAS 都有尚未合并的修改，程序已停止覆盖。</p><p>采用 NAS 资料前，会把本机记录另存为恢复副本。本机视频、图片原文件保留；活动列表将使用 NAS 的记录。</p></div><footer className="modal-footer"><button className="button secondary" disabled={pending} onClick={()=>setModal('settings')}>保持只读</button><button className="button primary" disabled={pending} onClick={()=>act(()=>storageAction(()=>api.acceptRemoteBackup()))}>保存恢复副本并采用 NAS 资料</button></footer></Modal>}
     {modal==='exitBackup'&&<Modal title="还有内容未同步" onClose={()=>setModal(null)}><div className="modal-content"><p>本机有尚未同步到 NAS 的内容。换电脑前建议等同步完成；直接退出会把待同步内容保留在这台电脑。</p></div><footer className="modal-footer"><button className="button secondary" disabled={pending} onClick={()=>act(()=>api.finishBackupExit('keep'))}>保留本机，直接退出</button><button className="button primary" disabled={pending||!storage.writable} onClick={()=>act(()=>api.finishBackupExit('sync'))}>同步完成后退出</button></footer></Modal>}
     {modal==='logoutConfirm'&&<Modal title="暂停下载并退出登录？" description="退出登录可能影响资源地址刷新和后续下载。" onClose={()=>{if(!loggingOut)setModal(null);}}><div className="modal-content"><div className="info-box"><ShieldCheck size={19}/><p>已完整保存的文件不会重复下载。<br/>可安全续传的片段会保留，重新登录原账号后可手动继续。单独下载只能在本次运行中继续。</p></div></div><footer className="modal-footer"><button className="button secondary" onClick={()=>setModal(null)}>取消</button><button className="button primary" onClick={()=>act(()=>logout(true))}>暂停任务并退出登录</button></footer></Modal>}
+    {modal==='readSummary'&&readSummary&&<Modal title="读取总结" onClose={()=>setModal(null)}><ReadSummary summary={readSummary} onClose={()=>setModal(null)} onLogs={()=>setModal('readLogs')}/></Modal>}
+    {modal==='readLogs'&&<Modal title="读取日志" wide onClose={()=>setModal(null)}><ReadHistoryPanel api={api} onClose={()=>setModal(null)} onWork={id=>act(async()=>{const work=await api.workDetail(id);if(!work){setToast('当前资料库已没有此作品记录，可以打开抖音原作品');return;}setDetailCache(old=>Object.fromEntries([...Object.entries(old).filter(([key])=>key!==id).slice(-7),[id,work]]));setModal(null);setDetailId(id);})} onOriginal={id=>act(()=>api.openOriginal(`https://www.douyin.com/video/${id}`))}/></Modal>}
     {(readLaunch||data.collector.busy)&&<Modal dismissible={false} title={`读取「${(data.collector.busy?data.collector.readProgress:readLaunch)?.name||'收藏'}」`} description="正在读取期间，请等候或使用下方的停止按钮。" onClose={()=>{}}><ReadProgress progress={data.collector.busy?data.collector.readProgress:readLaunch} onStop={stopReading} stopping={stoppingRead}/></Modal>}
     {loggingOut&&<Modal dismissible={false} title="正在退出登录" onClose={()=>{}}><div className="logout-working"><LoaderCircle size={28} className="spin"/><p>正在保存下载进度并清理登录信息…</p><small>本地资料和媒体文件会保留</small></div></Modal>}
     {toast&&<Toast message={toast} onClose={()=>setToast('')}/>}

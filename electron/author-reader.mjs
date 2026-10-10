@@ -8,10 +8,10 @@ export class AuthorReader{
     const epoch=c.cancelEpoch;await c.ready;c.assertNotCoolingDown();
     if(!(await c.isAuthenticated()))throw new Error('请先连接抖音账号，再读取作者作品');
     if(epoch!==c.cancelEpoch)throw new Error('读取已取消');
-    c.busy=true;c.cancelled=false;c.stopRequested=false;c.syncController=new AbortController();
+    c.status.readSummary=null;c.busy=true;c.cancelled=false;c.stopRequested=false;c.syncController=new AbortController();
     c.status.readProgress={mode:goal?'partial':'all',source:'author',name,goal,checked:0,processed:0,added:0,startedAt:Date.now(),stage:'preparing'};c.update('syncing',`正在读取「${name}」`,0);
     try{return await fn(c.syncController.signal);}catch(e){if(c.stopRequested&&(e.name==='AbortError'||e.message==='读取已暂停'))return {stopped:true};if(!c.cancelled)c.update('attention',e.message);throw e;}
-    finally{c.busy=false;c.syncController=null;if(c.stopRequested)c.update('idle','已停止，已提交的作者记录和进度保留');c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled});c.scheduleBrowserIdle();c.notify();}
+    finally{c.busy=false;c.syncController=null;if(c.stopRequested)c.update('idle','已停止，已提交的作者记录和进度保留');if(c.status.readSummary)try{c.status.readSummary.message=c.status.message;this.store.readHistory.write(c.status.readSummary);}catch(error){c.onDiagnostic({event:'read-history-failed',reason:error.message});}c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled});c.scheduleBrowserIdle();c.notify();}
   }
   async add(text){return this.operation('作者信息',null,async signal=>{
     const {id}=await resolveAuthorLink(text,this.fetchLink,signal);
@@ -24,7 +24,7 @@ export class AuthorReader{
     return this.operation(author.name,readAll?null:limit,async signal=>{
       const c=this.collector;let a,processed=0,added=0,limited=false;
       try{
-        a=sources.start(id,{resume});
+        a=sources.start(id,{resume,readAll});
         for(let page=0;page<10000;page++){
           signal.throwIfAborted();if(c.cancelled)throw new Error('读取已暂停');
           const cursor=a.run.nextCursor;
@@ -42,8 +42,9 @@ export class AuthorReader{
           await c.delay();
         }
         signal.throwIfAborted();const message=`「${a.name}」${a.run.status==='complete'?'已到达当前可访问列表末尾':limited?'本次读取完成':'已暂停'} · 本次读取 ${processed} 条，新增 ${added} 条`;
-        sources.pause(a,message);c.update('done',message,a.run.count);return {id,processed,added,complete:a.run.status==='complete'};
-      }catch(e){if(a)sources.pause(a,c.cancelled?'读取已暂停':e.message);throw e;}
+        sources.pause(a,message,limited?'limit':'paused');c.update('done',message,a.run.count);return {id,processed,added,complete:a.run.status==='complete'};
+      }catch(e){if(a)sources.pause(a,c.cancelled?'读取已暂停':e.message,c.cancelled?'paused':'error');throw e;}
+      finally{if(a)try{c.status.readSummary={...sources.summary(a),message:c.status.message};this.store.readHistory.write(c.status.readSummary);}catch(error){c.onDiagnostic({event:'read-history-failed',reason:error.message});}}
     });
   }
 }

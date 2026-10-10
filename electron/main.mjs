@@ -66,15 +66,15 @@ function ids(value) {
 }
 function handler(name, action) {
   ipcMain.handle('cangxia:' + name, async (event, ...args) => {
-    const guarded=!['repairPage','cancelRepairs','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
+    const guarded=!['readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
-      if(backup?.applying&&!['repairPage','cancelRepairs','state','stateChunk','startupReady','cancelBackup','cancelFileCheck'].includes(name))throw Error('正在应用 NAS 记录，请等待当前批次完成');
-      if(repairChecks?.running&&!['state','stateChunk','startupReady','cancelRepairs','repairPage','cancelFileCheck','downloadPage','workDetail','filterWorks','reportCoverStatus'].includes(name))throw Error('正在检查本地文件，请先停止检查');
-      if(localRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
-      if(nasRemoval?.running&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
-      if((readLocked()||loggingOut)&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
-      if(backupBusy&&!['state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
+      if(backup?.applying&&!['readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','startupReady','cancelBackup','cancelFileCheck'].includes(name))throw Error('正在应用 NAS 记录，请等待当前批次完成');
+      if(repairChecks?.running&&!['readHistoryRuns','readHistoryItems','state','stateChunk','startupReady','cancelRepairs','repairPage','cancelFileCheck','downloadPage','workDetail','filterWorks','reportCoverStatus'].includes(name))throw Error('正在检查本地文件，请先停止检查');
+      if(localRemoval?.running&&!['readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if(nasRemoval?.running&&!['readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
+      if((readLocked()||loggingOut)&&!['readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
+      if(backupBusy&&!['readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
       if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
       return { ok: true, data: await action(...args) };
@@ -270,7 +270,7 @@ try {
   });
   handler('sync', async(options = {}) => {
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
-    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
+    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),readSummary:options.discoverOnly?null:collector.status.readSummary,...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
   });
   handler('confirmCollectionRead',options=>foregroundRead(async()=>{if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=await store.reconcilePending();notify();if(errors.length)throw Error(errors.join('；'));return true;}));
   handler('resumeReconcile',()=>foregroundRead(async()=>{
@@ -282,7 +282,7 @@ try {
   handler('stopWorkCreators',id=>{if(!/^\d+$/.test(id))throw Error('作品标识无效');return creatorDetails.cancel(id);});
   handler('refreshWorkCreators',async(id,options={})=>{if(!/^\d+$/.test(id)||!options||typeof options!=='object'||(options.force!==undefined&&typeof options.force!=='boolean'))throw Error('作者信息请求无效');return foregroundRead(()=>creatorDetails.refresh(id,options));});
   handler('addAuthor',async text=>foregroundRead(()=>authorReader.add(text)));
-  handler('readAuthor',async options=>{if(!options||typeof options!=='object')throw new Error('作者读取选项无效');return foregroundRead(()=>authorReader.read(options));});
+  handler('readAuthor',async options=>{if(!options||typeof options!=='object')throw new Error('作者读取选项无效');return foregroundRead(async()=>{const result=await authorReader.read(options);return {...result,readSummary:collector.status.readSummary};});});
   handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});
   handler('clearCompleted', selected => {queue.clearCompleted(selected===null?null:ids(selected));return true;});
   handler('downloadPage', options=>queue.taskRows.page(options));
@@ -290,6 +290,9 @@ try {
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
   handler('previewDownloads',selected=>planDownloads(store,queue,ids(selected)).report);
+  handler('readHistoryRuns',options=>store.readHistory.runs(options));
+  handler('readHistoryItems',(token,options)=>store.readHistory.items(token,options));
+  handler('clearReadHistory',()=>{if(readLocked())throw Error('请先停止当前读取再清理日志');return store.readHistory.clear();});
   handler('download', async(selected,options={}) => {
     if(!options||typeof options!=='object'||(options.source!==undefined&&!['douyin','nas'].includes(options.source)))throw Error('下载来源无效');const source=options.source||'douyin',requested=ids(selected);
     if(collector.busy||(collector.waiters.size&&!queue.running)||flatQueue.running)throw Error('请等待读取完成或暂停单独下载后再下载');

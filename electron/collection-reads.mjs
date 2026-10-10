@@ -1,16 +1,17 @@
 import {randomUUID} from 'node:crypto';
 import {TOTAL} from './model.mjs';
+import {ReadHistory,mergeReadOrder} from './read-history.mjs';
 
 const terminal=new Set(['matched','end','end-stale','review']);
 const messageOf={matched:'新增检查完成；历史收藏未全量核对',end:'当前可访问列表已到末页','end-stale':'已读到末页；期间有其他读取更新，已保留最新顺序，请从头核对',limit:'达到本段检查上限，可继续检查',review:'本次返回数量明显减少，旧记录保留，请核对后确认',paused:'已停止，读取内容和进度保留',error:'读取未完整结束'};
 export class CollectionReads{
-  constructor(store){this.store=store;this.baselines=new Map();}
+  constructor(store){this.store=store;this.baselines=new Map();this.history=store.readHistory=new ReadHistory(store);}
   init(){this.store.db.run(`CREATE TABLE IF NOT EXISTS collection_read_runs(id TEXT PRIMARY KEY,body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS collection_read_baselines(id TEXT PRIMARY KEY,body TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS collection_read_items(run_key TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(run_key,work_id));
     CREATE INDEX IF NOT EXISTS collection_read_items_order ON collection_read_items(run_key,position);
     CREATE TABLE IF NOT EXISTS collection_read_refs(run_key TEXT,kind TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(run_key,kind,work_id));
-    CREATE TABLE IF NOT EXISTS collection_read_pages(run_key TEXT,cursor TEXT,PRIMARY KEY(run_key,cursor));`);}
+    CREATE TABLE IF NOT EXISTS collection_read_pages(run_key TEXT,cursor TEXT,PRIMARY KEY(run_key,cursor));`);this.history.init();}
   key(scope,mode){if((scope!==TOTAL&&!/^\d{1,32}$/.test(scope))||!['quick','full'].includes(mode))throw Error('收藏读取范围无效');return mode+':'+scope;}
   account(){return this.store.getSetting('browserAccountKey')||null;}
   revision(){return Number(this.store.getSetting('collectionMembershipRevision')||0);}
@@ -41,14 +42,14 @@ export class CollectionReads{
     this.importLegacy(scope);
     let previous=this.get(scope,mode);
     if(resume&&!previous&&mode==='full')previous=this.adoptLegacy(scope);
-    if(resume){if(!previous||terminal.has(previous.outcome)||previous.nextCursor===null||previous.accountKey!==this.account())throw Error('没有可继续的对应读取进度，请从头开始');const run=this.runtime(previous);if(run.publishedRevision!==this.revision())run.conflicted=true;run.status='running';run.outcome=null;run.reason='';run.resumed=true;this.write(run);return run;}
+    if(resume){if(!previous||terminal.has(previous.outcome)||previous.nextCursor===null||previous.accountKey!==this.account())throw Error('没有可继续的对应读取进度，请从头开始');const run=this.runtime(previous);if(run.publishedRevision!==this.revision())run.conflicted=true;this.classifySaved(run);run.status='running';run.outcome=null;run.reason='';run.resumed=true;this.write(run);this.history.write(this.summary(run));return run;}
     const members=this.membership(scope),base=this.baseline(scope);
     this.store.db.run('BEGIN');try{
       for(const table of ['collection_read_items','collection_read_refs','collection_read_pages'])this.store.db.run(`DELETE FROM ${table} WHERE run_key=?`,[key]);
       members.forEach((r,i)=>this.store.db.run('INSERT INTO collection_read_refs VALUES(?,?,?,?)',[key,'member',r.work_id,i]));
       (base?.anchorIds||[]).forEach((id,i)=>this.store.db.run('INSERT INTO collection_read_refs VALUES(?,?,?,?)',[key,'anchor',id,i]));
-      const run={key,scope,mode,token:randomUUID(),accountKey:this.account(),status:'running',nextCursor:'0',count:0,rawCount:0,pages:0,added:0,restored:0,oldCount:members.length,publishedRevision:this.revision(),conflicted:false,resumed:false,baselineKnown:!!base,streak:0,streakPages:0,lastAnchor:null,lastStreakCursor:null,repeatedPages:0,outcome:null,startedAt:new Date().toISOString()};
-      this.write(run);this.store.db.run('COMMIT');return this.runtime(run);
+      const run={key,scope,mode,token:randomUUID(),accountKey:this.account(),status:'running',nextCursor:'0',count:0,rawCount:0,pages:0,added:0,restored:0,oldCount:members.length,publishedRevision:this.revision(),conflicted:false,resumed:false,baselineKnown:!!base,streak:0,streakPages:0,lastAnchor:null,lastStreakCursor:null,repeatedPages:0,outcome:null,startedAt:new Date().toISOString(),historyVersion:1,frontAdded:0,filled:0,reappeared:0,initialAdded:0,historicalSeen:false,lastHistoricalId:null};
+      this.write(run);this.history.write(this.summary(run));this.store.db.run('COMMIT');return this.runtime(run);
     }catch(e){this.store.db.run('ROLLBACK');throw e;}
   }
   adoptLegacy(scope){
@@ -60,6 +61,11 @@ export class CollectionReads{
     }catch(e){this.store.db.run('ROLLBACK');throw e;}
   }
   seen(run,cursor){return this.store.rows('SELECT 1 FROM collection_read_pages WHERE run_key=? AND cursor=?',[run.key,cursor]).length>0;}
+  classify(run,id,work,position){
+    if(run.reference.has(id)){if(run.baselineKnown&&!run.anchors.has(id)){run.filled++;run.reappeared++;this.history.entry(run,work,'fill',position);}run.historicalSeen=true;run.lastHistoricalId=id;}
+    else if(!run.oldCount)run.initialAdded++;else{const kind=run.historicalSeen?'fill':'front';run[kind==='fill'?'filled':'frontAdded']++;this.history.entry(run,work,kind,position);}
+  }
+  classifySaved(run){run.historyVersion=1;run.frontAdded=0;run.filled=0;run.reappeared=0;run.initialAdded=0;run.historicalSeen=false;run.lastHistoricalId=null;let position=0;for(const id of this.ids(run)){const detail=!run.reference.has(id)||run.baselineKnown&&!run.anchors.has(id),work=detail?(this.store.lightViews.ready?this.store.lightViews.bases.get(id):this.store.work(id)):{id};this.classify(run,id,work||{id},position++);}}
   apply(run,result,{signal}={}){
     signal?.throwIfAborted();if(run.accountKey!==this.account())throw Error('账号信息发生变化，本页未写入');
     if(!Array.isArray(result.items)||result.items.length>1000)throw Error('本页作品数量或结构异常，已保留记录');
@@ -69,8 +75,8 @@ export class CollectionReads{
     this.store.db.run('BEGIN');try{
       for(const raw of result.items){
         signal?.throwIfAborted();const id=String(raw.aweme_id||raw.awemeId||'');if(!/^\d{1,32}$/.test(id))throw Error('作品标识无效，本页未写入');
-        const old=this.store.work(id),duplicate=ids.has(id);this.store.upsertWork(raw);if(old?.readHidden)this.store.put('works',id,{...this.store.work(id),readHidden:false});
-        if(!duplicate){this.store.db.run('INSERT INTO collection_read_items VALUES(?,?,?)',[run.key,id,run.count++]);ids.add(id);inserted.push(id);unique++;if(!reference.has(id))run.added++;else if(old?.readHidden)run.restored++;}
+        const old=this.store.work(id),duplicate=ids.has(id),work=this.store.upsertWork(raw);if(old?.readHidden)this.store.put('works',id,{...this.store.work(id),readHidden:false});
+        if(!duplicate){const position=run.count;this.store.db.run('INSERT INTO collection_read_items VALUES(?,?,?)',[run.key,id,run.count++]);ids.add(id);inserted.push(id);unique++;if(!reference.has(id))run.added++;else if(old?.readHidden)run.restored++;if(run.historyVersion)this.classify(run,id,work,position);}
         const position=anchors.get(id);
         if(duplicate||position===undefined){run.streak=0;run.streakPages=0;run.lastAnchor=null;run.lastStreakCursor=null;}
         else{if(run.lastAnchor!==null&&position===run.lastAnchor+1){run.streak++;if(run.lastStreakCursor!==cursor)run.streakPages++;}else{run.streak=1;run.streakPages=1;}run.lastAnchor=position;run.lastStreakCursor=cursor;}
@@ -79,7 +85,7 @@ export class CollectionReads{
       this.store.db.run('INSERT INTO collection_read_pages VALUES(?,?)',[run.key,cursor]);
       const next=result.next;run.nextCursor=typeof next==='string'&&/^\d{1,32}$/.test(next)&&!result.unknown?next:null;
       let outcome=null;
-      if(result.complete){run.nextCursor=null;const removed=run.oldCount-run.count;const suspicious=(run.oldCount>0&&run.count===0)||(run.oldCount>=20&&run.count<run.oldCount/2)||removed>=1000;outcome=suspicious?'review':run.conflicted?'end-stale':'end';}
+      if(result.complete){run.nextCursor=null;const removed=run.oldCount-run.count;run.returnWarning=(run.oldCount>0&&run.count===0)||(run.oldCount>=20&&run.count<run.oldCount/2)||removed>=1000;outcome=run.conflicted?'end-stale':'end';}
       else if(result.unknown||run.nextCursor===null)throw Object.assign(Error('平台未提供明确分页信息，本页未写入，已有记录保留'),{incomplete:true});
       else if(run.nextCursor===cursor||this.seen(run,run.nextCursor))throw Error('平台返回重复翻页位置，本页未写入，请从头核对');
       else if(run.repeatedPages>=3)throw Error('连续页面没有新的有效作品，已停止重复请求');
@@ -96,11 +102,13 @@ export class CollectionReads{
       if(outcome==='end'&&run.conflicted)outcome='end-stale';
       let ids=this.ids(run);const full=outcome==='end';
       if(run.conflicted){const current=this.membership(run.scope).map(r=>r.work_id),known=new Set(current);ids=[...current,...ids.filter(id=>!known.has(id)&&!run.reference.has(id)&&(run.scope===TOTAL||!this.store.rows('SELECT 1 FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?',[id,TOTAL,run.scope]).length))];}
+      const previousRows=this.membership(run.scope);if(full)ids=mergeReadOrder(previousRows.map(r=>r.work_id),ids);
       this.store.ingestMembers(run.scope,ids,full,{unhide:false,preserveOther:run.conflicted});
+      if(full)for(const row of previousRows)if(row.rank===null&&!run.ids.has(row.work_id))this.store.db.run('UPDATE members SET rank=NULL WHERE collection_id=? AND work_id=?',[run.scope,row.work_id]);
       run.publishedRevision=this.revision();run.status=outcome==='review'?'review':terminal.has(outcome)?'complete':'paused';run.outcome=outcome;run.reason=reason||messageOf[outcome];
-      if(full){const ordered=this.ids(run);this.setBaseline(run.scope,{accountKey:run.accountKey,fullIds:ordered,fullAt:new Date().toISOString(),anchorIds:ordered,anchorAt:new Date().toISOString()});}
+      if(full&&!run.returnWarning){const ordered=this.ids(run);this.setBaseline(run.scope,{accountKey:run.accountKey,fullIds:ordered,fullAt:new Date().toISOString(),anchorIds:ordered,anchorAt:new Date().toISOString()});}
       else if(outcome==='matched'&&!run.conflicted){const base=this.baseline(run.scope);if(base){const scanned=this.ids(run),seen=new Set(scanned),tail=[...run.anchors].filter(([,p])=>p>run.lastAnchor).sort((a,b)=>a[1]-b[1]).map(([id])=>id);this.setBaseline(run.scope,{...base,anchorIds:[...scanned,...tail.filter(id=>!seen.has(id))],anchorAt:new Date().toISOString()});}}
-      this.write(run);this.store.db.run('COMMIT');
+      this.write(run);this.history.write(this.summary(run));this.store.db.run('COMMIT');
     }catch(e){this.store.db.run('ROLLBACK');Object.assign(run,before);this.baselines.delete(run.scope);this.store.invalidateViews();throw e;}
   }
   confirm(scope,mode,token){
@@ -110,9 +118,10 @@ export class CollectionReads{
   order(scope,rows){
     const run=['quick','full'].map(mode=>this.get(scope,mode)).find(r=>r?.status==='running');if(!run)return rows;
     const ids=this.ids(run),seen=new Set(ids);if(run.conflicted){const present=new Set(rows.map(r=>r.work_id));return [...rows,...ids.filter(id=>!present.has(id)).map((work_id,i)=>({work_id,rank:rows.length+i}))];}
-    return [...ids.map((work_id,rank)=>({work_id,rank})),...rows.filter(r=>!seen.has(r.work_id))];
+    const pending=new Set(rows.filter(r=>r.rank===null).map(r=>r.work_id));return mergeReadOrder(rows.map(r=>r.work_id),ids).map((work_id,rank)=>({work_id,rank:!seen.has(work_id)&&pending.has(work_id)?null:rank}));
   }
-  view(run){if(!run)return null;return {mode:run.mode,token:run.token,baselineKnown:!!run.baselineKnown,count:run.count,pages:run.pages,added:run.added,restored:run.restored,status:run.status,outcome:run.outcome,reason:run.mode==='quick'&&run.outcome==='limit'?'旧版检查已暂停，可以继续检查':run.reason,oldCount:run.oldCount,canResume:run.status==='paused'&&run.nextCursor!==null&&run.accountKey===this.account(),canConfirm:run.status==='review'&&!run.conflicted&&run.accountKey===this.account()&&run.publishedRevision===this.revision()};}
+  summary(run){const ended=['end','end-stale','review'].includes(run.outcome),known=run.count-run.added;return {token:run.token,scope:run.scope,name:this.store.collection(run.scope)?.name||'收藏',mode:run.mode,status:run.status,outcome:run.outcome,reason:run.reason||'',startedAt:run.startedAt,finishedAt:run.updatedAt||null,checked:run.count,rawCount:run.rawCount,pages:run.pages,added:run.added,frontAdded:run.historyVersion?run.frontAdded:null,filled:run.historyVersion?run.filled:null,reappeared:run.reappeared||0,initialAdded:run.historyVersion?run.initialAdded:null,existing:known-(run.reappeared||0),restored:run.restored,notReturned:ended?Math.max(0,run.oldCount-known):null,historyCount:this.store.rows('SELECT COUNT(*) n FROM members WHERE collection_id=?',[run.scope])[0].n,hasPrevious:run.oldCount>0,warning:!!run.returnWarning,legacy:!run.historyVersion};}
+  view(run){if(!run)return null;return {...this.summary(run),count:run.count,baselineKnown:!!run.baselineKnown,reason:run.mode==='quick'&&run.outcome==='limit'?'旧版检查已暂停，可以继续检查':run.reason,oldCount:run.oldCount,canResume:run.status==='paused'&&run.nextCursor!==null&&run.accountKey===this.account(),canConfirm:false};}
   info(scope){const b=this.baseline(scope);let full=this.view(this.get(scope,'full'));if(!full){const old=this.store.sync.get(scope);if(old&&old.status!=='complete')full={mode:'full',legacy:true,count:old.count,pages:old.pages,status:'paused',reason:old.reason,canResume:old.nextCursor!==null&&old.accountKey===this.account()};}return {baselineKnown:!!b,fullAt:b?.fullAt||null,quick:this.view(this.get(scope,'quick')),full};}
   snapshot(){return Object.fromEntries(this.store.all('collections').filter(c=>c.added).map(c=>[c.id,this.info(c.id)]));}
   list(){return this.store.all('collection_read_runs').filter(r=>r.status!=='complete').map(r=>({...this.view(r),collectionId:r.scope,name:this.store.collection(r.scope)?.name||'收藏'}));}

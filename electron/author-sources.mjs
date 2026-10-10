@@ -1,5 +1,6 @@
 import {normalizeCreator,sameCreator,workCreators} from '../shared/creators.mjs';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
+import {mergeReadOrder} from './read-history.mjs';
 import {safeName,parseWork,isMediaURL} from './model.mjs';
 
 export function authorId(value){
@@ -39,9 +40,11 @@ export class AuthorSources{
       CREATE TABLE IF NOT EXISTS author_members(author_id TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(author_id,work_id));
       CREATE INDEX IF NOT EXISTS author_members_order ON author_members(author_id,position);
       CREATE TABLE IF NOT EXISTS author_scan(author_id TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(author_id,work_id));
-      CREATE TABLE IF NOT EXISTS author_pages(author_id TEXT,cursor TEXT,PRIMARY KEY(author_id,cursor));`);
+      CREATE TABLE IF NOT EXISTS author_pages(author_id TEXT,cursor TEXT,PRIMARY KEY(author_id,cursor));
+      CREATE TABLE IF NOT EXISTS author_read_refs(author_id TEXT,kind TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(author_id,kind,work_id));
+      CREATE TABLE IF NOT EXISTS author_last_seen(author_id TEXT,work_id TEXT,position INTEGER,PRIMARY KEY(author_id,work_id));`);
     const migrated=!this.store.rows('PRAGMA table_info(author_members)').some(c=>c.name==='hidden');if(migrated)this.store.db.run('ALTER TABLE author_members ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
-    this.store.db.run('BEGIN');try{for(const a of this.store.all('authors')){if(this.store.rows('SELECT 1 FROM author_scan s LEFT JOIN author_members m ON m.author_id=s.author_id AND m.work_id=s.work_id WHERE s.author_id=? AND (m.work_id IS NULL OR m.position<>s.position) LIMIT 1',[a.id]).length)this.publish(a.id);if(a.run?.status==='running'){a.run.status='paused';a.run.reason='上次读取未正常结束，已保留进度';this.save(a);}}if(migrated)for(const w of this.store.all('works'))if(w.readHidden)this.store.db.run('UPDATE author_members SET hidden=1 WHERE work_id=?',[w.id]);this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');throw e;}
+    this.store.db.run('BEGIN');try{for(const a of this.store.all('authors')){if(this.store.rows('SELECT 1 FROM author_scan s LEFT JOIN author_members m ON m.author_id=s.author_id AND m.work_id=s.work_id WHERE s.author_id=? AND (m.work_id IS NULL OR m.position<>s.position) LIMIT 1',[a.id]).length)this.publish(a.id);if(a.run?.status==='running'){a.run.status='paused';a.run.reason='上次读取未正常结束，已保留进度';a.run.historyRecovered=true;this.save(a);}}if(migrated)for(const w of this.store.all('works'))if(w.readHidden)this.store.db.run('UPDATE author_members SET hidden=1 WHERE work_id=?',[w.id]);this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');throw e;}
   }
   get(id){return this.store.get('authors',authorId(id));}
   save(a){this.store.put('authors',a.id,a);this.store.save();}
@@ -54,39 +57,43 @@ export class AuthorSources{
     this.store.rememberCreator(u);this.save(a);return a;
   }
   ids(id,table='author_members'){if(!['author_members','author_scan'].includes(table))throw new Error('无效作者列表');return this.store.rows(`SELECT work_id FROM ${table} WHERE author_id=? ORDER BY position`,[id]).map(r=>r.work_id);}
-  order(id){const scan=this.ids(id,'author_scan'),seen=new Set(scan);return [...scan,...this.ids(id).filter(x=>!seen.has(x))];}
+  order(id){return mergeReadOrder(this.ids(id),this.ids(id,'author_scan'));}
   publish(id){const hidden=new Map(this.store.rows('SELECT work_id,hidden FROM author_members WHERE author_id=?',[id]).map(r=>[r.work_id,r.hidden]));const ordered=this.order(id);this.store.db.run('DELETE FROM author_members WHERE author_id=?',[id]);ordered.forEach((wid,i)=>this.store.db.run('INSERT INTO author_members VALUES(?,?,?,?)',[id,wid,i,hidden.get(wid)||0]));}
   hide(id,ids){authorId(id);this.store.db.run('BEGIN');try{for(const wid of ids)this.store.db.run('UPDATE author_members SET hidden=1 WHERE author_id=? AND work_id=?',[id,wid]);this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');throw e;}this.store.save();}
   archive(id){const a=this.get(id);if(!a)throw Error('作者不存在');a.archived=true;this.save(a);}
-  start(id,{resume=false}={}){
+  start(id,{resume=false,readAll=false}={}){
     const a=this.get(id);if(!a)throw new Error('请先添加作者');const accountKey=this.store.getSetting('browserAccountKey');
-    if(resume){if(!a.run||a.run.status==='complete'||a.run.nextCursor===null||a.run.accountKey!==accountKey)throw new Error('当前进度无法续读，请从头读取，已有记录保留');a.run.status='running';a.run.reason='';a.run.resumed=true;this.save(a);return a;}
-    this.store.db.run('BEGIN');try{this.publish(id);this.store.db.run('DELETE FROM author_scan WHERE author_id=?',[id]);this.store.db.run('DELETE FROM author_pages WHERE author_id=?',[id]);a.run={status:'running',nextCursor:'0',count:0,pages:0,accountKey,resumed:false,reason:''};this.save(a);this.store.db.run('COMMIT');return a;}catch(e){this.store.db.run('ROLLBACK');throw e;}
+    if(resume){if(!a.run||a.run.status==='complete'||a.run.nextCursor===null||a.run.accountKey!==accountKey)throw new Error('当前进度无法续读，请从头读取，已有记录保留');if(!a.run.historyVersion)this.historyStart(a,true,readAll);this.attachHistory(a);a.run.status='running';a.run.reason='';a.run.resumed=true;a.run.mode=readAll?'full':'partial';this.save(a);this.store.readHistory.write(this.summary(a));return a;}
+    this.store.db.run('BEGIN');try{this.publish(id);this.store.db.run('DELETE FROM author_scan WHERE author_id=?',[id]);this.store.db.run('DELETE FROM author_pages WHERE author_id=?',[id]);a.run={status:'running',nextCursor:'0',count:0,pages:0,accountKey,resumed:false,reason:''};this.historyStart(a,false,readAll);this.save(a);this.store.readHistory.write(this.summary(a));this.store.db.run('COMMIT');this.attachHistory(a);return a;}catch(e){this.store.db.run('ROLLBACK');throw e;}
   }
+  historyStart(a,legacy,readAll){const previous=this.ids(a.id),seen=this.store.rows('SELECT work_id FROM author_last_seen WHERE author_id=? ORDER BY position',[a.id]).map(r=>r.work_id);this.store.db.run('DELETE FROM author_read_refs WHERE author_id=?',[a.id]);for(const [kind,ids]of [['member',previous],['anchor',seen.length?seen:previous]])ids.forEach((id,i)=>this.store.db.run('INSERT INTO author_read_refs VALUES(?,?,?,?)',[a.id,kind,id,i]));Object.assign(a.run,{token:a.run.token||randomUUID(),historyVersion:1,startedAt:a.run.startedAt||new Date().toISOString(),mode:readAll?'full':'partial',oldCount:previous.length,added:0,frontAdded:0,filled:0,reappeared:0,initialAdded:0,rawCount:a.run.count||0,historicalSeen:legacy&&a.run.count>0,lastHistoricalId:null,restored:0});}
+  attachHistory(a){const ref=this.store.rows('SELECT kind,work_id,position FROM author_read_refs WHERE author_id=?',[a.id]);Object.defineProperty(a,'_history',{configurable:true,value:{reference:new Map(ref.filter(r=>r.kind==='member').map(r=>[r.work_id,r.position])),anchors:new Set(ref.filter(r=>r.kind==='anchor').map(r=>r.work_id)),seen:new Set(this.ids(a.id,'author_scan'))}});}
+  historyItem(a,w,position){const r=a.run,h=a._history;if(h.reference.has(w.id)){if(!h.anchors.has(w.id)){r.filled++;r.reappeared++;this.store.readHistory.entry({...r,reference:h.reference},w,'fill',position);}r.historicalSeen=true;r.lastHistoricalId=w.id;}else{r.added++;if(!r.oldCount)r.initialAdded++;else{const kind=r.historicalSeen?'fill':'front';r[kind==='fill'?'filled':'frontAdded']++;this.store.readHistory.entry({...r,reference:h.reference},w,kind,position);}}}
+  summary(a){const r=a.run,known=(r.count||0)-(r.added||0);return {token:r.token,source:'author',scope:'author:'+a.id,name:a.name,mode:r.mode||'full',status:r.status,outcome:r.status==='complete'?'end':r.outcome||'paused',startedAt:r.startedAt||a.updatedAt,finishedAt:a.updatedAt,reason:r.reason||'',checked:r.count||0,rawCount:r.rawCount??r.count,pages:r.pages,added:r.added||0,frontAdded:r.historyVersion?r.frontAdded:null,filled:r.historyVersion?r.filled:null,reappeared:r.reappeared||0,initialAdded:r.historyVersion?r.initialAdded:null,existing:known-(r.reappeared||0),restored:r.restored||0,notReturned:r.status==='complete'?Math.max(0,(r.oldCount||0)-known):null,historyCount:this.store.rows('SELECT COUNT(*) n FROM author_members WHERE author_id=?',[a.id])[0].n,hasPrevious:(r.oldCount||0)>0,warning:!!r.returnWarning,legacy:!r.historyVersion};}
   seen(id,cursor){return this.store.rows('SELECT 1 FROM author_pages WHERE author_id=? AND cursor=?',[id,cursor]).length>0;}
   apply(a,result,{limit=Infinity,signal}={}){
-    const before=structuredClone(a),run=a.run,cursor=run.nextCursor;let taken=0,added=0,consumed=0;
+    const before=structuredClone(a),run=a.run,cursor=run.nextCursor;let taken=0,added=0,consumed=0;const inserted=[];if(!a._history)this.attachHistory(a);
     this.store.db.run('BEGIN');try{
       for(const raw of result.items){
         signal?.throwIfAborted();const w=parseWork(raw);
         if(!w||!workCreators(w).some(person=>sameCreator(person,{uid:a.uid,secUid:a.id})))throw new Error('列表含有无法核实作者的作品，本页未写入');
         const duplicate=this.store.rows('SELECT 1 FROM author_scan WHERE author_id=? AND work_id=?',[a.id,w.id]).length>0;
         if(!duplicate&&taken>=limit)break;
-        const known=this.store.rows('SELECT 1 FROM author_members WHERE author_id=? AND work_id=?',[a.id,w.id]).length>0;
-        this.store.upsertWork(raw);
+        const known=this.store.rows('SELECT hidden FROM author_members WHERE author_id=? AND work_id=?',[a.id,w.id])[0];
+        const saved=this.store.upsertWork(raw);
         this.store.db.run('UPDATE author_members SET hidden=0 WHERE author_id=? AND work_id=?',[a.id,w.id]);
-        if(!duplicate){this.store.db.run('INSERT INTO author_scan VALUES(?,?,?)',[a.id,w.id,run.count++]);taken++;if(!known)added++;}
+        if(!duplicate){const position=run.count;this.store.db.run('INSERT INTO author_scan VALUES(?,?,?)',[a.id,w.id,run.count++]);taken++;if(!known)added++;if(known?.hidden)run.restored++;if(run.historyVersion)this.historyItem(a,saved,position);a._history.seen.add(w.id);inserted.push(w.id);}
         consumed++;
       }
-      const entire=consumed===result.items.length;run.pages++;
+      const entire=consumed===result.items.length;run.pages++;run.rawCount=(run.rawCount||0)+consumed;
       if(entire)this.store.db.run('INSERT OR IGNORE INTO author_pages VALUES(?,?)',[a.id,cursor]);
       run.nextCursor=entire?result.next:cursor;
       const complete=entire&&result.complete;
-      if(complete){run.status='complete';run.nextCursor=null;this.publish(a.id);this.store.db.run('DELETE FROM author_scan WHERE author_id=?',[a.id]);this.store.db.run('DELETE FROM author_pages WHERE author_id=?',[a.id]);}
-      if(!complete)this.publish(a.id);a.updatedAt=new Date().toISOString();this.save(a);this.store.db.run('COMMIT');return {taken,added,complete};
-    }catch(e){this.store.db.run('ROLLBACK');Object.assign(a,before);this.store.invalidateViews();throw e;}
+      if(complete){run.status='complete';run.nextCursor=null;run.returnWarning=(run.oldCount>0&&run.count===0)||(run.oldCount>=20&&run.count<run.oldCount/2)||run.oldCount-run.count>=1000;this.publish(a.id);if(!run.returnWarning){this.store.db.run('DELETE FROM author_last_seen WHERE author_id=?',[a.id]);this.ids(a.id,'author_scan').forEach((id,i)=>this.store.db.run('INSERT INTO author_last_seen VALUES(?,?,?)',[a.id,id,i]));}this.store.db.run('DELETE FROM author_scan WHERE author_id=?',[a.id]);this.store.db.run('DELETE FROM author_pages WHERE author_id=?',[a.id]);}
+      if(!complete)this.publish(a.id);a.updatedAt=new Date().toISOString();this.save(a);if(complete)this.store.readHistory.write(this.summary(a));this.store.db.run('COMMIT');return {taken,added,complete};
+    }catch(e){this.store.db.run('ROLLBACK');for(const id of inserted)a._history.seen.delete(id);Object.assign(a,before);this.store.invalidateViews();throw e;}
   }
-  pause(a,reason){if(a.run.status!=='complete'){a.run.status='paused';a.run.reason=reason;this.save(a);}}
+  pause(a,reason,outcome='paused'){if(a.run.status!=='complete'){a.run.status='paused';a.run.reason=reason;a.run.outcome=outcome;a.updatedAt=new Date().toISOString();this.save(a);if(this.store.readHistory)this.store.readHistory.write(this.summary(a));}}
   destination(workId){const row=this.store.rows('SELECT author_id FROM author_members WHERE work_id=? UNION SELECT author_id FROM author_scan WHERE work_id=? ORDER BY author_id LIMIT 1',[workId,workId])[0];if(!row)return null;return this.collection('author:'+row.author_id);}
   collection(id){if(typeof id!=='string'||!id.startsWith('author:'))return null;const a=this.get(id.slice(7));return a?{id,name:a.name,folder:a.folder,source:'author',added:true}:null;}
   snapshot(backups=new Map(this.store.all('backup_downloads').map(d=>[d.id,d]))){
