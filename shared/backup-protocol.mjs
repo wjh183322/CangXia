@@ -1,5 +1,7 @@
 import {createHash} from 'node:crypto';
+import {validateAudioBackup} from './music.mjs';
 export const PROTOCOL=2;
+export const BACKUP_SCHEMA=3;
 export const TABLES=new Set(['works','collections','members','authors','author_members','local_tags','settings','downloads']);
 export const SHARED_SETTINGS=new Set(['account','browserAccountKey','readLimit']);
 export const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -31,6 +33,7 @@ export function validateEntry(entry){
  }
  if(table==='author_members'&&(!validAuthor(body.authorId)||!validId(body.workId)||key!==body.authorId+':'+body.workId||!Number.isSafeInteger(body.position)||body.position<0||typeof body.hidden!=='boolean'))throw Error('作者作品顺序无效');
  if(table==='downloads'){
+  if(body.audio!==undefined)validateAudioBackup(body.audio);
   if(body.collectionId!==undefined&&!validSource(body.collectionId))throw Error('下载来源无效');
   if(body.home!==undefined&&(!validHome(body.home)||body.collectionId!==(body.home.kind==='author'?'author:':'')+body.home.id))throw Error('下载目录归属无效');
   if(!Array.isArray(body.assets)||body.assets.length>1000||'path' in body)throw new Error('备份文件清单无效');

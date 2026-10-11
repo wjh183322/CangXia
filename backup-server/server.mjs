@@ -1,6 +1,6 @@
 import {createBackupActions} from './backup-actions.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import http from 'node:http';import https from 'node:https';import {randomUUID,randomBytes,timingSafeEqual,createHash} from 'node:crypto';import {gzipSync,gunzipSync} from 'node:zlib';import {DatabaseSync} from 'node:sqlite';import {pipeline} from 'node:stream/promises';
-import {PROTOCOL,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
+import {PROTOCOL,BACKUP_SCHEMA,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
 import {openBackupDatabase} from './database.mjs';
 
 const MAX_JSON=32*1024*1024,MAX_CHUNK=4*1024*1024;
@@ -22,10 +22,11 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const columns=db.prepare('PRAGMA table_info(commits)').all().map(c=>c.name);if(!columns.includes('request'))db.exec('ALTER TABLE commits ADD COLUMN request TEXT;');if(!columns.includes('requestHash'))db.exec('ALTER TABLE commits ADD COLUMN requestHash TEXT;');db.exec('CREATE UNIQUE INDEX IF NOT EXISTS commits_request ON commits(request) WHERE request IS NOT NULL');
  const get=key=>{const r=db.prepare('SELECT value FROM meta WHERE key=?').get(key);return r?JSON.parse(r.value):null;},set=(key,value)=>db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(key,JSON.stringify(value));
  if(!get('libraryId')){set('libraryId',randomUUID());set('revision',0);}
- set('schemaVersion',PROTOCOL);
+ set('schemaVersion',BACKUP_SCHEMA);
  let lease=null;const busyUploads=new Set(),activeReads=new Map(),gcBusy=new Set();
- const validLease=req=>{const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
- const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true,automaticRebackup:true},libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
+ const audioWriter=req=>{if(get('audioEnabled')&&req.headers['x-cangxia-audio-aware']!=='1')throw error(423,'此库已保存共享配乐；旧客户端只读，请升级藏匣至 0.3.28 或更新版本');};
+ const validLease=req=>{audioWriter(req);const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
+ const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
  const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy});
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
@@ -37,6 +38,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    if(route==='/v1/status'&&req.method==='GET'){send(req,res,200,status());return;}
    if(String(req.headers['x-cangxia-protocol']||'')!==String(PROTOCOL))throw error(426,'请升级藏匣备份客户端，旧协议不能读写作者备份库');
    if(route==='/v1/lease'&&req.method==='POST'){
+    audioWriter(req);
     const input=await json(req);if(!/^[a-f0-9-]{36}$/.test(input.deviceId)||typeof input.name!=='string'||!input.name.trim()||input.name.length>80)throw error(400,'设备信息无效');
     if(lease&&lease.expires>now()&&(lease.device!==input.deviceId||lease.token!==input.leaseToken))throw error(423,`另一台电脑正在使用：${lease.name}`);
     lease={device:input.deviceId,name:input.name,token:lease?.device===input.deviceId&&lease.expires>now()?lease.token:randomBytes(32).toString('hex'),expires:now()+leaseMs};
@@ -45,6 +47,12 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    if(route==='/v1/lease'&&req.method==='DELETE'){validLease(req);lease=null;send(req,res,200,{ok:true});return;}
    if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){const input=await json(req),device=validLease(req);const result=await actions.execute(route.endsWith('delete')?'delete':'enable',input,device,lease.name);send(req,res,200,result);return;}
    const actionReceipt=route.match(/^\/v1\/backup-actions\/([a-f0-9-]{36})$/);if(actionReceipt&&req.method==='GET'){const row=db.prepare('SELECT device,result FROM backup_actions WHERE request=?').get(actionReceipt[1]);if(!row||row.device!==req.headers['x-device-id'])throw error(404,'未找到 NAS 操作回执');send(req,res,200,JSON.parse(row.result));return;}
+   if(route==='/v1/preview-index'&&req.method==='GET'){
+    const revision=Number(url.searchParams.get('revision')),after=url.searchParams.get('after')||'';if(revision!==get('revision')||after&&!/^\d+$/.test(after))throw error(409,'封面核实期间资料库变化，请重新检查');
+    const rows=db.prepare("SELECT id,json_extract(body,'$.backupCover') asset FROM records WHERE kind='works' AND id>? AND body IS NOT NULL ORDER BY id LIMIT 1001").all(after),previews=[];let cursor=0;
+    await Promise.all(Array.from({length:8},async()=>{while(cursor<Math.min(1000,rows.length)){const r=rows[cursor++];if(!r.asset)continue;const asset=JSON.parse(r.asset);if(!/^[a-f0-9]{64}$/.test(asset.sha256))continue;const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(asset.sha256);if(!object||object.size!==asset.size)continue;try{const stat=await fsp.lstat(objectPath(asset.sha256));if(stat.isFile()&&!stat.isSymbolicLink()&&stat.size===asset.size)previews.push({work:r.id,sha256:asset.sha256,size:asset.size});}catch{}}}));
+    if(revision!==get('revision'))throw error(409,'封面核实期间资料库变化，请重新检查');send(req,res,200,{libraryId:get('libraryId'),revision,previews,nextAfter:rows.length>1000?rows[999].id:null});return;
+   }
    if(route==='/v1/changes'&&req.method==='GET'){
     const since=Number(url.searchParams.get('since')||0),revision=get('revision');if(!Number.isSafeInteger(since)||since<0||since>revision)throw error(409,'同步基础状态无效');
     const offset=Number(url.searchParams.get('offset')||0),through=Number(url.searchParams.get('through')||revision);if(!Number.isSafeInteger(offset)||offset<0||through!==revision)throw error(409,'同步期间 NAS 记录已变化，请重新检查');
@@ -56,14 +64,14 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     const input=await json(req),device=validLease(req),request=input.requestId||randomUUID();if(!/^[a-f0-9-]{36}$/.test(request))throw error(400,'提交标识无效');const requestHash=contentHash({libraryId:input.libraryId,baseRevision:input.baseRevision,changes:input.changes});const previous=db.prepare('SELECT * FROM commits WHERE request=?').get(request);if(previous){if(previous.device!==device||previous.requestHash!==requestHash)throw error(409,'提交标识被用于不同内容');send(req,res,200,{...status(),ackRevision:previous.revision,requestId:request});return;}
     if(input.libraryId!==get('libraryId')||input.baseRevision!==get('revision'))throw error(409,'NAS 已有其他更新，未覆盖任何记录');
     if(!Array.isArray(input.changes)||input.changes.length>100000)throw error(400,'变更数量无效');const seen=new Set();
-    for(const entry of input.changes){try{validateEntry(entry);}catch(e){throw error(400,e.message);}const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);if(entry.table==='downloads'&&entry.body?.backupDeleted===true)throw error(409,'旧客户端停止备份标记已停用，请升级客户端并重新检查');const assets=entry.table==='downloads'&&entry.body?entry.body.assets:entry.table==='works'&&entry.body?.backupCover?[entry.body.backupCover]:[];for(const a of assets){if(gcBusy.has(a.sha256))throw error(409,'媒体正在清理，请稍后重试');const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
+    for(const entry of input.changes){try{validateEntry(entry);}catch(e){throw error(400,e.message);}const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);if(entry.table==='downloads'&&entry.body?.backupDeleted===true)throw error(409,'旧客户端停止备份标记已停用，请升级客户端并重新检查');const assets=entry.table==='downloads'&&entry.body?[...entry.body.assets,...(entry.body.audio?[entry.body.audio.object]:[])]:entry.table==='works'&&entry.body?.backupCover?[entry.body.backupCover]:[];for(const a of assets){if(gcBusy.has(a.sha256))throw error(409,'媒体正在清理，请稍后重试');const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
     const proposed=new Map(input.changes.map(e=>[e.table+':'+e.key,e.body]));const present=(table,id)=>proposed.has(table+':'+id)?proposed.get(table+':'+id)!==null:!!db.prepare('SELECT 1 FROM records WHERE kind=? AND id=? AND body IS NOT NULL').get(table,id);
     for(const e of input.changes)if(e.body&&e.table==='author_members'&&(!present('authors',e.body.authorId)||!present('works',e.body.workId)))throw error(409,'作者或作品资料尚未提交');
     for(const e of input.changes)if(e.body&&e.table==='downloads'&&e.body.home?.kind==='author'&&(!present('authors',e.body.home.id)||!present('works',e.key)))throw error(409,'作者文件归属尚未提交');
     if(!input.changes.length){send(req,res,200,status());return;}
     const revision=get('revision')+1,time=new Date(now()).toISOString();db.exec('BEGIN IMMEDIATE');try{
      const update=db.prepare('INSERT OR REPLACE INTO records VALUES(?,?,?,?)');for(const e of input.changes)update.run(e.table,e.key,e.body===null?null:JSON.stringify(e.body),revision);
-     set('revision',revision);db.prepare('INSERT INTO commits(revision,device,name,time,count,request,requestHash) VALUES(?,?,?,?,?,?,?)').run(revision,device,lease.name,time,input.changes.length,request,requestHash);db.exec('COMMIT');
+     if(input.changes.some(e=>e.table==='downloads'&&e.body?.audio))set('audioEnabled',true);set('revision',revision);db.prepare('INSERT INTO commits(revision,device,name,time,count,request,requestHash) VALUES(?,?,?,?,?,?,?)').run(revision,device,lease.name,time,input.changes.length,request,requestHash);db.exec('COMMIT');
     }catch(e){db.exec('ROLLBACK');throw e;}send(req,res,200,{...status(),ackRevision:revision,requestId:request});return;
    }
    const match=route.match(/^\/v1\/(uploads|objects)\/([a-f0-9]{64})$/);

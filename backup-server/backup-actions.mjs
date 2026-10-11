@@ -15,7 +15,7 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
    db.exec('DELETE FROM deleted_hashes');setMeta('automaticRebackupPolicy',1);db.exec('COMMIT');
   }catch(e){db.exec('ROLLBACK');throw e;}
  }
- function referenced(){const set=new Set();for(const row of db.prepare("SELECT kind,body FROM records WHERE kind IN ('works','downloads') AND body IS NOT NULL").all()){const body=JSON.parse(row.body);for(const asset of row.kind==='works'?[body.backupCover]:body.assets||[])if(asset?.sha256)set.add(asset.sha256);}return set;}
+ function referenced(){const set=new Set();for(const row of db.prepare("SELECT kind,body FROM records WHERE kind IN ('works','downloads') AND body IS NOT NULL").all()){const body=JSON.parse(row.body);for(const asset of row.kind==='works'?[body.backupCover]:[...(body.assets||[]),body.audio?.object])if(asset?.sha256)set.add(asset.sha256);}return set;}
  async function collect(){
   if(collecting)return collecting;
   collecting=(async()=>{let refs=referenced(),revision=status().revision,removed=0,bytes=0,pending=0;const started=Date.now();let handled=0;
@@ -43,8 +43,9 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
   for(const id of input.ids){
    const row=db.prepare("SELECT body FROM records WHERE kind='downloads' AND id=?").get(id);if(!row?.body)continue;const old=JSON.parse(row.body);
    if(action==='delete'){
-    if(!old.assets?.length&&!old.backupDeleted)continue;
+    if(!old.assets?.length&&!old.audio&&!old.backupDeleted)continue;
     for(const asset of old.assets||[])candidates.add(asset.sha256);
+    if(old.audio?.object?.sha256)candidates.add(old.audio.object.sha256);
     const body={id,collectionId:old.collectionId,home:old.home,state:'partial',assets:[],backupDeleted:false,backupRemoved:true,deletedAt:new Date(now()).toISOString()};
     changes.push({table:'downloads',key:id,body});
     const work=db.prepare("SELECT body FROM records WHERE kind='works' AND id=?").get(id);

@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';import path from 'node:path';import fs from 'node:fs';import {randomUUID} from 'node:crypto';
+export async function checkAudioDesktop({win,call,check,profile,ids}){
+ const [first,second]=ids,sleep=()=>new Promise(r=>setTimeout(r,100));
+ const root=path.join(path.dirname(profile),'fresh-audio-media');fs.mkdirSync(root,{recursive:true});await call('chooseRoot',root);
+ await win.webContents.executeJavaScript(`document.querySelector('.card-detail').click()`);await sleep();
+ check('muted image browsing does not request audio',!(await call('state')).storage.cache.used.audio);
+ const preparations=await Promise.all(ids.map(id=>call('audioPrepare',id,randomUUID())));
+ check('fresh PC without login obtains one shared NAS audio object',preparations[0].objectId===preparations[1].objectId&&(await call('state')).storage.cache.used.audio===16044);
+ const result=await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const a=new Audio(${JSON.stringify(preparations[0].url)});a.onloadedmetadata=()=>{const d=a.duration;a.removeAttribute('src');a.load();resolve(d);};a.onerror=()=>reject(Error('private audio protocol cannot decode'));})`);
+ check('native private audio protocol streams a decodable source',Math.abs(result-1)<.1);
+ for(let i=0;i<ids.length;i++)await call('audioRelease',ids[i],preparations[i].token);
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="播放图文配乐"]').click()`);
+ const deadline=Date.now()+5000;let playing=false;do{await sleep();playing=await win.webContents.executeJavaScript(`(()=>{const a=document.querySelector('.work-audio-player audio');return !!a&&a.readyState>=2&&!a.paused&&Math.abs(a.duration-1)<.1;})()`);}while(!playing&&Date.now()<deadline);
+ check('actual Chromium player decodes the saved music and plays the confirmed segment',playing);
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="静音图文配乐"]').click()`);await sleep();
+ check('muting releases the playback request',await win.webContents.executeJavaScript(`!document.querySelector('.work-audio-player audio')||document.querySelector('.work-audio-player audio').paused`));
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭弹窗"]').click()`);
+ await call('audioSave',ids,'local');let state;const end=Date.now()+8000;do{await sleep();state=await call('state');}while((state.audioQueue.running||state.audioQueue.counts.waiting)&&Date.now()<end);
+ check('local audio saving is separate from image downloads',state.audioQueue.counts.complete===2&&state.audioQueue.stats.savedWorks===2&&!state.queue.counts.waiting);
+ const files=fs.readdirSync(path.join(root,'配乐文件'),{recursive:true}).filter(f=>f.endsWith('.wav'));
+ check('two permanent local references share one physical music file',files.length===1);
+ await call('cacheClear',['cover','audio']);check('clearing browsing cache preserves permanent audio and NAS',fs.existsSync(path.join(root,'配乐文件',files[0]))&&(await call('audioStatus',first)).nasSaved&&(await call('audioStatus',second)).localSaved);
+ await call('audioCancel');check('cancelling jobs leaves completed audio references intact',(await call('audioStatus',first)).localSaved);
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="设置"]').click()`);await sleep();
+ check('cache limits and protected data are exposed in desktop settings',await win.webContents.executeJavaScript(`document.querySelector('.cache-settings').innerText.includes('旧文件待核实')`));
+ await win.webContents.executeJavaScript(`document.querySelector('.cache-settings').scrollIntoView({block:'center'})`);await sleep();
+ fs.writeFileSync('.test-output/audio-cache-settings.png',(await win.webContents.capturePage()).toPNG());
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭弹窗"]').click()`);
+ const page=await call('audioPage',1,'complete');check('private audio queue pages expose completed jobs without full-library payloads',page.total===2&&page.jobs.length===2&&page.pages===1);
+ await win.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim().startsWith('下载管理')).click()`);await sleep();
+ await win.webContents.executeJavaScript(`[...document.querySelectorAll('.download-mode-tabs button')].find(b=>b.textContent==='图文配乐').click()`);await sleep();
+ check('desktop audio queue exposes state filters and bounded pagination',await win.webContents.executeJavaScript(`!!document.querySelector('[aria-label="配乐任务状态"]')&&document.querySelector('.modal').innerText.includes('每页 50 条')`));
+ fs.writeFileSync('.test-output/audio-queue-desktop.png',(await win.webContents.capturePage()).toPNG());
+ await win.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭弹窗"]').click()`);
+}

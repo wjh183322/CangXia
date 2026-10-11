@@ -1,0 +1,841 @@
+{
+  "date": "2026-10-11",
+  "baseline": "client 0.3.27 / service 0.2.2 / protocol 2",
+  "metadata": {
+    "attempts": 21,
+    "live": 20,
+    "nonzeroStart": 0,
+    "negativeClip": 6,
+    "falseFlagWithMusicURL": 11,
+    "samples": [
+      {
+        "id": "7591483092655194347",
+        "title": "谁要的壁纸 #已成年 #椎名真昼 #邻家天使",
+        "url": "https://www.douyin.com/video/7591483092655194347",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7590777125663886095",
+        "musicDuration": 22,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 22047,
+          "volume": 110
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7640297979189923108",
+        "url": "https://www.douyin.com/video/7640297979189923108",
+        "error": "BROWSER_REQUEST",
+        "musicId": ""
+      },
+      {
+        "id": "7633514628220505189",
+        "title": "你对我的了解 无声的告别 难过是有些#少御 #拍照姿势",
+        "url": "https://www.douyin.com/video/7633514628220505189",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7629331404622449454",
+        "musicDuration": 23,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 23000,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7602912177451731426",
+        "title": "雷电断绝。#雷电将军 #原声 #cos #雷电将军cos",
+        "url": "https://www.douyin.com/video/7602912177451731426",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7489401846646262555",
+        "musicDuration": 30,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 30302,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7577788512541638073",
+        "title": "爱我的别停 恨我的继续",
+        "url": "https://www.douyin.com/video/7577788512541638073",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7568862585286658854",
+        "musicDuration": 45,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7558401584939650331",
+        "title": "华硕枪神8win10系统恢复安装。华硕ROG 枪神8 G614JVR出厂预装win11原厂系统降级win10系统恢复安装 \n闪屏、WIFI、喇叭无声音、数字键盘不能用、触控板不能用、快捷键不能用等问题都可以完美解决！\n#华硕 #枪神8 #华硕笔记本 #笔记本电脑 #电脑",
+        "url": "https://www.douyin.com/video/7558401584939650331",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7371013681833921292",
+        "musicDuration": 33,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 33000,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7379584129312017690",
+        "title": "黄亦玫的原声台词我先用了.#黄亦玫 #玫瑰的故事",
+        "url": "https://www.douyin.com/video/7379584129312017690",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7376880029210381066",
+        "musicDuration": 16,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 16195,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7379327310169672994",
+        "title": "眼睛是一片无声的海",
+        "url": "https://www.douyin.com/video/7379327310169672994",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": true,
+        "musicId": "7355429725281864474",
+        "musicDuration": 14,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 14027,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7231508963274116352",
+        "title": "你并非无声的海 只是不为我澎湃",
+        "url": "https://www.douyin.com/video/7231508963274116352",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7218135446998862647",
+        "musicDuration": 35,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 35578,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7061482675630132494",
+        "title": "爱没有用 相爱还有点用.#充能计划 #图文扶持计划入口 #抖音图文来了",
+        "url": "https://www.douyin.com/video/7061482675630132494",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6861275976345717512",
+        "musicDuration": 17,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7062295617455852831",
+        "title": "视频只有六秒 但我赌你不止看六秒#fyp ",
+        "url": "https://www.douyin.com/video/7062295617455852831",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7041537569506495239",
+        "musicDuration": 11,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7067446373083303206",
+        "title": "八本修罗场小说，\n小孩子才做选择，成年人表示全都要#小说 #修罗场",
+        "url": "https://www.douyin.com/video/7067446373083303206",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6964658334024648740",
+        "musicDuration": 16,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7067530413920603399",
+        "title": "新一代预言家出来，全网都被震惊了！#热门_ #小说 #预言 #抖音美好生活攻略 ",
+        "url": "https://www.douyin.com/video/7067530413920603399",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6876301987252537358",
+        "musicDuration": 309,
+        "musicURLCount": 0,
+        "videoURLCount": 1,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7073027055700430084",
+        "title": "雷军心海复刻，一组壁纸送给抽到莫娜，琴，七七，刻晴和迪卢克的小伙伴们！#原神 #原神壁纸 #薄樱初绽时 ",
+        "url": "https://www.douyin.com/video/7073027055700430084",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6901541096061799176",
+        "musicDuration": 48,
+        "musicURLCount": 0,
+        "videoURLCount": 1,
+        "album": {
+          "begin_time": -1,
+          "end_time": -1,
+          "volume": -1
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7107520179994742016",
+        "title": "#cos #2b小姐姐",
+        "url": "https://www.douyin.com/video/7107520179994742016",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7099015090157931295",
+        "musicDuration": 14,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 14706,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7128346251149544738",
+        "title": "让你爱上我，要多久#穿搭 #vlog日常 #fyp",
+        "url": "https://www.douyin.com/video/7128346251149544738",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6955797077007796226",
+        "musicDuration": 60,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 60000,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7136958957276515625",
+        "title": "你是最有机会救她的人，可你在高天原的酒窖里浪费了太多时间。      #绘梨衣 #龙族",
+        "url": "https://www.douyin.com/video/7136958957276515625",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "6979895979265461022",
+        "musicDuration": 22,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 22360,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7153607676360985864",
+        "title": "#鬼灭之刃 #蝴蝶忍",
+        "url": "https://www.douyin.com/video/7153607676360985864",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7130175850007333639",
+        "musicDuration": 30,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 30720,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7156564959793548574",
+        "title": "其实就算没那么喜欢她 也可以带她离开啊 她也挺漂亮的不是么。 \n#绘梨衣 #龙族 #龙族幻想 #绘梨衣cos #对镜拍",
+        "url": "https://www.douyin.com/video/7156564959793548574",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7146504522255420197",
+        "musicDuration": 10,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 10083,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7164290149168254222",
+        "title": "名字是，甘…甘雨。ovO #原神 #甘雨女仆 #甘雨",
+        "url": "https://www.douyin.com/video/7164290149168254222",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7063069125928635166",
+        "musicDuration": 16,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 16000,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      },
+      {
+        "id": "7164731969740295424",
+        "title": "我不该向你说那么多毫无意义的话",
+        "url": "https://www.douyin.com/video/7164731969740295424",
+        "live": true,
+        "httpStatus": 200,
+        "type": 68,
+        "isUseMusic": false,
+        "musicId": "7111676209678846728",
+        "musicDuration": 11,
+        "musicURLCount": 2,
+        "videoURLCount": 2,
+        "album": {
+          "begin_time": 0,
+          "end_time": 11937,
+          "volume": 100
+        },
+        "originalSoundCount": 0
+      }
+    ]
+  },
+  "newPlayback": [
+    {
+      "id": "7577788512541638073",
+      "title": "爱我的别停 恨我的继续",
+      "url": "https://www.douyin.com/video/7577788512541638073",
+      "isUseMusic": true,
+      "album": {
+        "begin_time": -1,
+        "end_time": -1,
+        "volume": -1
+      },
+      "sourceField": "music.play_url",
+      "musicId": "7568862585286658854",
+      "byteComparedToPage": true,
+      "audio": {
+        "sha256": "c69b23dd7756089fff57f56ef89eb89b0dc409e5a6b4a26babdf694304fce095",
+        "bytes": 723135,
+        "format": "mp3",
+        "codec": "mp3float",
+        "duration": 45.1134693877551,
+        "streamTypes": [
+          "audio"
+        ],
+        "complete": true,
+        "localEvidence": ".test-output/audio-boundary-playback-20261011/c69b23dd7756089fff57f56ef89eb89b0dc409e5a6b4a26babdf694304fce095.bin"
+      }
+    },
+    {
+      "id": "7231508963274116352",
+      "title": "你并非无声的海 只是不为我澎湃",
+      "url": "https://www.douyin.com/video/7231508963274116352",
+      "isUseMusic": false,
+      "album": {
+        "begin_time": 0,
+        "end_time": 35578,
+        "volume": 100
+      },
+      "sourceField": "music.play_url",
+      "musicId": "7218135446998862647",
+      "byteComparedToPage": true,
+      "audio": {
+        "sha256": "99b17138451b76be325ba81a0d04c59cf3c939855a73b4875738d3adc1c59639",
+        "bytes": 569305,
+        "format": "mp3",
+        "codec": "mp3float",
+        "duration": 35.57877551020408,
+        "streamTypes": [
+          "audio"
+        ],
+        "complete": true,
+        "localEvidence": ".test-output/audio-boundary-playback-20261011/99b17138451b76be325ba81a0d04c59cf3c939855a73b4875738d3adc1c59639.bin"
+      }
+    },
+    {
+      "id": "7067530413920603399",
+      "title": "新一代预言家出来，全网都被震惊了！#热门_ #小说 #预言 #抖音美好生活攻略 ",
+      "url": "https://www.douyin.com/video/7067530413920603399",
+      "isUseMusic": false,
+      "album": {
+        "begin_time": -1,
+        "end_time": -1,
+        "volume": -1
+      },
+      "sourceField": "video.play_addr (requires audio-only decode verification)",
+      "musicId": "6876301987252537358",
+      "byteComparedToPage": true,
+      "audio": {
+        "sha256": "cafdfe8e2ba5e709eafadc40a1a52b97b6b59765d985003e70b2d7fb78d9ad72",
+        "bytes": 5014344,
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "codec": "aac",
+        "duration": 309.9428571428571,
+        "streamTypes": [
+          "audio"
+        ],
+        "complete": true,
+        "localEvidence": ".test-output/audio-boundary-playback-20261011/cafdfe8e2ba5e709eafadc40a1a52b97b6b59765d985003e70b2d7fb78d9ad72.bin"
+      }
+    },
+    {
+      "id": "7379584129312017690",
+      "title": "黄亦玫的原声台词我先用了.#黄亦玫 #玫瑰的故事",
+      "url": "https://www.douyin.com/video/7379584129312017690",
+      "isUseMusic": true,
+      "album": {
+        "begin_time": 0,
+        "end_time": 16195,
+        "volume": 100
+      },
+      "sourceField": "music.play_url",
+      "musicId": "7376880029210381066",
+      "byteComparedToPage": true,
+      "audio": {
+        "sha256": "866065178acb73062da29e1c42a62f77e955f85962d37d1feb24e934bc487faa",
+        "bytes": 259624,
+        "format": "mp3",
+        "codec": "mp3float",
+        "duration": 16.195918367346938,
+        "streamTypes": [
+          "audio"
+        ],
+        "complete": true,
+        "localEvidence": ".test-output/audio-boundary-playback-20261011/866065178acb73062da29e1c42a62f77e955f85962d37d1feb24e934bc487faa.bin"
+      }
+    }
+  ],
+  "volume": {
+    "date": "2026-10-11",
+    "browserOutputMuted": true,
+    "jsMutedUnchanged": true,
+    "scope": "webpage gain-node creation and media.volume assignments; not phone gain measurement",
+    "samples": [
+      {
+        "id": "7591483092655194347",
+        "live": true,
+        "title": "谁要的壁纸 #已成年 #椎名真昼 #邻家天使",
+        "isUseMusic": true,
+        "album": {
+          "begin_time": 0,
+          "end_time": 22047,
+          "volume": 110
+        },
+        "trace": {
+          "hookPresent": true,
+          "gains": [],
+          "volumeSets": [
+            {
+              "time": 2213,
+              "value": 0,
+              "tag": "VIDEO"
+            },
+            {
+              "time": 2459.800000011921,
+              "value": 0.5,
+              "tag": "VIDEO"
+            },
+            {
+              "time": 2580.9000000059605,
+              "value": 0.5,
+              "tag": "VIDEO"
+            }
+          ],
+          "playCalls": 0,
+          "players": [
+            {
+              "tag": "VIDEO",
+              "volume": 1,
+              "muted": true,
+              "duration": 2.6,
+              "paused": false,
+              "sourceHash": "44840eb5649d782b0d0591ffe7330725a8238cee718bd6f45bad84ad021ab50f",
+              "musicPathMatch": false,
+              "workAudioPathMatch": false
+            },
+            {
+              "tag": "VIDEO",
+              "volume": 1,
+              "muted": true,
+              "duration": 2.866667,
+              "paused": true,
+              "sourceHash": "23ce7f82925579a4ad6d6a4a35016e3e9b47e6868ea800d1636aa989c3d7546a",
+              "musicPathMatch": false,
+              "workAudioPathMatch": false
+            },
+            {
+              "tag": "VIDEO",
+              "volume": 0.5,
+              "muted": true,
+              "duration": 22.047313,
+              "paused": false,
+              "sourceHash": "86e72318752437a924cf38b074ee22b8a9d76bd78f0773170b07f5d7686e4f9b",
+              "musicPathMatch": true,
+              "workAudioPathMatch": true
+            },
+            {
+              "tag": "VIDEO",
+              "volume": 0,
+              "muted": true,
+              "duration": null,
+              "paused": true,
+              "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "musicPathMatch": false,
+              "workAudioPathMatch": false
+            }
+          ],
+          "urlMatchesWork": true
+        }
+      },
+      {
+        "id": "7693544046488608937",
+        "live": true,
+        "title": "太帅了，影大人。#原神 #雷电将军 #雷电影 #雷电将军cos #御姐",
+        "isUseMusic": true,
+        "album": {
+          "begin_time": 0,
+          "end_time": 26000,
+          "volume": 100
+        },
+        "trace": {
+          "hookPresent": true,
+          "gains": [],
+          "volumeSets": [
+            {
+              "time": 1877,
+              "value": 0,
+              "tag": "VIDEO"
+            },
+            {
+              "time": 2117.5999999940395,
+              "value": 0.5,
+              "tag": "VIDEO"
+            },
+            {
+              "time": 2212.199999988079,
+              "value": 0.5,
+              "tag": "VIDEO"
+            }
+          ],
+          "playCalls": 0,
+          "players": [
+            {
+              "tag": "VIDEO",
+              "volume": 1,
+              "muted": true,
+              "duration": 2.6,
+              "paused": false,
+              "sourceHash": "44840eb5649d782b0d0591ffe7330725a8238cee718bd6f45bad84ad021ab50f",
+              "musicPathMatch": false,
+              "workAudioPathMatch": false
+            },
+            {
+              "tag": "VIDEO",
+              "volume": 0.5,
+              "muted": true,
+              "duration": 26.253042,
+              "paused": false,
+              "sourceHash": "da70493fbd6dfe209d92fe4936de54e31b479ac15740a340b87c4d63b59de811",
+              "musicPathMatch": true,
+              "workAudioPathMatch": true
+            },
+            {
+              "tag": "VIDEO",
+              "volume": 0,
+              "muted": true,
+              "duration": null,
+              "paused": true,
+              "sourceHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "musicPathMatch": false,
+              "workAudioPathMatch": false
+            }
+          ],
+          "urlMatchesWork": true
+        }
+      }
+    ]
+  },
+  "range": {
+    "date": "2026-10-11",
+    "sourceHash": "04c0a22af87b9e1aba1de7e8a904eb08f8afd3267624b6aef3f74d6dd7205a9c",
+    "noFilesDownloaded": true,
+    "results": [
+      {
+        "name": "first-range",
+        "status": 206,
+        "etag": "\"7d45b9055e3c0a359cd9609a89be77fd\"",
+        "lastModified": "Mon, 24 Aug 2026 17:12:57 GMT",
+        "contentRange": "bytes 0-1023/471324",
+        "contentLength": "1024",
+        "type": "audio/mp4"
+      },
+      {
+        "name": "matching-if-range",
+        "status": 206,
+        "etag": "\"7d45b9055e3c0a359cd9609a89be77fd\"",
+        "lastModified": "Mon, 24 Aug 2026 17:12:57 GMT",
+        "contentRange": "bytes 1024-2047/471324",
+        "contentLength": "1024",
+        "type": "audio/mp4"
+      },
+      {
+        "name": "mismatching-if-range",
+        "status": 206,
+        "etag": "\"7d45b9055e3c0a359cd9609a89be77fd\"",
+        "lastModified": "Mon, 24 Aug 2026 17:12:57 GMT",
+        "contentRange": "bytes 1024-2047/471324",
+        "contentLength": "1024",
+        "type": "audio/mp4"
+      },
+      {
+        "name": "out-of-bounds",
+        "status": 416,
+        "etag": "\"7d45b9055e3c0a359cd9609a89be77fd\"",
+        "lastModified": "Mon, 24 Aug 2026 17:12:57 GMT",
+        "contentRange": "bytes */471324",
+        "contentLength": "0",
+        "type": "audio/mp4"
+      },
+      {
+        "name": "suffix-range",
+        "status": 206,
+        "etag": "\"7d45b9055e3c0a359cd9609a89be77fd\"",
+        "lastModified": "Mon, 24 Aug 2026 17:12:57 GMT",
+        "contentRange": "bytes 470300-471323/471324",
+        "contentLength": "1024",
+        "type": "audio/mp4"
+      }
+    ]
+  },
+  "fileIntegrity": {
+    "date": "2026-10-11",
+    "kind": "real downloaded source plus generated corruption cases",
+    "cases": [
+      {
+        "case": "valid-aac-labelled-mp3.mp3",
+        "bytes": 471324,
+        "expectedBytes": 471324,
+        "sizeMatches": true,
+        "hashMatches": true,
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "decodedSeconds": 29.01,
+        "decodeSucceeded": true,
+        "verifiedObject": true
+      },
+      {
+        "case": "truncated-aac.m4a",
+        "bytes": 235662,
+        "expectedBytes": 471324,
+        "sizeMatches": false,
+        "hashMatches": false,
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "decodeSucceeded": false,
+        "decodeError": "InvalidDataError",
+        "verifiedObject": false
+      },
+      {
+        "case": "html-labelled-audio.mp3",
+        "bytes": 42,
+        "expectedBytes": 471324,
+        "sizeMatches": false,
+        "hashMatches": false,
+        "decodeSucceeded": false,
+        "decodeError": "InvalidDataError",
+        "verifiedObject": false
+      },
+      {
+        "case": "same-length-corrupt.m4a",
+        "bytes": 471324,
+        "expectedBytes": 471324,
+        "sizeMatches": true,
+        "hashMatches": false,
+        "decodeSucceeded": false,
+        "decodeError": "InvalidDataError",
+        "verifiedObject": false
+      }
+    ]
+  },
+  "login": {
+    "date": "2026-10-11",
+    "source": "ephemeral Electron session, saved login used only in memory; original vault/database read-only",
+    "samples": [],
+    "noProductionWrites": true,
+    "noCredentialCopySaved": true,
+    "savedLoginAvailable": false
+  },
+  "nasCompatibility": {
+    "ok": true,
+    "scope": "isolated loopback service and fixture stores; no real NAS or user database",
+    "checks": [
+      {
+        "name": "objects-and-manifests",
+        "audioAssetAccepted": true,
+        "sharedObjectCount": 1,
+        "receiptHashVerified": true,
+        "idempotentRequest": true
+      },
+      {
+        "name": "audio-required-key",
+        "rejected": true,
+        "status": 400,
+        "message": "必需媒体清单无效"
+      },
+      {
+        "name": "shared-audio-table",
+        "rejected": true,
+        "status": 400,
+        "message": "同步记录标识无效"
+      },
+      {
+        "name": "old-client-restores-audio",
+        "perWorkCopies": 2,
+        "sharedLocalObject": false,
+        "files": [
+          "old-client\\media\\收藏\\isolated audio compatibility 9001-fixture\\audio.m4a",
+          "old-client\\media\\收藏\\isolated audio compatibility 9002-fixture\\audio.m4a"
+        ],
+        "newMetadataPreserved": true
+      },
+      {
+        "name": "delete-one-shared-reference",
+        "audioKeptForOtherManifest": true
+      },
+      {
+        "name": "hash-only-new-field-not-a-gc-reference",
+        "audioRemoved": true,
+        "thirdWorkStillHasHash": true,
+        "safeToUseNewHashFieldAlone": false
+      },
+      {
+        "name": "old-capabilities",
+        "protocol": 2,
+        "capabilities": {
+          "backupDeletion": true,
+          "automaticRebackup": true
+        },
+        "sharedAudioSupported": false
+      }
+    ]
+  },
+  "designContracts": {
+    "command": "node --test scripts/research-audio-contract.test.mjs",
+    "passed": 18,
+    "productionIntegrated": false
+  },
+  "notVerified": [
+    "real nonzero-start graph",
+    "multiple-track mixed graph",
+    "phone volume/listening comparison",
+    "login-required media",
+    "no-music graph",
+    "different music IDs with equal file content",
+    "production cache/NAS integration and machine performance"
+  ],
+  "cumulative": {
+    "fullDecodedGraph": 16,
+    "exactPageByteCompared": 11
+  }
+}

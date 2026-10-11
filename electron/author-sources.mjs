@@ -100,7 +100,7 @@ export class AuthorSources{
     const accountKey=this.store.getSetting('browserAccountKey'),authorMembers={},allAuthors=this.store.all('authors');
     const authors=allAuthors.filter(a=>!a.archived).map(a=>{const hidden=new Set(this.store.rows('SELECT work_id FROM author_members WHERE author_id=? AND hidden=1',[a.id]).map(r=>r.work_id));const ids=this.order(a.id).filter(id=>!hidden.has(id));authorMembers[a.id]=ids;return {...a,count:ids.length,run:a.run?{status:a.run.status,count:a.run.count,pages:a.run.pages,resumed:a.run.resumed,reason:a.run.reason,canResume:a.run.status!=='complete'&&a.run.nextCursor!==null&&a.run.accountKey===accountKey}:null};});
     const backupAuthorMembers={};
-    for(const row of this.store.rows('SELECT author_id,work_id FROM author_members ORDER BY author_id,position')){const d=backups.get(row.work_id);if(!d?.assets?.length||d.backupDeleted)continue;(backupAuthorMembers[row.author_id]||=[]).push(row.work_id);}
+    for(const row of this.store.rows('SELECT author_id,work_id FROM author_members ORDER BY author_id,position')){const d=backups.get(row.work_id);if(!(d?.assets?.length||d?.audio)||d.backupDeleted)continue;(backupAuthorMembers[row.author_id]||=[]).push(row.work_id);}
     const backupAuthors=allAuthors.map(a=>({id:a.id,name:a.name,uid:a.uid,uniqueId:a.uniqueId,archived:!!a.archived}));
     return {authors,authorMembers,backupAuthors,backupAuthorMembers};
   }

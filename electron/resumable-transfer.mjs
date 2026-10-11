@@ -10,13 +10,13 @@ async function readCheckpoint(dir,name,url,signal,checkpoints){
  try{
   if(!checkpoints&&fs.statSync(meta).size>8192)return null;const value=checkpoints?checkpoints.get(meta):JSON.parse(await fs.promises.readFile(meta,'utf8'));if(!value)return null;
   if(value.version!==1||value.urlHash!==digest(url)||!/^[a-f0-9]{64}$/.test(value.responseHash)||!strongTag(value.etag)||!Number.isSafeInteger(value.total)||value.total<=0||!Number.isSafeInteger(value.offset)||value.offset<=0||value.offset>=value.total||!/^[a-f0-9]{64}$/.test(value.prefixHash))return null;
-  if(!['.mp4','.jpg','.png','.webp','.avif'].some(ext=>value.part===name+ext+'.part'))return null;
+  if(!['.mp4','.jpg','.png','.webp','.avif','.bin'].some(ext=>value.part===name+ext+'.part'))return null;
   const partial=requireInside(dir,path.join(dir,value.part));ordinary(partial);if(!fs.existsSync(partial)||fs.statSync(partial).size<value.offset)return null;
   const hash=await hashPrefix(partial,value.offset,signal);if(hash.copy().digest('hex')!==value.prefixHash)return null;
   return {...value,hash,partial};
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null}){
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{}}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
  let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
@@ -37,6 +37,8 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  const lengthHeader=response.headers.get('content-length');
  if(lengthHeader!==null&&(!/^\d+$/.test(lengthHeader)||!Number.isSafeInteger(Number(lengthHeader)))){await response.body?.cancel().catch(()=>{});throw new Error('资源长度无效，未标记为完整');}
  const total=saved?.total??(lengthHeader===null?null:Number(lengthHeader)),etag=response.headers.get('etag'),resumable=!target.name.startsWith('.cangxia-')&&Number.isSafeInteger(total)&&total>0&&strongTag(etag);
+ if(total!==null&&total>maxBytes){await response.body?.cancel().catch(()=>{});throw Error('资源超过当前保存上限');}
+ try{await reserve(total??saved?.offset??0);}catch(e){await response.body?.cancel().catch(()=>{});throw e;}
  if(target.kind==='image'&&total>50000000){await response.body?.cancel().catch(()=>{});throw new Error('图片文件过大，已停止');}
  let hash=saved?.hash||createHash('sha256'),offset=saved?.offset||0,lastSaved=offset,lastTime=Date.now(),handle,reader,finished=false;
  const checkpoint=async()=>{
@@ -50,7 +52,8 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
   reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset);
   while(true){
    signal?.throwIfAborted();const {done,value}=await reader.read();if(done)break;signal?.throwIfAborted();
-   if((total!==null&&offset+value.byteLength>total)||(target.kind==='image'&&offset+value.byteLength>50000000))throw new Error('资源长度异常，未标记为完整');
+   if((total!==null&&offset+value.byteLength>total)||offset+value.byteLength>maxBytes||(target.kind==='image'&&offset+value.byteLength>50000000))throw new Error('资源长度异常，未标记为完整');
+   if(total===null)await reserve(offset+value.byteLength);
    let used=0;while(used<value.byteLength){const write=await handle.write(value,used,value.byteLength-used,offset+used);if(!write.bytesWritten)throw new Error('文件写入未完成');used+=write.bytesWritten;}
    hash.update(value);offset+=value.byteLength;progress(offset);
    if(offset-lastSaved>=checkpointBytes||Date.now()-lastTime>=2000)await checkpoint();

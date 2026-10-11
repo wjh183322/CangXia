@@ -1,0 +1,903 @@
+{
+  "date": "2026-10-11",
+  "clientBaseline": "0.3.27",
+  "method": "public official pages in isolated headless Chrome; response metadata, bounded audio fetch, SHA256, full decode, selected official-page source comparison",
+  "counts": {
+    "uniqueWorks": 13,
+    "imageWorks": 12,
+    "imageAudioDecoded": 12,
+    "directMusicAddress": 11,
+    "alternateAddress": 1,
+    "byteComparedToOfficialPage": 7,
+    "uniqueImageAudioObjects": 11
+  },
+  "limits": {
+    "noProductionLibraryWrites": true,
+    "noNASWrites": true,
+    "noStoredLoginUsed": true,
+    "noPhoneListeningComparison": true,
+    "graphNonzeroStartNotCovered": true,
+    "graphMixedOriginalSoundNotCovered": true,
+    "totalExplicitMediaFetchBytes": 15849683,
+    "fetchBytesExcludeBrowserRequests": true
+  },
+  "samples": [
+    {
+      "id": "7559349337312447763",
+      "title": "或许是我错了… #黑川美羽",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7559349337312447763",
+      "musicId": "7556565084193131283",
+      "musicTitle": "@DJSKing创作的原声",
+      "musicDurationField": 33,
+      "album": {
+        "begin_time": 0,
+        "end_time": 33671,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "0b6b62dd0464a9bfb20f92cb52f7485d97f63d871415f15d5ba0d5fc7aeb19d9",
+        "bytes": 540128,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/540128",
+          "length": "1024",
+          "acceptRanges": null
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011/0b6b62dd0464a9bfb20f92cb52f7485d97f63d871415f15d5ba0d5fc7aeb19d9.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 33.671813,
+        "streamDuration": 33.6718125,
+        "decodedSamples": 1484928,
+        "decodedDuration": 33.671836734693876,
+        "decodedNativePCMHash": "99e3df4bf5a4908a1ce3e98d5b6055b643ba1f3051eddca9b3ea6354bb07561c",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 1,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7688233301782297929",
+      "title": "一会儿删",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7688233301782297929",
+      "musicId": "7677544978050156545",
+      "musicTitle": "FALA SÉRIO",
+      "musicDurationField": 29,
+      "album": {
+        "begin_time": 0,
+        "end_time": 29000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "a00a12310afd2959e425c9a7c3aa8bce528bcc4f72824493a99674a445c873a6",
+        "bytes": 471324,
+        "contentType": "audio/mp4",
+        "range": {
+          "status": 206,
+          "type": "audio/mp4",
+          "contentRange": "bytes 0-1023/471324",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/a00a12310afd2959e425c9a7c3aa8bce528bcc4f72824493a99674a445c873a6.bin",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "aac",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 29.01,
+        "streamDuration": 29.01,
+        "decodedSamples": 1279341,
+        "decodedDuration": 29.01,
+        "decodedNativePCMHash": "7a7a9ba3f2ecac62c3bda07e84ae346d705168d5b6023df545b3ddf847c40311",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 1,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "a00a12310afd2959e425c9a7c3aa8bce528bcc4f72824493a99674a445c873a6",
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7605984910264459411",
+      "title": "#喜多川海梦 #cos",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7605984910264459411",
+      "musicId": "7605466711365651210",
+      "musicTitle": "@依赖你多一些创作的原声",
+      "musicDurationField": 30,
+      "album": {
+        "begin_time": 0,
+        "end_time": 30040,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "daf477681e79382accca5af8e958eb81f4e505aade949658047f9ee1c5e6339f",
+        "bytes": 481143,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/481143",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011/daf477681e79382accca5af8e958eb81f4e505aade949658047f9ee1c5e6339f.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 30.040813,
+        "streamDuration": 30.0408125,
+        "decodedSamples": 1324800,
+        "decodedDuration": 30.040816326530614,
+        "decodedNativePCMHash": "41293f8b284075c368f674346bc5189d98a41d21977b589b2db8592e2e5a8082",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 1,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7591483092655194347",
+      "title": "谁要的壁纸 #已成年 #椎名真昼 #邻家天使",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7591483092655194347",
+      "musicId": "7590777125663886095",
+      "musicTitle": "@向阳生创作的原声",
+      "musicDurationField": 22,
+      "album": {
+        "begin_time": 0,
+        "end_time": 22047,
+        "volume": 110
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "ab8c0f15feebd6237bf2748d25a54262804d18dd7ce0abd1048f799b132c6d9d",
+        "bytes": 353980,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/353980",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/ab8c0f15feebd6237bf2748d25a54262804d18dd7ce0abd1048f799b132c6d9d.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 22.047313,
+        "streamDuration": 22.0473125,
+        "decodedSamples": 972288,
+        "decodedDuration": 22.04734693877551,
+        "decodedNativePCMHash": "d9cbac67e837cff874f9995903c617e7a37cef3d65cbe14b1075f54fbc7b765e",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "ab8c0f15feebd6237bf2748d25a54262804d18dd7ce0abd1048f799b132c6d9d",
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7693029744136194214",
+      "title": "#可畏 #cos #碧蓝航线",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693029744136194214",
+      "musicId": "7651640383437588514",
+      "musicTitle": "VAR VAR VAR",
+      "musicDurationField": 191,
+      "album": {
+        "begin_time": 0,
+        "end_time": 191000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "ba66fc0aa662fc59de6152e25868b381808f1c1bb200c31fa9b3e341a8e3611f",
+        "bytes": 3097314,
+        "contentType": "audio/mp4",
+        "range": {
+          "status": 206,
+          "type": "audio/mp4",
+          "contentRange": "bytes 0-1023/3097314",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011/ba66fc0aa662fc59de6152e25868b381808f1c1bb200c31fa9b3e341a8e3611f.bin",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "aac",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 191.401995,
+        "streamDuration": 191.4019954648526,
+        "decodedSamples": 8440828,
+        "decodedDuration": 191.4019954648526,
+        "decodedNativePCMHash": "250f4e67673e552b6ea9b87375344721f575f03db5a7a7b0a15b053c496f70e9",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7689789427421997162",
+      "title": "好讨厌你 好喜欢你 好恨你 但还是好爱你。#龙华妃咲 #蔚蓝档案 #cos",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7689789427421997162",
+      "musicId": "7677544978050156545",
+      "musicTitle": "FALA SÉRIO",
+      "musicDurationField": 29,
+      "album": {
+        "begin_time": 0,
+        "end_time": 29023,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "a00a12310afd2959e425c9a7c3aa8bce528bcc4f72824493a99674a445c873a6",
+        "bytes": 471324,
+        "contentType": "audio/mp4",
+        "range": {
+          "status": 206,
+          "type": "audio/mp4",
+          "contentRange": "bytes 0-1023/471324",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011/a00a12310afd2959e425c9a7c3aa8bce528bcc4f72824493a99674a445c873a6.bin",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "aac",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 29.01,
+        "streamDuration": 29.01,
+        "decodedSamples": 1279341,
+        "decodedDuration": 29.01,
+        "decodedNativePCMHash": "7a7a9ba3f2ecac62c3bda07e84ae346d705168d5b6023df545b3ddf847c40311",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7693112789354787251",
+      "title": "我拍我拍我拍拍拍",
+      "type": 0,
+      "originalURL": "https://www.douyin.com/video/7693112789354787251",
+      "musicId": "7683484772211182362",
+      "musicTitle": "@Vera.创作的原声",
+      "musicDurationField": 12,
+      "album": {
+        "begin_time": -1,
+        "end_time": -1,
+        "volume": -1
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "bd7b50314ecfc68749fed8266a39055d682df00cdec715e8d372ea0f7b691226",
+        "bytes": 208427,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/208427",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011/bd7b50314ecfc68749fed8266a39055d682df00cdec715e8d372ea0f7b691226.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 12.956688,
+        "streamDuration": 12.9566875,
+        "decodedSamples": 571392,
+        "decodedDuration": 12.956734693877552,
+        "decodedNativePCMHash": "a49aed43854efa46e454262309673b96f7909236d72627ce4d82cb8156ee1a07",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 0,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false,
+      "videoDurationField": 4500,
+      "videoControl": {
+        "metadataVideoMs": 4500,
+        "files": [
+          {
+            "sha256": "455d9c5ad34815292f78f62b9af382834059ec4e1343ae23bfa14290efa878af",
+            "bytes": 587520,
+            "localEvidence": ".test-output/audio-experiment-20261011-edge/455d9c5ad34815292f78f62b9af382834059ec4e1343ae23bfa14290efa878af.bin",
+            "format": "mov,mp4,m4a,3gp,3g2,mj2",
+            "streamTypes": [
+              "audio",
+              "video"
+            ],
+            "codec": "aac",
+            "sampleRate": 44100,
+            "channels": 2,
+            "containerDuration": 4.5,
+            "streamDuration": 4.432993197278911,
+            "decodedSamples": 195495,
+            "decodedDuration": 4.432993197278911,
+            "decodedNativePCMHash": "e4b9b47b7ee118a03bc719b4220e6c32359683c14e3b017a629c9c3b87b0f36e",
+            "decodeComplete": true
+          },
+          {
+            "sha256": "6adb3e7c2b3c91c9b7acad3a34272ec3cb4eb056ccffc90b56a81b1aa5acdf9c",
+            "bytes": 267632,
+            "localEvidence": ".test-output/audio-experiment-20261011-edge/6adb3e7c2b3c91c9b7acad3a34272ec3cb4eb056ccffc90b56a81b1aa5acdf9c.bin",
+            "format": "mov,mp4,m4a,3gp,3g2,mj2",
+            "streamTypes": [
+              "audio",
+              "video"
+            ],
+            "codec": "aac",
+            "sampleRate": 44100,
+            "channels": 2,
+            "containerDuration": 4.5,
+            "streamDuration": 4.432993197278911,
+            "decodedSamples": 195495,
+            "decodedDuration": 4.432993197278911,
+            "decodedNativePCMHash": "6c4b30d36417b66a71135d884b1b50763c9237252ad153dd6c4447d122a0b2ee",
+            "decodeComplete": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "7693514274995727844",
+      "title": "叫妈妈还能不理你吗\n#黑枪呆 #cos #fgo #fate #saber",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693514274995727844",
+      "musicId": "7678588073869969435",
+      "musicTitle": "oukizla manda bar",
+      "musicDurationField": 112,
+      "album": {
+        "begin_time": 0,
+        "end_time": 112000,
+        "volume": 100
+      },
+      "musicURLCount": 0,
+      "sourceField": "video.play_addr.url_list (type=68, verified audio-only)",
+      "audio": {
+        "sha256": "02014d608b6e223ab9ca7d9fc6afb918d83dcf6340291fb3eaa3b3850143a7d3",
+        "bytes": 1814326,
+        "contentType": "audio/mp4",
+        "localEvidence": ".test-output/audio-experiment-20261011-edge/02014d608b6e223ab9ca7d9fc6afb918d83dcf6340291fb3eaa3b3850143a7d3.bin",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "aac",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 112.059002,
+        "streamDuration": 112.0590022675737,
+        "decodedSamples": 4941802,
+        "decodedDuration": 112.0590022675737,
+        "decodedNativePCMHash": "c692e2ed615b03b90ae2b63d4f3bbb57d6cfb7f4fc7bc75300dd061fd27aa95b",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 0,
+      "byteComparedToPage": false,
+      "pageComparisonHash": null,
+      "phoneListeningCompared": false,
+      "videoDurationField": 0
+    },
+    {
+      "id": "7693437878945612779",
+      "title": "#永劫无间 #蓝梦",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693437878945612779",
+      "musicId": "7581773734042667812",
+      "musicTitle": "@㳍依沫创作的原声",
+      "musicDurationField": 19,
+      "album": {
+        "begin_time": 0,
+        "end_time": 19565,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "a3fd1da1975322c169060571fe7f93dfbac117b851a14d25f7398c1dd178bf17",
+        "bytes": 548047,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/548047",
+          "length": "1024",
+          "acceptRanges": null
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/a3fd1da1975322c169060571fe7f93dfbac117b851a14d25f7398c1dd178bf17.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 19.539607,
+        "streamDuration": 19.539607142857143,
+        "decodedSamples": 861696,
+        "decodedDuration": 19.539591836734694,
+        "decodedNativePCMHash": "82bc02ba16a449f4286083269e71b5c8ad21c981de424112a5e1082197f9c6bc",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "a3fd1da1975322c169060571fe7f93dfbac117b851a14d25f7398c1dd178bf17",
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7691297448799402586",
+      "title": "我们回到以前吧 你介意吗#美甲比心 #吊带袜",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7691297448799402586",
+      "musicId": "7685612376531487530",
+      "musicTitle": "@海王创作的原声",
+      "musicDurationField": 28,
+      "album": {
+        "begin_time": 0,
+        "end_time": 28000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "5e1e65fef4219ab3c49dc07996a919ecd918a819a05e45a82ef4366958f89495",
+        "bytes": 452684,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/452684",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/5e1e65fef4219ab3c49dc07996a919ecd918a819a05e45a82ef4366958f89495.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 28.133875,
+        "streamDuration": 28.133875,
+        "decodedSamples": 1240704,
+        "decodedDuration": 28.133877551020408,
+        "decodedNativePCMHash": "05dbcaa1a21576d3ccd962c45460ba8dbe82f4e57b74ae0c5e293643e9ad9b7f",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "5e1e65fef4219ab3c49dc07996a919ecd918a819a05e45a82ef4366958f89495",
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7693009053824565865",
+      "title": "#少御",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693009053824565865",
+      "musicId": "7692444609934379819",
+      "musicTitle": "爱哎唉(汽修二班进行曲)",
+      "musicDurationField": 60,
+      "album": {
+        "begin_time": 0,
+        "end_time": 60000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "280f64d9181f3dc7cd037692bfa854818fc29fa9f6a0166e67e4f24560364d74",
+        "bytes": 2401220,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/2401220",
+          "length": "1024",
+          "acceptRanges": null
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/280f64d9181f3dc7cd037692bfa854818fc29fa9f6a0166e67e4f24560364d74.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 60.029375,
+        "streamDuration": 60.029375,
+        "decodedSamples": 2647296,
+        "decodedDuration": 60.02938775510204,
+        "decodedNativePCMHash": "6ad07f5a35a933db30dd835193bd36433801c1cc6a1abeffe6868a01fb4b8b2f",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "280f64d9181f3dc7cd037692bfa854818fc29fa9f6a0166e67e4f24560364d74",
+      "phoneListeningCompared": false
+    },
+    {
+      "id": "7693544046488608937",
+      "title": "太帅了，影大人。#原神 #雷电将军 #雷电影 #雷电将军cos #御姐",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693544046488608937",
+      "musicId": "7692447509737753344",
+      "musicTitle": "@用户010313创作的原声",
+      "musicDurationField": 26,
+      "album": {
+        "begin_time": 0,
+        "end_time": 26000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "d175d5d2a694bb8e0d4460e6ae655503824bd108b8a4bda4a799bb214278799f",
+        "bytes": 630625,
+        "contentType": "audio/mpeg",
+        "range": {
+          "status": 206,
+          "type": "audio/mpeg",
+          "contentRange": "bytes 0-1023/630625",
+          "length": "1024",
+          "acceptRanges": "bytes"
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/d175d5d2a694bb8e0d4460e6ae655503824bd108b8a4bda4a799bb214278799f.bin",
+        "format": "mp3",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "mp3float",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 26.253042,
+        "streamDuration": 26.253041666666668,
+        "decodedSamples": 1157760,
+        "decodedDuration": 26.253061224489795,
+        "decodedNativePCMHash": "4f3dd81bb5d96c6ae1daa53cc2c263a761965b21eb4844b090456fcd3bc4dfb4",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "d175d5d2a694bb8e0d4460e6ae655503824bd108b8a4bda4a799bb214278799f",
+      "phoneListeningCompared": false,
+      "videoDurationField": 0
+    },
+    {
+      "id": "7693522233809060031",
+      "title": "兔的世界下起了萝卜雨🥕\n#cos #外卖兔女郎 #外卖兔女郎小葵#cosplay#二次元",
+      "type": 68,
+      "originalURL": "https://www.douyin.com/video/7693522233809060031",
+      "musicId": "7686254692658104346",
+      "musicTitle": "Bridgestone-全曲",
+      "musicDurationField": 127,
+      "album": {
+        "begin_time": 0,
+        "end_time": 127000,
+        "volume": 100
+      },
+      "musicURLCount": 2,
+      "sourceField": "music.play_url.url_list",
+      "audio": {
+        "sha256": "e43b8c772f01c1248a4d37e2e20082e4b0a32e5bdbf3a0e2565266f2ef0dd716",
+        "bytes": 2068060,
+        "contentType": "audio/mp4",
+        "range": {
+          "status": 206,
+          "type": "audio/mp4",
+          "contentRange": "bytes 0-1023/2068060",
+          "length": "1024",
+          "acceptRanges": null
+        },
+        "localEvidence": ".test-output/audio-experiment-20261011-followup/e43b8c772f01c1248a4d37e2e20082e4b0a32e5bdbf3a0e2565266f2ef0dd716.bin",
+        "format": "mov,mp4,m4a,3gp,3g2,mj2",
+        "streamTypes": [
+          "audio"
+        ],
+        "codec": "aac",
+        "sampleRate": 44100,
+        "channels": 2,
+        "containerDuration": 127.741927,
+        "streamDuration": 127.74192743764172,
+        "decodedSamples": 5633419,
+        "decodedDuration": 127.74192743764172,
+        "decodedNativePCMHash": "e5e52cd66bae837b96286bdd0858781cf74a8955291e38be66d8f3e6ed4f33a6",
+        "decodeComplete": true
+      },
+      "pageMusicMatches": 2,
+      "byteComparedToPage": true,
+      "pageComparisonHash": "e43b8c772f01c1248a4d37e2e20082e4b0a32e5bdbf3a0e2565266f2ef0dd716",
+      "phoneListeningCompared": false
+    }
+  ],
+  "videoControlComparison": {
+    "workId": "7693112789354787251",
+    "musicSeconds": 12.95675,
+    "videoAudioSeconds": 4.433,
+    "rate": 8000,
+    "bestOffsetSeconds": 0,
+    "correlation": 0.9932278710633862,
+    "method": "mono 8kHz normalized sliding waveform correlation; diagnostic only, not automatic dedup"
+  },
+  "loopProbe": [
+    {
+      "id": "7693544046488608937",
+      "found": false
+    },
+    {
+      "id": "7693029744136194214",
+      "found": true,
+      "declaredEnd": 191,
+      "duration": 191.401995,
+      "loop": false,
+      "volume": 0.5,
+      "trace": [
+        {
+          "ms": 0,
+          "time": 190.518996,
+          "paused": false
+        },
+        {
+          "ms": 38,
+          "time": 190.519036,
+          "paused": false
+        },
+        {
+          "ms": 64,
+          "time": 190.541504,
+          "paused": false
+        },
+        {
+          "ms": 85,
+          "time": 190.563586,
+          "paused": false
+        },
+        {
+          "ms": 107,
+          "time": 190.585498,
+          "paused": false
+        },
+        {
+          "ms": 177,
+          "time": 190.655336,
+          "paused": false
+        },
+        {
+          "ms": 295,
+          "time": 190.773383,
+          "paused": false
+        },
+        {
+          "ms": 335,
+          "time": 190.813342,
+          "paused": false
+        },
+        {
+          "ms": 443,
+          "time": 190.921429,
+          "paused": false
+        },
+        {
+          "ms": 474,
+          "time": 190.951672,
+          "paused": false
+        },
+        {
+          "ms": 548,
+          "time": 191.026159,
+          "paused": false
+        },
+        {
+          "ms": 615,
+          "time": 191.093019,
+          "paused": false
+        },
+        {
+          "ms": 673,
+          "time": 0,
+          "paused": false
+        },
+        {
+          "ms": 700,
+          "time": 0.016397,
+          "paused": false
+        },
+        {
+          "ms": 761,
+          "time": 0.0577,
+          "paused": false
+        },
+        {
+          "ms": 783,
+          "time": 0.081159,
+          "paused": false
+        },
+        {
+          "ms": 806,
+          "time": 0.102826,
+          "paused": false
+        },
+        {
+          "ms": 827,
+          "time": 0.124111,
+          "paused": false
+        },
+        {
+          "ms": 847,
+          "time": 0.144716,
+          "paused": false
+        },
+        {
+          "ms": 869,
+          "time": 0.165895,
+          "paused": false
+        },
+        {
+          "ms": 919,
+          "time": 0.21717,
+          "paused": false
+        },
+        {
+          "ms": 972,
+          "time": 0.268491,
+          "paused": false
+        },
+        {
+          "ms": 1039,
+          "time": 0.336873,
+          "paused": false
+        },
+        {
+          "ms": 1083,
+          "time": 0.379513,
+          "paused": false
+        },
+        {
+          "ms": 1103,
+          "time": 0.400054,
+          "paused": false
+        },
+        {
+          "ms": 1124,
+          "time": 0.420062,
+          "paused": false
+        },
+        {
+          "ms": 1145,
+          "time": 0.441056,
+          "paused": false
+        },
+        {
+          "ms": 1167,
+          "time": 0.463084,
+          "paused": false
+        },
+        {
+          "ms": 1187,
+          "time": 0.48405,
+          "paused": false
+        },
+        {
+          "ms": 1208,
+          "time": 0.503783,
+          "paused": false
+        },
+        {
+          "ms": 1228,
+          "time": 0.525512,
+          "paused": false
+        },
+        {
+          "ms": 1249,
+          "time": 0.545988,
+          "paused": false
+        },
+        {
+          "ms": 1271,
+          "time": 0.567766,
+          "paused": false
+        },
+        {
+          "ms": 1291,
+          "time": 0.588738,
+          "paused": false
+        },
+        {
+          "ms": 1312,
+          "time": 0.60896,
+          "paused": false
+        },
+        {
+          "ms": 1333,
+          "time": 0.629608,
+          "paused": false
+        },
+        {
+          "ms": 1354,
+          "time": 0.651863,
+          "paused": false
+        },
+        {
+          "ms": 1375,
+          "time": 0.671437,
+          "paused": false
+        },
+        {
+          "ms": 1395,
+          "time": 0.692247,
+          "paused": false
+        },
+        {
+          "ms": 1416,
+          "time": 0.71359,
+          "paused": false
+        },
+        {
+          "ms": 1437,
+          "time": 0.733771,
+          "paused": false
+        },
+        {
+          "ms": 1459,
+          "time": 0.755855,
+          "paused": false
+        },
+        {
+          "ms": 1480,
+          "time": 0.776653,
+          "paused": false
+        }
+      ]
+    }
+  ]
+}

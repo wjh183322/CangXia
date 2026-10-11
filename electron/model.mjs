@@ -1,5 +1,6 @@
 import {normalizeCreator,parseCoCreators,CREATOR_INFO_VERSION} from '../shared/creators.mjs';
 import path from 'node:path';
+import {parseMusicInfo} from '../shared/music.mjs';
 export { selectWorks } from './filter.mjs';
 
 export const TOTAL = '__all__';
@@ -78,7 +79,7 @@ export function parseWork(raw,{fullDetail=false}={}) {
     coverUrls: original.length ? original : staticCover, coverSource: original.length ? (v.origin_cover || v.originCover ? 'origin_cover' : 'cover_original_scale') : 'cover',
     thumbnail: staticCover[0] || original[0] || images[0]?.urls[0] || '',
     duration: Number(v.duration || raw.duration || 0), width: Number(v.width || 0), height: Number(v.height || 0),
-    publishedAt: Number(raw.create_time || 0), url: `https://www.douyin.com/video/${id}`, remoteState: raw.is_delete === true || raw.is_delete === 1 || raw.status?.is_delete === true ? 'unavailable' : 'available', checkedAt: new Date().toISOString()
+    ...(parseMusicInfo(raw)?{music:parseMusicInfo(raw)}:{}),publishedAt: Number(raw.create_time || 0), url: `https://www.douyin.com/video/${id}`, remoteState: raw.is_delete === true || raw.is_delete === 1 || raw.status?.is_delete === true ? 'unavailable' : 'available', checkedAt: new Date().toISOString()
   };
 }
 export function classifyResponse(url, data) {

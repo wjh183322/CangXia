@@ -14,6 +14,7 @@ import {DownloadTasks} from './download-tasks.mjs';
 import {FileStates} from './file-states.mjs';
 import {WorkViews} from './work-views.mjs';
 import {initializeRecordJournal} from './record-journal.mjs';
+import {audioSources} from './work-audio.mjs';
 
 export class Store {
   static async open(file, defaultRoot) {
@@ -33,6 +34,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sync_items(collection_id TEXT NOT NULL,work_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(collection_id,work_id));
       CREATE INDEX IF NOT EXISTS sync_items_order ON sync_items(collection_id,position);
       CREATE TABLE IF NOT EXISTS sync_pages(collection_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(collection_id,cursor));`);
+    db.run('CREATE TABLE IF NOT EXISTS audio_source_hints(work TEXT PRIMARY KEY,body TEXT NOT NULL);');
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
     s.authorSources.init();
@@ -56,6 +58,10 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS hash_epoch_delete AFTER DELETE ON backup_file_hashes BEGIN UPDATE backup_hash_epoch SET value=value+1 WHERE id=1; END;`);
     s.sync.recover();
     s.collectionReads.recover();
+    db.run('CREATE TABLE IF NOT EXISTS audio_source_hints(work TEXT PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS audio_objects(sha TEXT PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS audio_refs(work TEXT PRIMARY KEY,sha TEXT,local_saved INTEGER NOT NULL,nas_pending INTEGER NOT NULL,music_id TEXT);CREATE INDEX IF NOT EXISTS audio_refs_object ON audio_refs(sha);CREATE TABLE IF NOT EXISTS audio_source_objects(source TEXT PRIMARY KEY,sha TEXT NOT NULL);CREATE TABLE IF NOT EXISTS audio_jobs(work TEXT PRIMARY KEY,body TEXT NOT NULL);CREATE INDEX IF NOT EXISTS audio_jobs_state ON audio_jobs(json_extract(body,\'$.state\'));CREATE INDEX IF NOT EXISTS works_backup_cover_sha ON works(json_extract(body,\'$.backupCover.sha256\'));CREATE TABLE IF NOT EXISTS audio_file_proofs(file TEXT PRIMARY KEY,stamp TEXT,sha TEXT);');
+    db.run(`CREATE INDEX IF NOT EXISTS audio_jobs_state_work ON audio_jobs(json_extract(body,'$.state'),work);CREATE INDEX IF NOT EXISTS audio_jobs_ui ON audio_jobs(CASE json_extract(body,'$.state') WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,work);`);
+    if(!s.rows('PRAGMA table_info(audio_refs)').some(r=>r.name==='music_id'))db.run('ALTER TABLE audio_refs ADD COLUMN music_id TEXT');
+    db.run('CREATE TABLE IF NOT EXISTS audio_part_waiters(source TEXT,work TEXT,PRIMARY KEY(source,work));CREATE INDEX IF NOT EXISTS audio_part_work ON audio_part_waiters(work);');
     s.save(); return s;
   }
   constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this);this.db.onRollback=()=>{this.viewCache.clear();this.lightViews.rollback();this.revision++;}; }
@@ -71,7 +77,7 @@ export class Store {
     if(['works','downloads','backup_downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++;
     if(table==='downloads')this.fileStates.invalidate(String(id));
     this.lightViews?.invalidate(table,String(id),body);
-    const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','checkedAt'];
+    const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','checkedAt','music'];
     if(table==='local_tags'||table==='works'&&(!old||metadataKeys.some(key=>JSON.stringify(old[key])!==JSON.stringify(body[key]))))this.localReconcile.mark(String(id));
   }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
@@ -119,6 +125,9 @@ export class Store {
   upsertWork(raw,options={}) {
     const next = parseWork(raw,options); if (!next) return null;
     const old = this.work(next.id);
+    if((!next.music||next.music.state==='unknown')&&old?.music?.state==='known')next.music=old.music;
+    if(old&&next.thumbnail&&old.thumbnail!==next.thumbnail)this.mediaCache?.invalidateCover(next.id);
+    const hints=audioSources(raw);if(hints.length)this.db.run('INSERT OR REPLACE INTO audio_source_hints VALUES(?,?)',[next.id,JSON.stringify({sources:hints,music:next.music,at:Date.now()})]);else if(next.music?.id&&old?.music?.id&&next.music.id!==old.music.id)this.db.run('DELETE FROM audio_source_hints WHERE work=?',[next.id]);
     if (old) {
       for (const key of ['title','caption','description','thumbnail']) if (!next[key]) next[key] = old[key];
       if (next.name === '未命名作品') next.name = old.name;

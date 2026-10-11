@@ -5,6 +5,8 @@ import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import {validAccountIdentity} from './account-identity.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
 import {readCollection} from './collection-reader.mjs';
+import {parseMusicInfo} from '../shared/music.mjs';
+import {audioSources} from './work-audio.mjs';
 
 const API_PATHS=new Set(['/aweme/v1/web/aweme/listcollection/','/aweme/v1/web/collects/list/','/aweme/v1/web/collects/video/list/','/aweme/v1/web/aweme/detail/','/aweme/v1/web/user/profile/other/','/aweme/v1/web/aweme/post/']);
 export class Collector{
@@ -208,6 +210,11 @@ export class Collector{
     }
   }
   markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
+  async resolveMusic(id,signal){
+    await this.ready;signal?.throwIfAborted();this.assertNotCoolingDown();if(!/^\d+$/.test(id)||this.busy||this.waiters.size)throw Error('请等待当前读取任务结束');if(!(await this.isAuthenticated()))throw Object.assign(Error('请连接抖音账号后更新配乐信息'),{code:'AUTH_REQUIRED'});
+    const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal,key='audio:'+id;this.waiters.set(key,{reject:()=>controller.abort()});
+    try{const d=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined,quiet:true}),raw=d.aweme_detail||d.data?.aweme_detail;if(String(raw?.aweme_id)!==id)throw Error('未取得对应图文的配乐信息');const music=parseMusicInfo(raw),sources=audioSources(raw);this.store.db.run('INSERT OR REPLACE INTO audio_source_hints VALUES(?,?)',[id,JSON.stringify({music,sources,basedOn:this.store.work(id)?.music?.id||'',at:Date.now()})]);const w=this.store.work(id);if(w&&music&&this.store.backup?.canWrite()){this.store.put('works',id,{...w,music});this.store.save();this.notify();}return music;}finally{this.waiters.delete(key);this.scheduleBrowserIdle();}
+  }
   async resolveMediaOnly(id,signal){
     await this.ready;signal?.throwIfAborted();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(!(await this.isAuthenticated()))throw new Error('剩余媒体需要联网，请登录原账号后重试');

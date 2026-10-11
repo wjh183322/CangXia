@@ -85,7 +85,7 @@ export class DownloadQueue {
     if (this.running) return; this.running = true;this.cursor=0;
     try {
       while (true) {
-        while(!this.paused&&this.active.size<this.concurrency&&this.cursor<this.jobs.length){
+        while(!this.paused&&this.active.size+(this.externalActive?.()||0)<this.concurrency&&this.cursor<this.jobs.length){
           const job=this.jobs[this.cursor++];if(job.state!=='waiting'||this.active.has(job.id))continue;
           const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
           task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(async()=>{
@@ -186,7 +186,7 @@ export class DownloadQueue {
     d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
   }
   metadata(w, d) {
-    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, coAuthors:w.coAuthors||[], tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, hdCover:d.hdCover, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons,match }) => ({ key, file, size, width, height, source, comparisons,match })) };
+    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, coAuthors:w.coAuthors||[], tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url,music:w.music, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, hdCover:d.hdCover, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons,match }) => ({ key, file, size, width, height, source, comparisons,match })) };
   }
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});

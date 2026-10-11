@@ -1,22 +1,25 @@
 import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Volume2, VolumeX, X, Info, Check, Pause, Play } from 'lucide-react';
+import {AudioPlayback} from './work-audio-ui.jsx';
 
 const Sound = createContext(null);
+export const useSound=()=>useContext(Sound);
 export function SoundProvider({children}) {
   // Session-only state. Deliberately never read or write localStorage or persisted settings.
   const [volume,setVolume]=useState(0), [last,setLast]=useState(0.5);
+  const active=useRef(null);const claim=(key,stop)=>{if(active.current?.key!==key)active.current?.stop?.();active.current={key,stop};};
   const update=value=>{const n=Math.max(0,Math.min(1,Number(value)));if(n>0)setLast(n);setVolume(n);};
-  return <Sound.Provider value={{volume,update,toggle:()=>update(volume?0:last)}}>{children}</Sound.Provider>;
+  return <Sound.Provider value={{volume,update,claim,toggle:()=>update(volume?0:last)}}>{children}</Sound.Provider>;
 }
 export function VolumeControl() {
   const {volume,update,toggle}=useContext(Sound);
   return <div className="volume-control"><button aria-label={volume?'静音':'取消静音'} onClick={toggle}>{volume?<Volume2 size={17}/>:<VolumeX size={17}/>}</button><input type="range" min="0" max="100" step="1" aria-label="全局音量" value={Math.round(volume*100)} onChange={e=>update(Number(e.target.value)/100)}/><span>{Math.round(volume*100)}%</span></div>;
 }
 export function MediaVideo({autoPlay=false,suspended=false,...props}) {
-  const ref=useRef(null), {volume,update}=useContext(Sound);
+  const ref=useRef(null), {volume,update,claim}=useContext(Sound),key=useRef(crypto.randomUUID());
   useLayoutEffect(()=>{const v=ref.current;if(v){v.volume=volume;v.muted=volume===0;}},[volume]);
   useEffect(()=>{const v=ref.current;if(!v)return;if(suspended)v.pause();else if(autoPlay)v.play().catch(()=>{});},[suspended,autoPlay,props.src]);
-  return <video {...props} ref={ref} autoPlay={autoPlay&&!suspended} muted={volume===0} onVolumeChange={e=>{const v=e.currentTarget;const next=v.muted?0:v.volume;if(Math.abs(next-volume)>.001)update(next);}}/>;
+  return <video {...props} ref={ref} autoPlay={autoPlay&&!suspended} muted={volume===0} onPlay={e=>{claim('video:'+key.current,()=>ref.current?.pause());props.onPlay?.(e);}} onVolumeChange={e=>{const v=e.currentTarget;const next=v.muted?0:v.volume;if(Math.abs(next-volume)>.001)update(next);}}/>;
 }
 export function CoverAction({local,onBrowse,onDetail,children,...props}) {
   const timer=useRef(null);
@@ -35,7 +38,7 @@ export function mediaFor(work) {
   }
   return [...assets.filter(a=>a.kind==='image').sort((a,b)=>Number(a.key.replace('image-',''))-Number(b.key.replace('image-',''))),...assets.filter(a=>a.kind==='video')];
 }
-export function Viewer({work,index,total,onWork,onClose,onDetail,suspended}) {
+export function Viewer({work,index,total,onWork,onClose,onDetail,suspended,api}) {
   const [mediaIndex,setMediaIndex]=useState(0), [error,setError]=useState(false);
   const media=mediaFor(work), current=media[mediaIndex];
   useEffect(()=>{setMediaIndex(0);setError(false);},[work?.id]);
@@ -57,7 +60,7 @@ export function Viewer({work,index,total,onWork,onClose,onDetail,suspended}) {
       <button aria-label="下一张媒体" disabled={mediaIndex>=media.length-1} onClick={()=>setMediaIndex(n=>n+1)}><ArrowRight/></button>
       <div className="work-arrows"><button aria-label="上一个作品" disabled={index<=0} onClick={()=>onWork(-1)}><ArrowUp/></button><button aria-label="下一个作品" disabled={index>=total-1} onClick={()=>onWork(1)}><ArrowDown/></button></div>
     </div>
-    <footer><span>{current?`${current.kind==='video'?'视频':current.source==='video_frame'?'视频截帧':'图片'} ${mediaIndex+1} / ${media.length}${current.width&&current.height?` · ${current.width}×${current.height}`:''}`:'媒体缺失'}</span><span>← → 切换图片 / 视频　↑ ↓ 切换作品　双击画面查看详情</span>{work.remoteState==='unavailable'&&<b>原作品已失效</b>}</footer>
+    <AudioPlayback key={work.id} api={api} work={work} suspended={suspended||current?.kind==='video'}/><footer><span>{current?`${current.kind==='video'?'视频':current.source==='video_frame'?'视频截帧':'图片'} ${mediaIndex+1} / ${media.length}${current.width&&current.height?` · ${current.width}×${current.height}`:''}`:'媒体缺失'}</span><span>← → 切换图片 / 视频　↑ ↓ 切换作品　双击画面查看详情</span>{work.remoteState==='unavailable'&&<b>原作品已失效</b>}</footer>
   </section>;
 }
 export function TagRow({title,selected,onRemove,onOpen,mode}) {
