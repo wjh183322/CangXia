@@ -60,7 +60,7 @@ export function Viewer({work,index,total,onWork,onClose,onDetail,suspended,api})
       <button aria-label="下一张媒体" disabled={mediaIndex>=media.length-1} onClick={()=>setMediaIndex(n=>n+1)}><ArrowRight/></button>
       <div className="work-arrows"><button aria-label="上一个作品" disabled={index<=0} onClick={()=>onWork(-1)}><ArrowUp/></button><button aria-label="下一个作品" disabled={index>=total-1} onClick={()=>onWork(1)}><ArrowDown/></button></div>
     </div>
-    <AudioPlayback key={work.id} api={api} work={work} suspended={suspended||current?.kind==='video'}/><footer><span>{current?`${current.kind==='video'?'视频':current.source==='video_frame'?'视频截帧':'图片'} ${mediaIndex+1} / ${media.length}${current.width&&current.height?` · ${current.width}×${current.height}`:''}`:'媒体缺失'}</span><span>← → 切换图片 / 视频　↑ ↓ 切换作品　双击画面查看详情</span>{work.remoteState==='unavailable'&&<b>原作品已失效</b>}</footer>
+    {work.type==='images'&&api?.audioPrepare&&<div className="viewer-audio-bar"><AudioPlayback key={work.id} api={api} work={work} suspended={suspended||current?.kind==='video'}/></div>}<footer><span>{current?`${current.kind==='video'?'视频':current.source==='video_frame'?'视频截帧':'图片'} ${mediaIndex+1} / ${media.length}${current.width&&current.height?` · ${current.width}×${current.height}`:''}`:'媒体缺失'}</span><span>← → 切换图片 / 视频　↑ ↓ 切换作品　双击画面查看详情</span>{work.remoteState==='unavailable'&&<b>原作品已失效</b>}</footer>
   </section>;
 }
 export function TagRow({title,selected,onRemove,onOpen,mode}) {

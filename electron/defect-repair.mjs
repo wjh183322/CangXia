@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {setImmediate as yieldLoop} from 'node:timers/promises';
 import {inspectWorkFiles} from './repair-check.mjs';
-import {preparePreviews,previewAsset,readCachedPreview} from './backup-previews.mjs';
+import {preparePreviews,previewAsset,readLocalPreview} from './backup-previews.mjs';
 
 const safeId=id=>typeof id==='string'&&/^\d{1,32}$/.test(id);
 export class DefectRepair{
@@ -44,7 +44,7 @@ export class DefectRepair{
  async repairCover(id,signal){
   let work=this.store.work(id);const asset=previewAsset(this.store,work);
   if(asset){const file=await this.backup.covers.get(id);if(!file)throw new Error('暂时无法取回 NAS 封面，请检查连接后重试');return '已取回并校验封面';}
-  if(await readCachedPreview(path.join(this.profile,'covers',id+'.jpg'),signal)){this.backup.covers.clearProblem(id);return '本机封面已可用，空闲后补备份';}
+  if(await readLocalPreview(this.backup,work,signal)){this.backup.covers.clearProblem(id);return '本机封面已可用，空闲后补备份';}
   signal.throwIfAborted();await this.collector.resolveWork(id);signal.throwIfAborted();work=this.store.work(id);
   const entries=[{table:'works',key:id,body:work}],files=[];const failures=await preparePreviews(this.backup,entries,files,signal);
   if(failures||!files.length)throw new Error(this.backup.covers.problems?.get(id)?.reason||'刷新作品后仍未取得封面，可能是图片地址失效或作品受限');

@@ -7,6 +7,18 @@ export function missingPreviews(store){const records=store.all('backup_downloads
 function extension(b){if(b.length>=24&&b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return '.png';if(b.length>=4&&b[0]===255&&b[1]===216&&b[2]===255)return '.jpg';if(b.length>=16&&b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP')return '.webp';if(b.length>=10&&/^GIF8[79]a$/.test(b.toString('ascii',0,6)))return '.gif';if(b.length>=16&&b.toString('ascii',4,8)==='ftyp'&&/avif|avis/.test(b.toString('ascii',8,32)))return '.avif';throw new Error('封面不是支持的图片');}
 async function cached(file,signal){try{const stat=await fs.lstat(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size<=0||stat.size>limit)return null;const bytes=await fs.readFile(file,{signal});if(bytes.length>limit)return null;return {bytes,ext:extension(bytes)};}catch(e){if(signal?.aborted)throw e;return null;}}
 export const readCachedPreview=cached;
+export async function readLocalPreview(client,work,signal){
+ const row=await client.cache?.alias('cover',work.id);
+ if(row){const release=client.cache.pin(row.key);try{const result=await cached(row.file,signal);if(result)return result;}finally{release();}}
+ return cached(path.join(client.profile,'covers',work.id+'.jpg'),signal);
+}
+async function obtainPreview(client,work,signal){
+ const local=await readLocalPreview(client,work,signal);if(local)return local;
+ const urls=[...new Set([work.thumbnail,...(work.coverUrls||[]),...(work.images?.[0]?.urls||[])].filter(isMediaURL))].slice(0,6);
+ if(!client.fetchCover||!urls.length)throw Error('需要重新登录读取封面');
+ let failure;for(const url of urls){signal.throwIfAborted();try{return await fetchImage(client.fetchCover,url,signal);}catch(error){if(signal.aborted||error.status===429)throw error;failure=error;}}
+ throw failure;
+}
 export {fetchImage as fetchPreviewImage};
 async function fetchImage(fetchCover,url,signal){const response=await fetchCover(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])});if(!response.ok){await response.body?.cancel();throw Object.assign(new Error('封面图片地址返回 HTTP '+response.status),{status:response.status});}if(!/^image\//i.test(response.headers.get('content-type')||'')||Number(response.headers.get('content-length'))>limit){await response.body?.cancel();throw new Error('封面格式或大小不受支持');}const reader=response.body?.getReader();if(!reader)throw new Error('封面为空');const chunks=[];let count=0;try{for(;;){signal.throwIfAborted();const {done,value}=await reader.read();if(done)break;count+=value.length;if(count>limit)throw new Error('封面过大');chunks.push(value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}const bytes=Buffer.concat(chunks);return {bytes,ext:extension(bytes)};}
 // Previews are work metadata plus verified objects, never media download records.
@@ -14,7 +26,7 @@ async function fetchImage(fetchCover,url,signal){const response=await fetchCover
 export async function preparePreviews(client,entries,files,signal,{bounded=false}={}){
  const downloadEntries=new Map(entries.filter(e=>e.table==='downloads'&&e.body).map(e=>[e.key,e.body]));const workEntries=entries.filter(e=>e.table==='works');const writes=new Map();let index=0,finished=0,failed=0,preparedBytes=0;const preparedHashes=new Set();
  const tasks=await Promise.allSettled(Array.from({length:Math.min(3,workEntries.length)},async()=>{while(index<workEntries.length&&(!bounded||preparedBytes<64*1048576)){signal.throwIfAborted();const e=workEntries[index++],w=e.body,d=client.store.get('backup_downloads',e.key);if(!w||d?.backupDeleted||d?.backupRemoved&&!downloadEntries.get(e.key)?.assets?.length)continue;if(previewAsset(client.store,w))continue;const media=downloadEntries.get(w.id)?.assets?.find(validPreview);if(media){e.body={...w,backupCover:{...media,key:'preview'}};continue;}if(!w.thumbnail)continue;
-  try{let result=await cached(path.join(client.profile,'covers',w.id+'.jpg'),signal);if(!result){if(!client.fetchCover||!isMediaURL(w.thumbnail))throw new Error('需要重新登录读取封面');result=await fetchImage(client.fetchCover,w.thumbnail,signal);}
+  try{const result=await obtainPreview(client,w,signal);
    signal.throwIfAborted();const sha256=createHash('sha256').update(result.bytes).digest('hex'),directory=path.join(client.profile,'covers','previews');await fs.mkdir(directory,{recursive:true});const file=path.join(directory,sha256+result.ext);if(!writes.has(file))writes.set(file,client.cache?client.cache.writeCover(result.bytes,result.ext,{stage:true,library:client.meta.libraryId,work:w.id}):(async()=>{const temporary=file+'.'+randomUUID()+'.tmp';try{await fs.writeFile(temporary,result.bytes,{flag:'wx'});await fs.rename(temporary,file);}finally{await fs.rm(temporary,{force:true});}})());const prepared=await writes.get(file);if(prepared?.key)client.cache.hold(prepared.key,{library:client.meta.libraryId,work:w.id});
    if(!preparedHashes.has(sha256)){preparedHashes.add(sha256);preparedBytes+=result.bytes.length;}const asset={key:'preview',kind:'image',file:'cover'+result.ext,size:result.bytes.length,sha256};e.body={...w,backupCover:asset};files.push({file:prepared?.file||file,asset});client.covers?.clearProblem(w.id);
   }catch(error){if(signal.aborted)throw error;failed++;client.covers?.reportProblem(w.id,error.message,'source');}finally{finished++;client.status.progress=`准备封面 ${finished} 张${failed?` · ${failed} 张暂未取得`:''}`;client.emit();}

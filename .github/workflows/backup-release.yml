@@ -25,6 +25,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ./node_modules/.bin/electron.cmd tests/nas-layout.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./node_modules/.bin/electron.cmd tests/audio-viewer-layout.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -32,6 +34,8 @@ jobs:
           path: |
             .test-output/nas-ui-*.png
             .test-output/nas-layout-result.json
+            .test-output/audio-viewer-*.png
+            .test-output/audio-viewer-layout-result.json
           retention-days: 14
       - name: Build matching component
         shell: pwsh

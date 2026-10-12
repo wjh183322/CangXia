@@ -10,6 +10,7 @@ import {exportRecords,hashes} from '../electron/backup-model.mjs';
 import {sha256} from '../shared/backup-protocol.mjs';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==','base64');
+test('targeted repair uses the indexed browsing cache without refreshing already available work',async t=>{const f=await setup(t);const cache=await f.backup.cache.writeCover(png,'.png',{alias:'1'});f.backup.fetchCover=async()=>{throw Error('no network request expected');};f.manager.start(['1']);await f.manager.wait();assert.equal(f.manager.state().done,1);assert.equal(f.calls.length,0);assert.equal(f.queued.length,0);assert.deepEqual(fs.readFileSync(cache.file),png);assert.equal(f.store.work('1').backupCover,undefined);assert.equal(f.backup.status.pendingCovers,1);});
 const raw=id=>({aweme_id:id,desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:[]}}});
 async function setup(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-defect-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));store.setSetting('browserAccountKey','uid:1');
