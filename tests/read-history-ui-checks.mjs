@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+
+export async function checkReadHistoryUI({store,notify,data,act,settle,click,aria,check,dom}){
+ const ids=Array.from({length:45},(_,i)=>String(600000+i)),target=ids[42];
+ store.discoverCollections([{collects_id:'90',collects_name:'日志定位夹'}]);store.setAdded(['90']);
+ for(const [i,id]of ids.entries())store.upsertWork({aweme_id:id,desc:'日志定位作品 '+(i+1),author:{uid:'72',nickname:'定位测试'},video:{play_addr:{url_list:[]}}});
+ store.ingestMembers('90',ids,true);
+ const summary={token:'test-read-log-1107',scope:'90',name:'日志定位夹',mode:'quick',startedAt:'2026-10-15T12:22:01Z',checked:1107,frontAdded:266,filled:294,reappeared:1,added:559,existing:547,initialAdded:0,hasPrevious:true};
+ const body=JSON.stringify(summary);store.db.run('INSERT INTO read_history_runs VALUES(?,?,?,?,?)',[summary.token,summary.scope,summary.startedAt,body,body.length]);
+ store.readHistory.entry({token:summary.token,reference:new Map()},store.work(target),'fill',559);
+ store.readHistory.entry({token:summary.token,reference:new Map([[ids[43],1]])},store.work(ids[43]),'fill',866);
+ const originalCalls=[];window.cangxia.readHistoryRuns=async options=>store.readHistory.runs(options);window.cangxia.readHistoryItems=async(token,options)=>store.readHistory.items(token,options);
+ window.cangxia.openOriginal=async id=>{originalCalls.push(id);if(!/^\d+$/.test(id))throw Error('作品选择无效');};
+ const openLog=async()=>{await click('读取日志');await act(async()=>{[...document.querySelectorAll('.read-log-runs>button')].find(b=>b.textContent.includes('日志定位夹')).click();await settle();});};
+ await act(async()=>{notify(data());await settle();});await openLog();
+ const text=document.querySelector('.modal').textContent;
+ check('archived summary displays disjoint additions and deduplicated reads',text.includes('本轮读取 1,107')&&text.includes('本轮补齐 293')&&text.includes('本轮新增 559')&&text.includes('已有记录 548'));
+ await click('本轮补齐');check('returned records do not appear under new middle fills',document.querySelectorAll('.read-log-items>article').length===1);
+ await aria('打开抖音作品 '+target);check('log original button passes a work identity instead of a URL',originalCalls.at(-1)===target);
+ await aria('关闭弹窗');
+ await act(async()=>{document.querySelector('.collection-list [title="日志定位夹"]').click();await settle();const input=document.querySelector('[aria-label="搜索作品、作者或标签"]');Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(input,'日志定位作品 1');input.dispatchEvent(new Event('input',{bubbles:true}));await settle();});
+ const scrolled=[];dom.window.HTMLElement.prototype.scrollIntoView=function(){scrolled.push(this.getAttribute('data-work-id'));};
+ await openLog();await click('本轮补齐');await aria('在列表里显示作品 '+target);await act(async()=>{await new Promise(r=>setTimeout(r,35));});
+ check('log location closes overlays and clears filters without opening the work',!document.querySelector('.modal')&&!document.querySelector('.viewer')&&document.querySelector('[aria-label="搜索作品、作者或标签"]').value==='');
+ check('log location selects the owning folder and the correct later page',document.querySelector('h1').textContent.includes('日志定位夹')&&document.querySelector('[aria-label="顶部跳转页码"]').value==='3');
+ check('location highlights one card without adding download selection',document.querySelector('.work-card.located')?.getAttribute('data-work-id')===target&&!document.querySelector('.work-card.selected')&&scrolled.includes(target));
+ const visible=[...document.querySelectorAll('.work-card')].map(n=>n.getAttribute('data-work-id'));check('neighboring works remain visible in saved order',visible.join(',')===ids.slice(40).join(','));
+ const missing='699999';store.readHistory.entry({token:summary.token,reference:new Map()},{id:missing,name:'已经移除的历史作品',type:'video'},'fill',1000);
+ await openLog();await click('本轮补齐');await aria('在列表里显示作品 '+missing);
+ check('a removed log item cannot jump to a different work',!!document.querySelector('.read-log-items')&&!document.querySelector('.viewer')&&document.querySelector('.toast').textContent.includes('不在'));
+ await aria('关闭弹窗');
+ const author='MS4wLjABAAAA_READ_LOG_LOCATION',authorIds=Array.from({length:24},(_,i)=>String(700000+i));
+ store.authorSources.add(author,{user:{uid:'73',sec_uid:author,nickname:'日志定位作者'}});
+ const a=store.authorSources.start(author,{readAll:true});store.authorSources.apply(a,{items:authorIds.map((id,i)=>({aweme_id:id,desc:'作者定位作品 '+(i+1),author:{uid:'73',sec_uid:author,nickname:'日志定位作者'},video:{play_addr:{url_list:[]}}})),next:null,complete:true});
+ const authorRun={token:'author-location-run',scope:'author:'+author,source:'author',name:'作者定位日志',mode:'full',startedAt:'2026-10-15T12:31:00Z',checked:24,added:1,frontAdded:0,filled:1,reappeared:0,hasPrevious:true};store.readHistory.write(authorRun);store.readHistory.entry({token:authorRun.token,reference:new Map()},store.work(authorIds[22]),'fill',22);
+ await act(async()=>{notify(data());await settle();});await click('读取日志');await act(async()=>{[...document.querySelectorAll('.read-log-runs>button')].find(b=>b.textContent.includes('作者定位日志')).click();await settle();});await aria('在列表里显示作品 '+authorIds[22]);await act(async()=>{await new Promise(r=>setTimeout(r,35));});
+ check('author history locates its author list without opening the homepage or work',document.querySelector('.main-nav .active').textContent.includes('作者作品')&&document.querySelector('.work-card.located')?.getAttribute('data-work-id')===authorIds[22]&&document.querySelector('[aria-label="顶部跳转页码"]').value==='2'&&!document.querySelector('.modal')&&!document.querySelector('.viewer'));
+ store.sync.write({collectionId:'90',status:'paused',count:37,pages:2,nextCursor:'60',accountKey:store.getSetting('browserAccountKey')});store.readHistory.write({...store.collectionReads.info('90').full,token:'old-ui-checkpoint',scope:'90',name:'旧版37条断点',startedAt:'2026-10-15T13:00:00Z'});
+ await click('读取日志');await act(async()=>{[...document.querySelectorAll('.read-log-runs>button')].find(b=>b.textContent.includes('旧版37条断点')).click();await settle();});
+ check('legacy checkpoint UI preserves recorded progress and labels unavailable counts',document.querySelector('.read-log-counts').textContent.includes('本轮读取 37')&&document.querySelector('.read-log-counts').textContent.includes('本轮新增 未区分')&&document.querySelector('.read-log-counts').textContent.includes('已有记录 未区分'));await aria('关闭弹窗');
+}

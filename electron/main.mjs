@@ -332,7 +332,7 @@ try {
     ids([id]); const d = store.download(id); if (!d) throw new Error('作品尚未下载'); store.assertDirectory(d.path);
     const error = await shell.openPath(d.path); if (error) throw new Error(error);
   });
-  handler('openOriginal', async id => { ids([id]); const url = store.work(id)?.url; if (!isDouyinURL(url)) throw new Error('作品链接无效'); await collector.openOriginal(url); });
+  handler('openOriginal', async id => { ids([id]); const url = store.work(id)?.url||'https://www.douyin.com/video/'+id; if (!isDouyinURL(url)) throw new Error('作品链接无效'); await collector.openOriginal(url); });
   handler('setTags', async (id, tags) => {
     ids([id]); if (!Array.isArray(tags) || tags.length > 100 || tags.some(t => typeof t !== 'string' || t.length > 80)) throw new Error('标签格式无效');
     const normalized = [...new Set(tags.map(t => t.trim().replace(/^#/, '')).filter(Boolean))];

@@ -1,3 +1,4 @@
+import {checkReadHistoryUI} from './read-history-ui-checks.mjs';
 import {createRequire} from 'node:module';
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
 import {Store} from '../electron/store.mjs';import {inspectRepairs} from '../electron/repair-check.mjs';import {listDirectory,makeDirectory} from '../electron/file-browser.mjs';
@@ -186,6 +187,7 @@ try{
  await click('清除作者筛选');await aria('作品详情 我拍我拍我拍拍拍');await click('更新作者信息');await creatorSnapshotBegun;await aria('关闭弹窗');await aria('作品详情 同名但不同账号');await act(async()=>{finishCreatorSnapshot();await settle();});check('late creator refresh cannot replace the status of a newly opened work',!document.querySelector('.work-creators').textContent.includes('旧作品更新提示'));await aria('关闭弹窗');
  let manualCreatorCalls=0;const connectedData=()=>({...data(),collector:{...data().collector,connected:true}});window.cangxia.state=async()=>connectedData();window.cangxia.refreshWorkCreators=async(id,options)=>{manualCreatorCalls++;assert.equal(id,'99001');assert.equal(options.force,true);return {message:'手动作者更新完成'};};
  await act(async()=>{notify(connectedData());await settle();});await aria('作品详情 同名但不同账号');check('opening an incomplete work while logged in and NAS writable never refreshes creators automatically',manualCreatorCalls===0&&document.querySelector('.work-creators').textContent.includes('打开详情不会自动更新'));await aria('关闭弹窗');await aria('作品详情 同名但不同账号');await act(async()=>{notify(connectedData());await settle();});check('reopening details and runtime updates do not start a creator request',manualCreatorCalls===0);await click('更新作者信息');check('only the manual creator button starts a forced update',manualCreatorCalls===1&&document.querySelector('.work-creators').textContent.includes('手动作者更新完成'));await aria('关闭弹窗');
+ await checkReadHistoryUI({store,notify,data,act,settle,click,aria,check,dom});
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

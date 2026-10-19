@@ -1,6 +1,7 @@
+import {checkReadHistoryDesktop} from './read-history-desktop-checks.mjs';
 import {checkAuthorDesktop} from './author-desktop-checks.mjs';
 import {app,session,shell} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
-app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[];let started=false,hdProbeCalls=0;
+app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[],originalVisits=[];let started=false,hdProbeCalls=0;
 const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
 app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
  const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
@@ -37,6 +38,8 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   const retainedWork=await call('workDetail','123');const historyRaw=id=>id==='123'?{aweme_id:id,item_title:retainedWork.name,desc:retainedWork.description,author:{uid:retainedWork.author.uid,nickname:retainedWork.author.nickname},video:{play_addr:{url_list:[]}}}:{aweme_id:id,desc:'读取日志测试 '+id,author:{uid:'7',nickname:'日志作者'},images:[{url_list:['https://p3.douyinpic.com/read-history.png']}]};
   http.fetch=async(url,options)=>{const u=new URL(url);if(u.pathname==='/aweme/v1/web/aweme/listcollection/')return Response.json({status_code:0,aweme_list:(historyRound++===0?['123','501','502']:['601','123','503','502']).map(historyRaw),has_more:0});if(u.hostname==='p3.douyinpic.com')return new Response(historyPng,{headers:{'content-type':'image/png'}});return historyFetch.call(http,url,options);};
   try{await call('sync',{mode:'full'});const result=await call('sync',{mode:'full'});check('native collection summary separates front additions and middle fills while retaining history',result.readSummary.frontAdded===1&&result.readSummary.filled===1&&result.readSummary.notReturned===1&&(await call('state')).members.__all__.includes('501'));const rows=await call('readHistoryItems',result.readSummary.token);check('native log page contains only compact difference records',rows.total===2&&rows.items.length===2&&!('images' in rows.items[0])&&!('thumbnail' in rows.items[0]));const histories=await call('readHistoryRuns',{page:1});check('native history browser lists collection sessions and logical storage usage',histories.total===2&&histories.stats.bytes>0);}finally{http.fetch=historyFetch;}
+  await checkReadHistoryDesktop({win,check,originalVisits});
+  await call('openOriginal','123');check('native original links retain validated numeric work identities',originalVisits.at(-1)==='https://www.douyin.com/video/123');await call('openOriginal','999999999999999999');check('retained log identities open their public URL even after the library record is gone',originalVisits.at(-1)==='https://www.douyin.com/video/999999999999999999');await assert.rejects(call('openOriginal','https://www.douyin.com/video/123'),/作品选择无效/);
   await checkAuthorDesktop({win,http,call,check,profile:process.env.CANGXIA_BACKUP_TEST_PROFILE});
   const savedFetch=http.fetch;let activeTransfers=0,peakTransfers=0,detailQueries=0;
   const mediaBytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII=','base64');
@@ -97,7 +100,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
  }catch(e){console.error(e);fs.mkdirSync('.test-output',{recursive:true});fs.writeFileSync('.test-output/backup-desktop-result.json',JSON.stringify({ok:false,error:e.stack,checks},null,2));clearTimeout(timeout);app.exit(1);}
 })();});});
 const mainURL=process.env.CANGXIA_BACKUP_TEST_MAIN?pathToFileURL(path.resolve(process.env.CANGXIA_BACKUP_TEST_MAIN)):new URL('../electron/main.mjs',import.meta.url);
-const {SystemBrowser:FixtureBrowser}=await import(new URL('system-browser.mjs',mainURL));Object.defineProperty(FixtureBrowser.prototype,'api',{configurable:true,get(){return null;},set(){}});
+const {SystemBrowser:FixtureBrowser}=await import(new URL('system-browser.mjs',mainURL));const realFixtureOpen=FixtureBrowser.prototype.open;FixtureBrowser.prototype.open=async function(url){if(/^https:\/\/www\.douyin\.com\/video\/\d+$/.test(url)){originalVisits.push(url);return;}return realFixtureOpen.call(this,url);};Object.defineProperty(FixtureBrowser.prototype,'api',{configurable:true,get(){return null;},set(){}});
 // Existing IPC fixtures use literal "fixture-media", not encoded videos. Real decoding
 // and matching are covered separately by cover-frame-test.py and the packaged helper smoke test.
 const {HDCover:FixtureCover}=await import(new URL('hd-cover.mjs',mainURL));FixtureCover.prototype.runHelper=async request=>{hdProbeCalls++;assert.equal(request.mode,'probe');return {width:1,height:1};};
