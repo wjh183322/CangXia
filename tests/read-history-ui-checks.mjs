@@ -25,6 +25,12 @@ export async function checkReadHistoryUI({store,notify,data,act,settle,click,ari
  check('log location selects the owning folder and the correct later page',document.querySelector('h1').textContent.includes('日志定位夹')&&document.querySelector('[aria-label="顶部跳转页码"]').value==='3');
  check('location highlights one card without adding download selection',document.querySelector('.work-card.located')?.getAttribute('data-work-id')===target&&!document.querySelector('.work-card.selected')&&scrolled.includes(target));
  const visible=[...document.querySelectorAll('.work-card')].map(n=>n.getAttribute('data-work-id'));check('neighboring works remain visible in saved order',visible.join(',')===ids.slice(40).join(','));
+ // The history API can finish before the throttled list-state notification arrives.
+ await openLog();
+ const fresh='699998';store.upsertWork({aweme_id:fresh,desc:'尚未通知列表的新作品',author:{uid:'72',nickname:'定位测试'},images:[{url_list:[]}]});store.ingestMembers('90',[fresh,...ids],true);
+ store.readHistory.entry({token:summary.token,reference:new Map()},store.work(fresh),'front',0);
+ await click('前面新增');await aria('在列表里显示作品 '+fresh);await act(async()=>{await new Promise(r=>setTimeout(r,35));});
+ check('location refreshes a lagging list snapshot when the completed log already contains a new work',document.querySelector('.work-card.located')?.dataset.workId===fresh&&!document.querySelector('.modal')&&document.querySelector('[aria-label="顶部跳转页码"]').value==='1');
  const missing='699999';store.readHistory.entry({token:summary.token,reference:new Map()},{id:missing,name:'已经移除的历史作品',type:'video'},'fill',1000);
  await openLog();await click('本轮补齐');await aria('在列表里显示作品 '+missing);
  check('a removed log item cannot jump to a different work',!!document.querySelector('.read-log-items')&&!document.querySelector('.viewer')&&document.querySelector('.toast').textContent.includes('不在'));

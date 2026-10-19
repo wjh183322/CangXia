@@ -43,7 +43,7 @@ function App() {
   const [nasTab,setNASTab]=useState('all'),[nasCollection,setNASCollection]=useState(''),[nasAuthor,setNASAuthor]=useState(''),[nasAuthorQuery,setNASAuthorQuery]=useState('');
   const [query,setQuery] = useState(''), [type,setType] = useState('all'), [tags,setTags] = useState([]), [tagMode,setTagMode] = useState('any'), [author,setAuthor] = useState(''), [downloaded,setDownloaded] = useState('all');
   const [page,setPage] = useState(1), pageSize = 20, [selected,setSelected] = useState(new Set());
-  const [logLocation,setLogLocation]=useState(null),[locatedWork,setLocatedWork]=useState(null),locationTimer=useRef(null);
+  const [logLocation,setLogLocation]=useState(null),[locatedWork,setLocatedWork]=useState(null),locationTimer=useRef(null),logView=useRef(null);
   useEffect(()=>()=>clearTimeout(locationTimer.current),[]);
   const [modal,setModal] = useState(null), [detailId,setDetailId] = useState(null), [toast,setToast] = useState(''), [pending,setPending] = useState(false), [tagPanel,setTagPanel] = useState(false);
   const [addIds,setAddIds] = useState(new Set()), [link,setLink] = useState(''), [tagInput,setTagInput] = useState('');
@@ -108,6 +108,7 @@ function App() {
   const actionInFlight=useRef(false);
   async function act(fn, success) { if(actionInFlight.current)return;actionInFlight.current=true;setPending(true); try { const result=await fn(); if(success)setToast(success); return result; } catch(e){setToast(e.message); return undefined;} finally{actionInFlight.current=false;setPending(false);} }
   const byId = useMemo(()=>new Map(data.works.map(w=>[w.id,w])),[data.works]);
+  logView.current={data,byId};
   const focusedId=detailId||viewerId,focused=byId.get(focusedId);
   const focusVersion=focused?JSON.stringify([focused.checkedAt,focused.author,focused.coAuthors,focused.localTags,focused.localRecord?.hdCover]):'';
   useEffect(()=>{if(!focusedId||!focused?.light||!api.workDetail)return;const request=++detailLoads.current;api.workDetail(focusedId).then(work=>{if(request===detailLoads.current&&work)setDetailCache(old=>Object.fromEntries([...Object.entries(old).filter(([id])=>id!==focusedId).slice(-7),[focusedId,work]]));}).catch(error=>{if(request===detailLoads.current)setToast(error.message);});return()=>{detailLoads.current++;};},[focusedId,focusVersion]);
@@ -182,12 +183,17 @@ function App() {
   function toggle(id) { setSelected(old=>{const n=new Set(old);n.has(id)?n.delete(id):n.add(id);return n;}); }
   function changeMode(next) {setMode(next);setSelectedCreator(null);setNASTab('all');setNASCollection('');setNASAuthor('');setNASAuthorQuery('');setCollection(TOTAL);setQuery('');setTags([]);setMyTags([]);setType('all');setAuthor('');setDownloaded('all');}
   function changeNASScope(tab,folder='',creator=''){setNASTab(tab);setNASCollection(folder);setNASAuthor(creator);setPage(1);setSelected(new Set());setDetailId(null);setViewerId(null);clearFilters();}
-  function locateReadWork(run,id){
+  async function locateReadWork(run,id){
     const authorLog=run.source==='author'||String(run.scope).startsWith('author:'),scope=authorLog?String(run.scope).slice(7):run.scope;
-    if(authorLog){if(!(data.authors||[]).some(a=>a.id===scope)){setToast('此作者入口已移除，无法在原列表定位；读取日志仍保留');return;}}
-    else if(!data.collections.some(c=>c.id===scope&&c.added&&!c.remoteMissing)){setToast('此收藏夹已不在当前列表，读取日志仍保留');return;}
-    const order=(authorLog?data.authorMembers?.[scope]:data.members[scope])||[];
-    if(!order.includes(id)||!byId.has(id)){setToast('此作品已不在原列表，读取日志仍保留，可打开抖音原作品');return;}
+    const available=snapshot=>authorLog?(snapshot.authors||[]).some(a=>a.id===scope):snapshot.collections.some(c=>c.id===scope&&c.added&&!c.remoteMissing);
+    const member=snapshot=>((authorLog?snapshot.authorMembers?.[scope]:snapshot.members[scope])||[]).includes(id);
+    let {data:current,byId:currentWorks}=logView.current;
+    // Completed logs can arrive before the throttled list notification. Refresh only on a miss.
+    if(!available(current)||!member(current)||!currentWorks.has(id)){
+      current=await api.state();setData(current);currentWorks=new Map(current.works.map(w=>[w.id,w]));
+    }
+    if(!available(current)){setToast(authorLog?'此作者入口已移除，无法在原列表定位；读取日志仍保留':'此收藏夹已不在当前列表，读取日志仍保留');return;}
+    if(!member(current)||!currentWorks.has(id)){setToast('此作品已不在原列表，读取日志仍保留，可打开抖音原作品');return;}
     changeMode(authorLog?'author':'account');if(authorLog)setAuthorSourceId(scope);else setCollection(scope);
     setSelected(new Set());setDetailId(null);setViewerId(null);setModal(null);setLocatedWork(null);setLogLocation({mode:authorLog?'author':'account',scope,id});
   }
@@ -272,7 +278,7 @@ function App() {
     {modal==='exitBackup'&&<Modal title="还有内容未同步" onClose={()=>setModal(null)}><div className="modal-content"><p>本机有尚未同步到 NAS 的内容。换电脑前建议等同步完成；直接退出会把待同步内容保留在这台电脑。</p></div><footer className="modal-footer"><button className="button secondary" disabled={pending} onClick={()=>act(()=>api.finishBackupExit('keep'))}>保留本机，直接退出</button><button className="button primary" disabled={pending||!storage.writable} onClick={()=>act(()=>api.finishBackupExit('sync'))}>同步完成后退出</button></footer></Modal>}
     {modal==='logoutConfirm'&&<Modal title="暂停下载并退出登录？" description="退出登录可能影响资源地址刷新和后续下载。" onClose={()=>{if(!loggingOut)setModal(null);}}><div className="modal-content"><div className="info-box"><ShieldCheck size={19}/><p>已完整保存的文件不会重复下载。<br/>可安全续传的片段会保留，重新登录原账号后可手动继续。单独下载只能在本次运行中继续。</p></div></div><footer className="modal-footer"><button className="button secondary" onClick={()=>setModal(null)}>取消</button><button className="button primary" onClick={()=>act(()=>logout(true))}>暂停任务并退出登录</button></footer></Modal>}
     {modal==='readSummary'&&readSummary&&<Modal title="读取总结" className="read-history-dialog" onClose={()=>setModal(null)}><ReadSummary summary={readSummary} onClose={()=>setModal(null)} onLogs={()=>setModal('readLogs')}/></Modal>}
-    {modal==='readLogs'&&<Modal title="读取日志" className="read-history-dialog" wide onClose={()=>setModal(null)}><ReadHistoryPanel api={api} onClose={()=>setModal(null)} onWork={id=>act(async()=>{const work=await api.workDetail(id);if(!work){setToast('当前资料库已没有此作品记录，可以打开抖音原作品');return;}setDetailCache(old=>Object.fromEntries([...Object.entries(old).filter(([key])=>key!==id).slice(-7),[id,work]]));setModal(null);setDetailId(id);})} onLocate={locateReadWork} onOriginal={id=>act(()=>api.openOriginal(id))}/></Modal>}
+    {modal==='readLogs'&&<Modal title="读取日志" className="read-history-dialog" wide onClose={()=>setModal(null)}><ReadHistoryPanel api={api} onClose={()=>setModal(null)} onWork={id=>act(async()=>{const work=await api.workDetail(id);if(!work){setToast('当前资料库已没有此作品记录，可以打开抖音原作品');return;}setDetailCache(old=>Object.fromEntries([...Object.entries(old).filter(([key])=>key!==id).slice(-7),[id,work]]));setModal(null);setDetailId(id);})} onLocate={(run,id)=>act(()=>locateReadWork(run,id))} onOriginal={id=>act(()=>api.openOriginal(id))}/></Modal>}
     {(readLaunch||data.collector.busy)&&<Modal dismissible={false} title={`读取「${(data.collector.busy?data.collector.readProgress:readLaunch)?.name||'收藏'}」`} description="正在读取期间，请等候或使用下方的停止按钮。" onClose={()=>{}}><ReadProgress progress={data.collector.busy?data.collector.readProgress:readLaunch} onStop={stopReading} stopping={stoppingRead}/></Modal>}
     {loggingOut&&<Modal dismissible={false} title="正在退出登录" onClose={()=>{}}><div className="logout-working"><LoaderCircle size={28} className="spin"/><p>正在保存下载进度并清理登录信息…</p><small>本地资料和媒体文件会保留</small></div></Modal>}
     {toast&&<Toast message={toast} onClose={()=>setToast('')}/>}
