@@ -6,8 +6,10 @@ import { imageDimensions } from './media-info.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { inspectWorkFiles } from './repair-check.mjs';
 import {setImmediate as yieldToUI} from 'node:timers/promises';
+import {setTimeout as delay} from 'node:timers/promises';
 const storageFailure=e=>['ENOSPC','EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EISDIR','EBUSY','EIO','EMFILE'].includes(e?.code)||String(e?.code||'').startsWith('SQLITE');
 const sourceFailure=e=>!storageFailure(e)&&(e?.sourceUnavailable||e?.refreshable||e?.httpStatus>=400||e?.code==='AUTH_REQUIRED'||['ECONNRESET','ETIMEDOUT','ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError');
+const transient=e=>!storageFailure(e)&&([408,425,500,502,503,504].includes(e?.httpStatus)||['ECONNRESET','ETIMEDOUT','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError'||/\bnet::ERR_(CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_TIMED_OUT|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|HTTP2_PROTOCOL_ERROR)\b/.test(String(e?.message)+' '+String(e?.cause?.message)));
 
 function extension(contentType, kind) {
   const t = (contentType || '').split(';')[0];
@@ -39,8 +41,9 @@ export class DownloadQueue {
     this.jobs=this.jobs.filter(j=>j.state!=='complete'||selected&&!selected.has(j.id));
     this.cursor=0;this.emit(true);this.store.save();
   }
-  async cancel(ids=null){
-    const selected=ids===null?null:new Set(ids),removed=this.jobs.filter(j=>j.state!=='complete'&&(!selected||selected.has(j.id)));
+  async cancel(ids=null,{state}={}){
+    if(state!==undefined&&state!=='failed')throw Error('取消任务的状态范围无效');
+    const selected=ids===null?null:new Set(ids),removed=this.jobs.filter(j=>j.state!=='complete'&&(!state||j.state===state)&&(!selected||selected.has(j.id)));
     const removedIds=new Set(removed.map(j=>j.id)),pending=[];
     // Persist queue removal before waiting for network/file handles to settle.
     this.jobs=this.jobs.filter(j=>!removedIds.has(j.id));this.cursor=0;
@@ -73,6 +76,11 @@ export class DownloadQueue {
   }
   pause() { this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
   resume() { this.pauseReason='';this.paused = false;this.cursor=0;this.emit(true);this.wake?.();void this.run(); }
+  async retryFailed(ids=null){
+    const selected=ids===null?null:new Set(ids),failed=this.jobs.filter(j=>j.state==='failed'&&(!selected||selected.has(j.id)));let queued=0;
+    for(const job of failed){if(this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
+    if(queued){this.paused=false;this.pauseReason='';this.cursor=0;this.emit(true);this.wake?.();void this.run();}return {queued};
+  }
   async resolveWork(id,signal,job){
     if(job){job.phase='waitingResource';job.message='等待后台刷新资源';this.emit();}
     const previous=this.resolveTail;let release;this.resolveTail=new Promise(r=>{release=r;});
@@ -98,7 +106,7 @@ export class DownloadQueue {
             const interrupted=task.controller.signal.aborted;
             job.state=interrupted?'waiting':'failed';job.message=interrupted?'已暂停，继续时补齐':e.message;
             if(interrupted)this.cursor=0;
-          }).finally(()=>{this.active.delete(job.id);this.emit();this.store.save();});
+          }).finally(()=>{this.active.delete(job.id);if(!task.cancelled&&['complete','failed'].includes(job.state))try{this.onJobSettled?.(job);}catch{}this.emit();this.store.save();});
         }
         if(!this.active.size)break;
         await Promise.race([...this.active.values()].map(t=>t.promise).concat(new Promise(r=>{this.wake=r;})));this.wake=null;
@@ -115,7 +123,7 @@ export class DownloadQueue {
       throw Error('NAS 没有完整媒体备份；已恢复的文件保留，可到收藏或作者作品中尝试下载');
     }
     try{return await this.saveFromDouyin(job,signal);}catch(error){
-      signal.throwIfAborted();if(!sourceFailure(error)||!this.backupRestore)throw error;
+      signal.throwIfAborted();if(error.code==='AUTH_REQUIRED'||error.httpStatus===429||!sourceFailure(error)||!this.backupRestore)throw error;
       job.activeSource='nas';job.message='抖音资源未取得，尝试从 NAS 补齐';this.emit();
       try{if(await this.backupRestore(job,signal,{missingOnly:true}))return;}
       catch(nasError){signal.throwIfAborted();throw Error(`抖音下载失败：${error.message}；NAS 补齐失败：${nasError.message}`);}
@@ -163,7 +171,7 @@ export class DownloadQueue {
         const asset = target.key==='cover' && w.coverVariants?.length ? await this.saveBestCover(dir,w.coverVariants,signal,progress) : await this.saveAsset(dir, target, signal, progress);
         d.assets = [...d.assets.filter(a => a.key !== target.key), asset];
         store.put('downloads', job.id, d); store.save();
-      } catch (e) { if (signal.aborted||e.code==='AUTH_REQUIRED') throw e;refreshable ||= !!e.refreshable||[401,403,404,410].includes(e.httpStatus);allSourceFailures&&=!!sourceFailure(e);failures.push(`${target.name}：${e.message}`); }
+      } catch (e) { if (signal.aborted||e.code==='AUTH_REQUIRED'||storageFailure(e)) throw e;refreshable ||= !!e.refreshable||[401,403,404,410].includes(e.httpStatus);allSourceFailures&&=!!sourceFailure(e);failures.push(`${target.name}：${e.message}`); }
       completed++;
     }
     d.state = failures.length ? 'partial' : 'complete';
@@ -191,14 +199,19 @@ export class DownloadQueue {
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});
     let lastError;
+    let retries=0;
     for (const url of target.urls.slice(0, 9)) {
       if (!isMediaURL(url)) continue;
+      for(;;){
       try {
         let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,fetchMedia:async(...args)=>{try{return await this.fetchMedia(...args);}catch(e){if(!storageFailure(e))e.sourceUnavailable=true;throw e;}},extension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
         const dimensions=target.kind==='image'?imageDimensions(fs.readFileSync(file)):{};
         return { key: target.key, kind: target.kind, file: path.basename(file), size,sha256,resumedBytes,...dimensions };
       } catch (e) {
-        if (signal.aborted||e.httpStatus===429||e.code==='AUTH_REQUIRED') throw e; lastError = e;
+        if (signal.aborted||e.httpStatus===429||e.code==='AUTH_REQUIRED'||storageFailure(e)) throw e; lastError = e;
+        if(transient(e)&&retries<2){retries++;await (this.retryDelay||((ms,signal)=>delay(ms,undefined,{signal})))(retries*500,signal);continue;}
+        break;
+      }
       }
     }
     throw lastError || Object.assign(new Error('没有可用的媒体地址'),{refreshable:true});

@@ -1,0 +1,1 @@
+const {contextBridge,ipcRenderer}=require('electron');const api={onChange:()=>()=>{}};for(const name of ['state','inspectDefects','defectPage','startDefectRepair','downloadPage','retryDownloads'])api[name]=(...args)=>ipcRenderer.invoke('repair-layout:'+name,...args);contextBridge.exposeInMainWorld('cangxia',api);

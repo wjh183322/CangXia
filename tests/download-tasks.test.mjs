@@ -1,6 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {Store} from '../electron/store.mjs';import {DownloadQueue} from '../electron/downloads.mjs';
 async function fixture(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-task-rows-')),file=path.join(dir,'library.sqlite'),store=await Store.open(file,path.join(dir,'media'));t.after(()=>{try{store.close();}catch{}assert.equal(path.dirname(dir),os.tmpdir());fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});});return {store,file,dir};}
+test('failed tasks have their own bounded page and retry preserves original task type and source',async t=>{
+ const {store}=await fixture(t);for(const id of ['1','2','3','4'])store.upsertWork({aweme_id:id,desc:id,images:[{url_list:[]}]});
+ store.setSetting('downloadJobs',[{id:'1',state:'running'},{id:'2',state:'failed',coverOnly:true},{id:'3',state:'complete'},{id:'4',state:'failed',source:'nas'}]);
+ const q=new DownloadQueue(store,{},null,()=>{});q.run=async()=>{};assert.equal(q.taskRows.page({tab:'active'}).total,1);
+ assert.deepEqual(q.taskRows.page({tab:'failed'}).jobs.map(j=>j.id),['2','4']);
+ assert.equal((await q.retryFailed()).queued,2);assert.equal(q.jobs.find(j=>j.id==='2').coverOnly,true);assert.equal(q.jobs.find(j=>j.id==='4').source,'nas');assert.equal(q.taskRows.page({tab:'failed'}).total,0);assert.equal(q.jobs.find(j=>j.id==='3').state,'complete');
+});
 test('large task history has bounded summary and only changed rows are persisted',async t=>{
  const {store}=await fixture(t);store.setSetting('downloadJobs',Array.from({length:3000},(_,i)=>({id:String(i+1),title:'fixture',state:i===0?'waiting':'complete',source:'douyin'})));
  const queue=new DownloadQueue(store,{},null,()=>{});queue.emit(true);let writes=0;const run=store.db.run.bind(store.db);store.db.run=(sql,args)=>{if(sql.startsWith('INSERT OR REPLACE INTO download_tasks'))writes++;return run(sql,args);};

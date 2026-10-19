@@ -29,6 +29,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ./node_modules/.bin/electron.cmd tests/read-log-layout.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./node_modules/.bin/electron.cmd tests/repair-layout.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./node_modules/.bin/electron.cmd tests/media-redirect-desktop.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -40,6 +44,10 @@ jobs:
             .test-output/audio-viewer-layout-result.json
             .test-output/read-log-*.png
             .test-output/read-log-layout-result.json
+            .test-output/repair-*.png
+            .test-output/repair-layout-result.json
+            .test-output/downloads-failed-*.png
+            .test-output/media-redirect-result.json
           retention-days: 14
       - name: Build matching component
         shell: pwsh

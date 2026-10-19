@@ -60,6 +60,7 @@ test('cancel all removes waiting and failed jobs, preserving completed history',
  const {q,settings}=fixture();q.jobs=[{id:'1',state:'complete'},{id:'2',state:'waiting'},{id:'3',state:'failed'}];q.paused=true;
  assert.equal((await q.cancel()).cancelled,2);assert.deepEqual(q.jobs,[{id:'1',state:'complete'}]);assert.deepEqual(settings.get('downloadJobs').map(j=>j.id),['1']);
 });
+test('a stale failed-page cancellation cannot cancel a task that has moved to active',async()=>{const {q}=fixture();q.jobs=[{id:'1',state:'waiting'},{id:'2',state:'failed'}];const report=await q.cancel(['1','2'],{state:'failed'});assert.equal(report.cancelled,1);assert.deepEqual(q.jobs.map(j=>j.id),['1']);});
 
 test('cancel during a later image transfer retains saved files, collection and NAS records',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cangxia-cancel-')),store=await Store.open(path.join(root,'db.sqlite'),path.join(root,'media'));

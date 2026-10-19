@@ -34,9 +34,9 @@ export class DownloadTasks{
  list(){return this.jobs.map(j=>durable(j));}
  counts(){return Object.fromEntries([...this.buckets].map(([state,ids])=>[state,ids.size]));}
  page({tab='active',page=1,pageSize=50}={}){
-  if(!['active','complete'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
+  if(!['active','failed','complete'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
   const order=ids=>[...ids].sort((a,b)=>this.ranks.get(a)-this.ranks.get(b));
-  const ids=tab==='complete'?order(this.bucket('complete')):[...order(this.bucket('running')),...order(new Set([...this.buckets].filter(([state])=>!['complete','running'].includes(state)).flatMap(([,values])=>[...values])))];
+  const ids=tab==='active'?[...order(this.bucket('running')),...order(this.bucket('waiting'))]:order(this.bucket(tab==='failed'?'failed':'complete'));
   const current=Math.min(page,Math.max(1,Math.ceil(ids.length/pageSize)));return {revision:this.revision,total:ids.length,page:current,pageSize,jobs:ids.slice((current-1)*pageSize,current*pageSize).map(id=>({...this.byId.get(id)}))};
  }
 }

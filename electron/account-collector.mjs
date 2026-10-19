@@ -258,12 +258,24 @@ export class Collector{
   }
   async openOriginal(url){if(!isDouyinURL(url))throw new Error('作品链接无效');return this.browser.open(url);}
   async fetchMedia(url,options={}){
-    await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('已退出登录，请登录后查看尚未保存的媒体');let next=url;
+    await this.ready;if(this.store.getSetting('loggedOut'))throw Object.assign(new Error('已退出登录，请登录后查看尚未保存的媒体'),{code:'AUTH_REQUIRED'});
+    if(this.store.getSetting('authNeedsRefresh'))throw Object.assign(new Error('请重新连接抖音账号后继续下载'),{code:'AUTH_REQUIRED'});
+    try{this.assertNotCoolingDown();}catch(error){error.code='AUTH_REQUIRED';throw error;}let next=url;
     for(let i=0;i<6;i++){
       if(!isMediaURL(next))throw new Error('媒体来源不受支持');
-      const response=await this.profile.fetch(next,{...options,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),...(options.headers||{})}});
-      if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw new Error('媒体请求过于频繁，已暂停下载');}
-      if(![301,302,303,307,308].includes(response.status))return response;
+      options.signal?.throwIfAborted();
+      const request={...options,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),...(options.headers||{})}};
+      let response;
+      try{response=await this.profile.fetch(next,request);}catch(error){
+        options.signal?.throwIfAborted();
+        if(!this.mediaRedirect||!String(error.message).includes('Redirect was cancelled'))throw error;
+        // Chromium cancels manual fetch redirects before exposing Location. Probe
+        // just the headers with ClientRequest, then validate the next hop below.
+        response=await this.mediaRedirect(next,request);
+        if(![301,302,303,307,308].includes(response.status))continue;
+      }
+      if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw Object.assign(new Error('媒体请求过于频繁，已暂停下载'),{code:'AUTH_REQUIRED',httpStatus:429});}
+      if(![301,302,303,307,308].includes(response.status)){if(!response.url)Object.defineProperty(response,'url',{value:next});return response;}
       const location=response.headers.get('location');if(!location)throw new Error('媒体跳转地址缺失');next=new URL(location,next).href;
     }
     throw new Error('媒体跳转次数过多');

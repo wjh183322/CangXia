@@ -46,7 +46,7 @@ fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData'
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let audio,backup,defectRepair,localRemoval,nasRemoval,creatorDetails,repairChecks,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
-const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
+const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','retryDownloads','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
@@ -67,15 +67,15 @@ function ids(value) {
 }
 function handler(name, action) {
   ipcMain.handle('cangxia:' + name, async (event, ...args) => {
-    const guarded=!['audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
+    const guarded=!['audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','downloadPage','defectPage','workDetail','cancelFileCheck','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
       if(backup?.applying&&!['readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','startupReady','cancelBackup','cancelFileCheck'].includes(name))throw Error('正在应用 NAS 记录，请等待当前批次完成');
-      if(repairChecks?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','startupReady','cancelRepairs','repairPage','cancelFileCheck','downloadPage','workDetail','filterWorks','reportCoverStatus'].includes(name))throw Error('正在检查本地文件，请先停止检查');
-      if(localRemoval?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
-      if(nasRemoval?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
-      if((readLocked()||loggingOut)&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
-      if(backupBusy&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','workDetail','cancelFileCheck','filterWorks','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
+      if(repairChecks?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','startupReady','cancelRepairs','repairPage','cancelFileCheck','downloadPage','defectPage','workDetail','filterWorks','reportCoverStatus'].includes(name))throw Error('正在检查本地文件，请先停止检查');
+      if(localRemoval?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','defectPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
+      if(nasRemoval?.running&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','defectPage','workDetail','cancelFileCheck','filterWorks','startupReady','cancelNASRemoval','reportCoverStatus'].includes(name))throw Error('正在处理 NAS 备份，请先停止并等待当前批次完成');
+      if((readLocked()||loggingOut)&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','defectPage','workDetail','cancelFileCheck','filterWorks','startupReady','stopSync','stopDefectRepair','stopWorkCreators','reportCoverStatus'].includes(name))throw new Error(readLocked()?'正在读取或补齐，请先停止当前任务':'正在退出登录，请稍候');
+      if(backupBusy&&!['audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','defectPage','workDetail','cancelFileCheck','filterWorks','startupReady','pause','stopSync'].includes(name))throw new Error('正在更新本机资料，请稍候');
       if(writes.has(name))backup.assertWritable();
       if(guarded){if(inFlightActions.has(name))throw new Error('这个操作正在处理，请稍候');inFlightActions.add(name);entered=true;}
       return { ok: true, data: await action(...args) };
@@ -115,6 +115,7 @@ try {
   const httpProfile=session.fromPartition('cangxia-http');
   const browser=new SystemBrowser(path.join(profile,'system-browser'),{headless:smoke||sampleProbe,background:!smoke&&!sampleProbe});
   collector = new Collector(store, notify,{profile:httpProfile,vault:new AuthVault(path.join(profile,'login-state.bin'),safeStorage),browser,verifyIdentity:verifyAccountIdentity,onDiagnostic:diagnostics.record});
+  collector.mediaRedirect=redirectHeaders(net,httpProfile,{credentials:'include',label:'媒体跳转'});
   // Local browsing must not wait for cookie restoration or account checks.
   collector.ready=collector.ready.catch(()=>collector.update('attention','登录状态未恢复，请重新连接原账号')).finally(()=>startupStage('session-ready'));
   backup.fetchCover=(url,options)=>collector.fetchMedia(url,options);
@@ -134,8 +135,9 @@ try {
   handler('cancelNASRemoval',()=>nasRemoval.cancel());
   handler('resumeNASRemoval',()=>{ensureIdle();return nasRemoval.start([],undefined,true);});
   defectRepair=new DefectRepair({store,backup,collector,queue,profile,runForeground:foregroundRead,onChange:notify});
-  handler('inspectDefects',()=>{ensureIdle();return defectRepair.scan();});
-  handler('startDefectRepair',selected=>{ensureIdle();backup.assertWritable();return defectRepair.start(ids(selected));});
+  handler('inspectDefects',()=>foregroundRead(()=>defectRepair.scan({compact:true})));
+  handler('defectPage',options=>defectRepair.page(options));
+  handler('startDefectRepair',selected=>{ensureIdle();backup.assertWritable();return defectRepair.start(Array.isArray(selected)?ids(selected):selected);});
   handler('resumeDefectRepair',()=>{ensureIdle();backup.assertWritable();return defectRepair.start(null,{resume:true});});
   handler('stopDefectRepair',()=>{defectRepair.stop();return true;});
   handler('reportCoverStatus',(id,failed)=>{ids([id]);if(!store.work(id)||typeof failed!=='boolean')return false;const previous=backup.covers.problems.get(id);if(failed&&!previous)backup.covers.reportProblem(id,'界面无法显示封面，可定向检查并补齐','display');else if(!failed&&previous?.kind==='display')backup.covers.clearProblem(id);return true;});
@@ -298,6 +300,7 @@ try {
   handler('archiveAuthor',id=>{ensureIdle();store.authorSources.archive(id);notify();return true;});
   handler('clearCompleted', selected => {queue.clearCompleted(selected===null?null:ids(selected));return true;});
   handler('downloadPage', options=>queue.taskRows.page(options));
+  handler('retryDownloads',selected=>{if(collector.busy||readLocked()||flatQueue.running)throw Error('请先结束读取或单独下载');return queue.retryFailed(selected===null?null:ids(selected));});
   handler('stopSync', () => {store.localReconcile.stop();if(defectRepair.running)defectRepair.stop();else collector.stop();});
   handler('addCollections', selected => { ensureIdle(); store.setAdded(ids(selected)); notify(); return true; });
   handler('importLink', async text => { ensureIdle(); if (typeof text !== 'string' || text.length > 6000) throw new Error('链接内容无效'); const w = await collector.importLink(text); notify(); return w?.id; });
@@ -318,7 +321,7 @@ try {
   handler('setDownloadConcurrency',value=>{queue.setConcurrency(value);return true;});
   handler('pause', () => queue.pause());
   handler('repairVideoCover',selected=>{if(collector.busy||flatQueue.running)throw Error('请等待当前读取或单独下载结束');backup.assertWritable();const requested=ids(selected),targets=requested.filter(id=>{const d=store.download(id);return store.work(id)?.type==='video'&&d?.assets?.some(a=>a.key==='video'&&store.assetExists(d,a));});if(!targets.length)throw Error('所选作品没有完整的本地视频，请先下载视频');return {queued:queue.enqueue(targets,{coverOnly:true}),skipped:requested.length-targets.length};});
-  handler('cancelDownloads',selected=>queue.cancel(selected===null?null:ids(selected)));
+  handler('cancelDownloads',(selected,options)=>queue.cancel(selected===null?null:ids(selected),options));
   handler('resume', () => { if (collector.busy || flatQueue.running) throw new Error('请等待同步完成或暂停单独下载');if(store.getSetting('loggedOut')&&queue.jobs.some(j=>j.state==='waiting'&&j.source!=='nas'&&!j.coverOnly&&!store.get('backup_downloads',j.id)?.assets?.length&&!store.isDownloaded(j.id)))throw new Error('请登录原账号后再继续下载未备份的作品');queue.resume(); });
   handler('refreshFiles',async()=>{if(!collector.busy&&!queue.running)await store.pruneDeletedDownloads();queue.jobs=store.getSetting('downloadJobs')||[];store.invalidateViews();void store.fileStates.scan().catch(error=>diagnostics.record({event:'file-check-failed',reason:error.message}));await backup.changed();notify();return snapshot();});
   handler('chooseRoot', async value => {

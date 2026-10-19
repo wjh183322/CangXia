@@ -14,6 +14,13 @@ import { TOTAL } from '../electron/model.mjs';
 
 const config=()=>JSON.stringify({cookie:'sessionid=TEST_COOKIE_NOT_REAL; ttwid=test',user_agent:'TestBrowser/150',collects_id:'99'});
 const raw=id=>({aweme_id:id,desc:'测试 #cos',author:{uid:'7',nickname:'测试作者'},video:{play_addr:{url_list:['https://v3.douyinvod.com/example.mp4']}}});
+test('media fetch recovers Electron manual redirect cancellation and validates each next hop',async t=>{
+ const {store}=await setup(t);const seen=[];const {collector}=adapter(store,async url=>{seen.push(url);if(url.endsWith('/old'))throw Error('Redirect was cancelled');return new Response('media');});
+ collector.mediaRedirect=async()=>({status:302,headers:new Headers({location:'/new'})});
+ assert.equal(await(await collector.fetchMedia('https://v3.douyinvod.com/old')).text(),'media');assert.equal(seen.length,2);
+ collector.mediaRedirect=async()=>({status:302,headers:new Headers({location:'https://invalid.example/secret'})});
+ await assert.rejects(collector.fetchMedia('https://v3.douyinvod.com/old'),/不受支持/);assert.equal(seen.length,3);
+});
 async function setup(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cangxia-account-test-'));const store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));t.after(()=>{store.close();fs.rmSync(dir,{recursive:true,force:true});});return {dir,store};}
 function adapter(store,fetcher=async()=>{throw new Error('Unexpected request');}){
   let cookies=[],ua='';const calls=[];let saved=null;
