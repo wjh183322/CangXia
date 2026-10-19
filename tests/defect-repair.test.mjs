@@ -52,6 +52,7 @@ test('single missing cover refreshes only its work, writes local cache and keeps
  const f=await setup(t),before=f.store.orderedMemberRows('__all__');f.manager.start(['1']);await f.manager.wait();
  assert.deepEqual(f.calls,['1']);assert.deepEqual(f.store.orderedMemberRows('__all__'),before);assert.deepEqual(fs.readFileSync(path.join(f.dir,'covers','1.jpg')),png);assert.equal(f.manager.state().done,1);assert.equal(f.store.all('downloads').length,0);assert.equal(f.store.work('1').backupCover,undefined,'not advertised as NAS-backed before upload');
 });
+test('bulk cover refresh uses background-only lookup and passes the cancellation signal',async t=>{const f=await setup(t),resolve=f.collector.resolveWork;f.collector.resolveWork=async(id,options)=>{assert.equal(options?.backgroundOnly,true);assert.equal(options?.signal,f.manager.controller.signal);return resolve(id);};f.manager.start(['1']);await f.manager.wait();assert.equal(f.manager.state().done,1);});
 test('source 404 is retained as one failed item and does not stop other cover repairs',async t=>{
  const f=await setup(t);f.store.put('works','3',{...f.store.work('3'),backupCover:undefined});f.backup.fetchCover=async url=>url.includes('/1.')?new Response('{}',{status:404}):new Response(png,{headers:{'content-type':'image/png'}});
  f.manager.start(['1','3']);await f.manager.wait();assert.equal(f.manager.state().failed,1);assert.equal(f.manager.state().done,1);assert.match(f.manager.state().items[0].message,/404/);assert.equal(f.backup.covers.problems.get('1').kind,'source');

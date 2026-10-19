@@ -93,7 +93,7 @@ export class DefectRepair{
   let work=this.store.work(id);const asset=previewAsset(this.store,work);
   if(asset){const file=await this.backup.covers.get(id);if(!file)throw new Error('暂时无法取回 NAS 封面，请检查连接后重试');return '已取回并校验封面';}
   if(await readLocalPreview(this.backup,work,signal)){this.backup.covers.clearProblem(id);return '本机封面已可用，空闲后补备份';}
-  signal.throwIfAborted();await this.collector.resolveWork(id);signal.throwIfAborted();work=this.store.work(id);
+  signal.throwIfAborted();await this.collector.resolveWork(id,{backgroundOnly:true,signal});signal.throwIfAborted();work=this.store.work(id);
   const entries=[{table:'works',key:id,body:work}],files=[];const failures=await preparePreviews(this.backup,entries,files,signal);
   if(failures||!files.length)throw new Error(this.backup.covers.problems?.get(id)?.reason||'刷新作品后仍未取得封面，可能是图片地址失效或作品受限');
   const target=path.join(this.profile,'covers',id+'.jpg'),temporary=target+'.'+randomUUID()+'.tmp';
@@ -116,7 +116,7 @@ export class DefectRepair{
    try{
     const defect=this.inspect(item.id,undefined,filesById.get(item.id));if(!defect){item.state='skipped';item.message='已正常或已移除，未重新下载';continue;}item.issues=defect.issues;item.name=defect.name;
     const messages=[],failures=[];let queued=false;
-    if(defect.issues.some(v=>v.kind==='metadata')){await this.collector.resolveWork(item.id);signal.throwIfAborted();messages.push('已刷新这一条作品信息');}
+    if(defect.issues.some(v=>v.kind==='metadata')){await this.collector.resolveWork(item.id,{backgroundOnly:true,signal});signal.throwIfAborted();messages.push('已刷新这一条作品信息');}
     if(defect.issues.some(v=>v.kind==='cover'))try{if(!this.backup.covers.problems.has(item.id)){this.backup.covers.problems.set(item.id,{kind:'source',reason:'封面补齐尚未完成',time:new Date().toISOString()});this.backup.covers.saveProblems();}messages.push(await this.repairCover(item.id,signal));}catch(error){if(signal.aborted)throw error;failures.push(error.message);}
     signal.throwIfAborted();
     if(defect.issues.some(v=>['files','metadata'].includes(v.kind))){let files=filesById.get(item.id);if(defect.issues.some(v=>v.kind==='metadata')){const checked=await this.checks.check([item.id]);signal.throwIfAborted();if(checked.phase!=='done')throw Object.assign(Error('后台文件检查未完成：'+checked.message),{checkFailed:true});files=this.checks.job.problems[0]||{status:'complete'};}if(files?.status==='missing'){queued=true;messages.push('交给下载管理，仅补缺失文件');}else if(files?.status==='error')failures.push(files.error);else if(files?.status==='checking')throw Object.assign(Error('本轮尚未完成文件检查，请重新检查后继续'),{checkFailed:true});}
