@@ -30,6 +30,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS local_tags (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS creator_profiles (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS members_order ON members(collection_id,rank);
+      CREATE INDEX IF NOT EXISTS works_remote_status ON works(json_extract(body,'$.remoteState'));
       CREATE TABLE IF NOT EXISTS sync_runs(collection_id TEXT PRIMARY KEY,body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sync_items(collection_id TEXT NOT NULL,work_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(collection_id,work_id));
       CREATE INDEX IF NOT EXISTS sync_items_order ON sync_items(collection_id,position);
@@ -77,7 +78,7 @@ export class Store {
     if(['works','downloads','backup_downloads','local_tags'].includes(table))this.viewCache.delete(String(id));this.revision++;
     if(table==='downloads')this.fileStates.invalidate(String(id));
     this.lightViews?.invalidate(table,String(id),body);
-    const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','checkedAt','music'];
+    const metadataKeys=['name','title','caption','description','author','coAuthors','tags','rawTags','remoteState','sourceStatus','sourceAttempt','checkedAt','music'];
     if(table==='local_tags'||table==='works'&&(!old||metadataKeys.some(key=>JSON.stringify(old[key])!==JSON.stringify(body[key]))))this.localReconcile.mark(String(id));
   }
   get(table, id) { const r = this.rows(`SELECT body FROM ${table} WHERE id=?`, [String(id)])[0]; return r ? JSON.parse(r.body) : null; }
@@ -125,7 +126,9 @@ export class Store {
   upsertWork(raw,options={}) {
     const next = parseWork(raw,options); if (!next) return null;
     const old = this.work(next.id);
+    if(next.remoteState==='unavailable')next.sourceStatus={state:'unavailable',reason:'平台返回明确的作品删除标记',method:'platform',checkedAt:next.checkedAt};
     if((!next.music||next.music.state==='unknown')&&old?.music?.state==='known')next.music=old.music;
+    if(old?.remoteState==='unavailable'&&next.remoteState!=='unavailable')next.remoteState='unavailable';
     if(old&&next.thumbnail&&old.thumbnail!==next.thumbnail)this.mediaCache?.invalidateCover(next.id);
     const hints=audioSources(raw);if(hints.length)this.db.run('INSERT OR REPLACE INTO audio_source_hints VALUES(?,?)',[next.id,JSON.stringify({sources:hints,music:next.music,at:Date.now()})]);else if(next.music?.id&&old?.music?.id&&next.music.id!==old.music.id)this.db.run('DELETE FROM audio_source_hints WHERE work=?',[next.id]);
     if (old) {
@@ -265,7 +268,7 @@ export class Store {
     const infoPath=path.join(moved.path,'作品信息.json');
     if(fs.existsSync(infoPath)){
       const info=JSON.parse(fs.readFileSync(infoPath,'utf8'));const w=this.work(id);
-      Object.assign(info,{collection:this.collection(moved.collectionId)?.name,collectionId:moved.collectionId,author:w.author,workName:w.name,title:w.title,caption:w.caption,description:w.description,tags:w.tags,rawTags:w.rawTags,localTags:this.get('local_tags',id)?.tags||[],remoteState:w.remoteState,checkedAt:w.checkedAt});
+      Object.assign(info,{collection:this.collection(moved.collectionId)?.name,collectionId:moved.collectionId,author:w.author,workName:w.name,title:w.title,caption:w.caption,description:w.description,tags:w.tags,rawTags:w.rawTags,localTags:this.get('local_tags',id)?.tags||[],remoteState:w.remoteState,sourceStatus:w.sourceStatus,sourceAttempt:w.sourceAttempt,checkedAt:w.checkedAt});
       const text=JSON.stringify(info,null,2);
       if(fs.readFileSync(infoPath,'utf8')!==text){fs.writeFileSync(infoPath+'.part',text);fs.renameSync(infoPath+'.part',infoPath);}
       const asset=moved.assets.find(a=>a.key==='metadata');if(asset)asset.size=fs.statSync(infoPath).size;

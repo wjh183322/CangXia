@@ -7,6 +7,7 @@ import {setImmediate as yieldLoop} from 'node:timers/promises';
 import {inspectWorkFiles} from './repair-check.mjs';
 import {preparePreviews,previewAsset,readLocalPreview} from './backup-previews.mjs';
 import {RepairChecks} from './repair-checks.mjs';
+const repairable=i=>!['complete','processing','unavailable','sourceUnknown'].includes(i.status)&&i.issues.some(v=>!['blocked','checking','source'].includes(v.kind));
 
 const safeId=id=>typeof id==='string'&&/^\d{1,32}$/.test(id);
 export class DefectRepair{
@@ -17,15 +18,15 @@ export class DefectRepair{
   this.persistAll=true;
   this.checks=new RepairChecks(store,()=>this.onChange());this.scanItems=[];this.scanToken=null;
   if(this.job){for(const item of this.job.items)if(['waiting','running','failed'].includes(item.state)&&item.issues?.some(i=>i.kind==='cover')&&!backup.covers.problems.has(item.id))backup.covers.problems.set(item.id,{kind:'source',reason:item.message||'上次封面补齐未完成',time:new Date().toISOString()});backup.covers.saveProblems();}
-  if(this.job?.phase==='running'){this.job.phase='paused';this.job.message='上次补齐未正常结束，已保留结果，可继续';for(const item of this.job.items)if(item.state==='running')item.state='waiting';this.persist();}
-  this.indexJob();this.boundSettlement=job=>this.downloadSettled(job);queue.onJobSettled=this.boundSettlement;for(const job of queue.jobs)if(['complete','failed'].includes(job.state))this.downloadSettled(job);
+  if(this.job&&(this.job.phase==='running'||this.job.items.some(i=>i.state==='running'))){this.job.phase='paused';this.job.message='上次补齐未正常结束，已保留结果，可继续';for(const item of this.job.items)if(item.state==='running')item.state='waiting';this.persist();}
+  this.indexJob();this.boundSettlement=job=>this.downloadSettled(job);queue.onJobSettled=this.boundSettlement;for(const job of queue.jobs)if(['complete','failed','unavailable'].includes(job.state))this.downloadSettled(job);
  }
  persist(){if(!this.job)return;const {items,...body}=this.job;this.db.exec('BEGIN IMMEDIATE');try{this.db.prepare("INSERT OR REPLACE INTO job VALUES('current',?)").run(JSON.stringify(body));const put=this.db.prepare('INSERT OR REPLACE INTO items VALUES(?,?)');if(this.persistAll){this.db.exec('DELETE FROM items');items.forEach((item,index)=>put.run(index,JSON.stringify(item)));}else if(this.currentIndex!==undefined)put.run(this.currentIndex,JSON.stringify(items[this.currentIndex]));this.db.exec('COMMIT');this.persistAll=false;}catch(error){this.db.exec('ROLLBACK');throw error;}}
  close(){if(this.queue.onJobSettled===this.boundSettlement)this.queue.onJobSettled=null;void this.checks.close();this.db.close();}
  indexJob(){this.positions=new Map((this.job?.items||[]).map((item,index)=>[item.id,{item,index}]));}
- downloadSettled(task){const entry=this.positions.get(task.id);if(!entry?.item.queueFiles||!['complete','failed'].includes(task.state)||entry.item.downloadResult?.state==='complete')return;const {item,index}=entry,expected=item.downloadOptions||{source:'douyin',coverOnly:false};if((task.source||'douyin')!==expected.source||!!task.coverOnly!==expected.coverOnly)return;item.downloadResult={state:task.state,message:task.message||''};try{this.db.prepare('INSERT OR REPLACE INTO items VALUES(?,?)').run(index,JSON.stringify(item));}catch(error){this.job.message='补齐结果保存失败：'+error.message;}this.onChange();}
+ downloadSettled(task){const entry=this.positions.get(task.id);if(!entry?.item.queueFiles||!['complete','failed','unavailable'].includes(task.state)||entry.item.downloadResult?.state==='complete')return;const {item,index}=entry,expected=item.downloadOptions||{source:'douyin',coverOnly:false};if((task.source||'douyin')!==expected.source||!!task.coverOnly!==expected.coverOnly)return;item.downloadResult={state:task.state,message:task.message||''};try{this.db.prepare('INSERT OR REPLACE INTO items VALUES(?,?)').run(index,JSON.stringify(item));}catch(error){this.job.message='补齐结果保存失败：'+error.message;}this.onChange();}
  emit(){try{this.persist();}catch(error){this.controller?.abort();this.job.phase='paused';this.job.message='补齐进度保存失败：'+error.message;}this.onChange();}
- state(){if(!this.job&&!this.scanState)return null;const {accountKey,...job}=this.job||{items:[],phase:'idle',message:''},position=this.currentIndex??Math.max(0,job.items.length-1),items=job.items.map(i=>this.result(i));return {...job,scan:this.scanState?{...this.scanState,files:this.checks.state()}:null,items:items.slice(Math.max(0,position-19),position+1),running:this.running,total:items.length,processed:items.filter(i=>['done','failed','skipped'].includes(i.state)).length,failed:items.filter(i=>i.state==='failed').length,done:items.filter(i=>['done','skipped'].includes(i.state)).length,queued:items.filter(i=>i.state==='queued'||i.state==='downloading').length};}
+ state(){if(!this.job&&!this.scanState)return null;const {accountKey,...job}=this.job||{items:[],phase:'idle',message:''},position=this.currentIndex??Math.max(0,job.items.length-1),items=job.items.map(i=>this.result(i));return {...job,scan:this.scanState?{...this.scanState,files:this.checks.state()}:null,items:items.slice(Math.max(0,position-19),position+1),running:this.running,total:items.length,processed:items.filter(i=>['done','failed','skipped','unavailable','verified'].includes(i.state)).length,failed:items.filter(i=>i.state==='failed').length,done:items.filter(i=>['done','skipped'].includes(i.state)).length,queued:items.filter(i=>i.state==='queued'||i.state==='downloading').length,verified:items.filter(i=>i.verification).length,sourceUnavailable:items.filter(i=>i.status==='unavailable').length,sourceAvailable:items.filter(i=>i.verification?.state==='available').length,sourceUnknown:items.filter(i=>i.verification?.state==='unknown').length};}
  inspect(id,work=this.store.work(id),fileReport){
   if(!work||(work.readHidden&&!this.store.download(id)))return null;
   const issues=[],problem=this.backup.covers.problems?.get(id),asset=previewAsset(this.store,work);
@@ -34,7 +35,8 @@ export class DefectRepair{
   const indexed=this.queue.taskRows?.byId.get(id);const download=this.store.download(id),failed=this.queue.taskRows?(indexed?.state==='failed'?indexed:null):this.queue.jobs.find(j=>j.id===id&&j.state==='failed');
   if(download||failed){const files=fileReport||inspectWorkFiles(this.store,id);if(files.status==='missing')for(const m of files.missing){const kind=m.reason==='文件大小异常'?'invalid':m.key==='video'?'video':m.key.startsWith('image-')?'image':m.key==='metadata'?'metadata':'cover';issues.push({kind:'files',type:kind,label:kind==='invalid'?'文件异常':'文件缺失',reason:`${m.label}：${m.reason}`});}else if(files.status==='error')issues.push({kind:files.error.includes('缺少原始图片数量')?'metadata':'blocked',label:files.error.includes('缺少原始图片数量')?'作品信息不完整':'暂时无法检查文件',reason:files.error});else if(files.status==='checking')issues.push({kind:'checking',label:'待检查',reason:'尚未完成文件检查，先重新检查后再补齐'});}
   if(!issues.length&&failed)issues.push({kind:'download',label:'下载失败',reason:failed.message||'上次下载未完成，需要重新确认文件'});
-  return issues.length?{id,name:String(work.name).slice(0,256),author:work.author?.nickname||'',url:work.url,issues,status:failed?'downloadFailed':issues.every(i=>['blocked','checking'].includes(i.kind))?'checking':'pending'}:null;
+  if(work.remoteState==='unavailable')issues.push({kind:'source',label:'原作品已失效',reason:work.sourceStatus?.reason||'此前已确认原作品失效，媒体与记录保留'});
+  return issues.length?{id,name:String(work.name).slice(0,256),author:work.author?.nickname||'',url:work.url,issues,status:work.remoteState==='unavailable'?'unavailable':failed?'downloadFailed':issues.every(i=>['blocked','checking'].includes(i.kind))?'checking':'pending'}:null;
  }
  async scan({compact=false}={}){
   if(this.scanState?.running||this.running)throw Error('已有检查或补齐任务正在进行');
@@ -59,28 +61,42 @@ export class DefectRepair{
   return items.map(i=>({...i,source:rank.has(i.id)?'收藏':authorOrder.has(i.id)?'作者作品':'保留的本地作品'})).sort((a,b)=>(rank.get(a.id)??Infinity)-(rank.get(b.id)??Infinity)||(authorOrder.get(a.id)??Infinity)-(authorOrder.get(b.id)??Infinity)||a.id.localeCompare(b.id));
  }
  result(item){
+  if(item.verification)return {...item,status:item.verification.state==='unavailable'?'unavailable':item.verification.state==='available'?'sourceAvailable':'sourceUnknown'};
+  if(item.state==='unavailable'||(this.store.lightViews?.ready?this.store.lightViews.bases.get(item.id):this.store.work(item.id))?.remoteState==='unavailable')return {...item,state:'unavailable',status:'unavailable',message:'原作品已失效，已跳过自动补齐'};
   let state=item.state,message=item.message;const job=this.queue.taskRows?this.queue.taskRows.byId.get(item.id):this.queue.jobs.find(j=>j.id===item.id);
   const settled=item.downloadResult?.state==='complete'?item.downloadResult:job||item.downloadResult;
-  if(item.queueFiles){if(settled?.state==='complete'){state=item.repairFailed?'failed':'done';message=item.repairFailed?item.message:'缺失文件已补齐';}else if(settled?.state==='failed'){state='failed';message=settled.message;}else if(job?.state==='running'){state='downloading';message=job.message;}else if(job?.state==='waiting'){state='queued';message='等待下载补齐';}else if(['queued','downloading'].includes(state)){state='failed';message='下载任务已取消或移除，可重新检查并补齐';}}
+  if(item.queueFiles){if(settled?.state==='unavailable')return {...item,state:'unavailable',status:'unavailable',message:settled.message};if(settled?.state==='complete'){state=item.repairFailed?'failed':'done';message=item.repairFailed?item.message:'缺失文件已补齐';}else if(settled?.state==='failed'){state='failed';message=settled.message;}else if(job?.state==='running'){state='downloading';message=job.message;}else if(job?.state==='waiting'){state='queued';message='等待下载补齐';}else if(['queued','downloading'].includes(state)){state='failed';message='下载任务已取消或移除，可重新检查并补齐';}}
   const status=state==='done'||state==='skipped'?'complete':state==='failed'?(item.queueFiles&&settled?.state==='failed'?'downloadFailed':'repairFailed'):['running','downloading','queued'].includes(state)?'processing':'pending';
   return {...item,state,status,message};
  }
  rows(view){const tasks=new Map((this.job?.items||[]).map(i=>[i.id,i]));return view==='results'?[...tasks.values()].map(i=>this.result(i)):this.scanItems.map(i=>{const task=this.job?.scanToken===this.scanToken?tasks.get(i.id):null;return task?{...i,...this.result(task)}:i;});}
  page({view='problems',page=1,status='all',kind='all'}={}){
-  if(!['problems','results'].includes(view)||!Number.isInteger(page)||page<1||!['all','pending','checking','processing','downloadFailed','repairFailed','complete'].includes(status)||!['all','cover','files','video','image','invalid','metadata','blocked'].includes(kind))throw Error('检查筛选参数无效');
+  if(!['problems','results'].includes(view)||!Number.isInteger(page)||page<1||!['all','pending','checking','processing','downloadFailed','repairFailed','complete','unavailable','sourceUnknown','sourceAvailable'].includes(status)||!['all','cover','files','video','image','invalid','metadata','blocked','source'].includes(kind))throw Error('检查筛选参数无效');
   const rows=this.rows(view),counts={status:{},kind:{}};
   for(const row of rows){counts.status[row.status]=(counts.status[row.status]||0)+1;for(const key of new Set(row.issues.flatMap(i=>[i.kind,i.type].filter(Boolean))))counts.kind[key]=(counts.kind[key]||0)+1;}
   const matches=rows.filter(i=>(status==='all'||i.status===status)&&(kind==='all'||i.issues.some(v=>v.kind===kind||v.type===kind))),pages=Math.max(1,Math.ceil(matches.length/20)),current=Math.min(page,pages);
-  return {token:view==='results'?this.job?.id:this.scanToken,revision:(this.scanRevision||0)+(this.queue.taskRows?.revision||0),items:matches.slice((current-1)*20,current*20),total:matches.length,page:current,pages,counts,repairable:matches.filter(i=>i.status!=='complete'&&i.status!=='processing'&&i.issues.some(v=>!['blocked','checking'].includes(v.kind))).length};
+  return {token:view==='results'?this.job?.id:this.scanToken,revision:(this.scanRevision||0)+(this.queue.taskRows?.revision||0),items:matches.slice((current-1)*20,current*20),total:matches.length,page:current,pages,counts,repairable:matches.filter(repairable).length,selectable:matches.filter(i=>i.status!=='processing').length};
  }
- selection(input){
+ selection(input,{verify=false}={}){
   if(Array.isArray(input))return [...new Set(input)];
   if(!input||input.token!==(input.view==='results'?this.job?.id:this.scanToken)||input.all!==true||!Array.isArray(input.exclude)||input.exclude.some(id=>!safeId(id)))throw Error('检查结果已更新，请重新选择');
   this.page({...input,page:1});const omit=new Set(input.exclude);
-  return this.rows(input.view||'problems').filter(row=>(input.status==='all'||!input.status||row.status===input.status)&&(input.kind==='all'||!input.kind||row.issues.some(i=>i.kind===input.kind||i.type===input.kind))&&!omit.has(row.id)&&row.status!=='complete'&&row.status!=='processing'&&row.issues.some(v=>!['blocked','checking'].includes(v.kind))).map(i=>i.id);
+  return this.rows(input.view||'problems').filter(row=>(input.status==='all'||!input.status||row.status===input.status)&&(input.kind==='all'||!input.kind||row.issues.some(i=>i.kind===input.kind||i.type===input.kind))&&!omit.has(row.id)&&(verify?row.status!=='processing':repairable(row))).map(i=>i.id);
+ }
+ startVerification(input){
+  if(this.running||this.scanState?.running)throw Error('已有检查或补齐任务正在进行');const ids=this.selection(input,{verify:true});if(!ids.length||ids.length>100000||ids.some(id=>!safeId(id)))throw Error('请选择要核验的作品');
+  const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),kind:'verify',scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在批量核验原作品状态',items:this.sort(ids.map(id=>({id,name:indexed.get(id)?.name||this.store.lightViews?.bases.get(id)?.name||id,issues:indexed.get(id)?.issues||[],state:'waiting',message:''})))};
+  return this.runVerification();
+ }
+ runVerification(){
+  this.job.phase='running';this.indexJob();this.controller=new AbortController();this.running=true;this.persistAll=true;this.currentIndex=0;this.emit();
+  this.promise=this.runForeground(async()=>{for(const [index,item]of this.job.items.entries()){if(item.state!=='waiting')continue;if(this.controller.signal.aborted)break;if(this.job.accountKey!==this.store.getSetting('browserAccountKey'))throw Error('账号发生变化，已暂停核验');this.currentIndex=index;item.state='running';this.job.message='正在核验：'+item.name;this.emit();try{const result=await this.collector.verifySource(item.id,{signal:this.controller.signal});item.verification=result;item.state='verified';item.message=result.reason;if(result.state==='available')item.issues=item.issues.filter(i=>i.kind!=='source');this.emit();if(result.authRequired){this.job.message='登录或访问频率需要处理，剩余作品保留';break;}}catch(error){item.state='waiting';if(this.controller.signal.aborted)break;throw error;}await yieldLoop();if(this.collector.delay)await this.collector.delay();}
+   this.job.phase=this.job.items.some(i=>i.state==='waiting')?'paused':'done';if(this.job.phase==='done')this.job.message='原作品状态核验完成，未添加下载任务';else if(this.controller.signal.aborted)this.job.message='核验已停止，已核验结果保留';
+  }).catch(error=>{this.job.phase='paused';this.job.message=error.message;}).finally(()=>{this.running=false;this.controller=null;for(const item of this.job.items)if(item.state==='running')item.state='waiting';this.persistAll=true;this.emit();});return this.state();
  }
  start(ids,{resume=false}={}){
   if(this.running)throw new Error('已有补齐任务正在运行');
+  if(resume&&this.job?.kind==='verify'){if(this.job.accountKey!==this.store.getSetting('browserAccountKey'))throw Error('账号已变化，无法继续核验');return this.runVerification();}
   if(resume){if(!this.job||this.job.accountKey!==this.store.getSetting('browserAccountKey'))throw new Error('没有可继续的同账号补齐任务');for(const item of this.job.items){const result=this.result(item);Object.assign(item,{state:['done','skipped'].includes(result.state)?result.state:'waiting',message:result.message,queueFiles:false,downloadResult:null});}}
   else {ids=this.selection(ids);if(!ids.length||ids.length>100000||ids.some(id=>!safeId(id)))throw new Error('请选择有效的问题作品');const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在准备定向补齐',items:ids.map(id=>({id,name:indexed.get(id)?.name||this.store.lightViews?.bases.get(id)?.name||id,issues:indexed.get(id)?.issues||[],state:'waiting',message:''}))};}
   this.indexJob();this.controller=new AbortController();this.running=true;this.persistAll=true;this.currentIndex=0;this.job.phase='running';this.emit();
@@ -106,6 +122,7 @@ export class DefectRepair{
    this.currentIndex=index;
    await yieldLoop();
    if(signal.aborted){stopped=true;break;}
+   if(this.store.work(item.id)?.remoteState==='unavailable'){item.state='unavailable';item.message='原作品已失效，已跳过补齐';this.emit();continue;}
    if(index>=batchEnd){batchEnd=index+50;
     const ids=this.job.items.slice(index,index+50).filter(i=>i.state==='waiting').map(i=>i.id).filter(id=>this.store.download(id)||(this.queue.taskRows?this.queue.taskRows.byId.get(id)?.state==='failed':this.queue.jobs.some(j=>j.id===id&&j.state==='failed')));
     filesById=new Map();if(ids.length){const checked=await this.checks.check(ids);if(!signal.aborted&&checked.phase!=='done')throw Error('后台文件检查未完成：'+checked.message);const problems=new Map((this.checks.job?.problems||[]).map(i=>[i.id,i]));for(const id of ids)filesById.set(id,problems.get(id)||{status:checked.phase==='done'?'complete':'checking',missing:[]});}

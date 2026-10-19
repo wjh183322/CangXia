@@ -7,6 +7,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { inspectWorkFiles } from './repair-check.mjs';
 import {setImmediate as yieldToUI} from 'node:timers/promises';
 import {setTimeout as delay} from 'node:timers/promises';
+import {sourceError} from '../shared/source-state.mjs';
 const storageFailure=e=>['ENOSPC','EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EISDIR','EBUSY','EIO','EMFILE'].includes(e?.code)||String(e?.code||'').startsWith('SQLITE');
 const sourceFailure=e=>!storageFailure(e)&&(e?.sourceUnavailable||e?.refreshable||e?.httpStatus>=400||e?.code==='AUTH_REQUIRED'||['ECONNRESET','ETIMEDOUT','ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError');
 const transient=e=>!storageFailure(e)&&([408,425,500,502,503,504].includes(e?.httpStatus)||['ECONNRESET','ETIMEDOUT','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError'||/\bnet::ERR_(CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_TIMED_OUT|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|HTTP2_PROTOCOL_ERROR)\b/.test(String(e?.message)+' '+String(e?.cause?.message)));
@@ -28,6 +29,8 @@ export class DownloadQueue {
     this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,source:j.source==='nas'?'nas':'douyin',state:j.state==='running'?'waiting':j.state}));
     this.running=false;this.paused=this.jobs.some(j=>j.state==='waiting');this.active=new Map();this.resolveTail=Promise.resolve();this.cursor=0;
     const saved=store.getSetting('downloadConcurrency');this.concurrency=Number.isInteger(saved)&&saved>=1&&saved<=6?saved:3;
+    collector.onSourceStatus=(id,state)=>{if(state==='unavailable')this.retireUnavailable([id]);else if(state==='available'){const job=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(job?.state==='unavailable'){job.state='failed';job.message='原作品已恢复可访问，可手动重试下载';this.emit(true);}}};
+    const unavailable=store.rows?.("SELECT id FROM works WHERE json_extract(body,'$.remoteState')='unavailable'").map(r=>r.id)||[];if(unavailable.length)this.retireUnavailable(unavailable);
   }
   get jobs(){return this.taskRows?.jobs||this.legacyJobs||[];}
   set jobs(value){if(this.taskRows)this.taskRows.replace(value);else this.legacyJobs=value;}
@@ -42,7 +45,7 @@ export class DownloadQueue {
     this.cursor=0;this.emit(true);this.store.save();
   }
   async cancel(ids=null,{state}={}){
-    if(state!==undefined&&state!=='failed')throw Error('取消任务的状态范围无效');
+    if(state!==undefined&&!['failed','unavailable'].includes(state))throw Error('取消任务的状态范围无效');
     const selected=ids===null?null:new Set(ids),removed=this.jobs.filter(j=>j.state!=='complete'&&(!state||j.state===state)&&(!selected||selected.has(j.id)));
     const removedIds=new Set(removed.map(j=>j.id)),pending=[];
     // Persist queue removal before waiting for network/file handles to settle.
@@ -67,7 +70,7 @@ export class DownloadQueue {
     const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
     for (const id of [...new Set(ids)]) {
       if(busy.has(id))continue;
-      const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;
+      const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;if(source!=='nas'&&w.remoteState==='unavailable'){const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(previous)this.retireUnavailable([id]);continue;}
       added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source });
     }
     const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
@@ -75,8 +78,10 @@ export class DownloadQueue {
     return added.length;
   }
   pause() { this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
+  retireUnavailable(ids){const wanted=new Set(ids);let changed=0;for(const job of this.jobs){if(!wanted.has(job.id)||job.state==='complete'||job.source==='nas')continue;if(job.state!=='unavailable')changed++;job.state='unavailable';job.message='原作品已失效，已停止自动下载与补齐';const task=this.active.get(job.id);if(task){task.retired=true;task.controller.abort();}this.onJobSettled?.(job);}if(changed){this.emit(true);this.store.save();this.wake?.();}return changed;}
   resume() { this.pauseReason='';this.paused = false;this.cursor=0;this.emit(true);this.wake?.();void this.run(); }
   async retryFailed(ids=null){
+    this.retireUnavailable(this.jobs.filter(j=>j.state==='failed'&&(this.store.lightViews?.ready?this.store.lightViews.bases.get(j.id):this.store.work(j.id))?.remoteState==='unavailable').map(j=>j.id));
     const selected=ids===null?null:new Set(ids),failed=this.jobs.filter(j=>j.state==='failed'&&(!selected||selected.has(j.id)));let queued=0;
     for(const job of failed){if(this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
     if(queued){this.paused=false;this.pauseReason='';this.cursor=0;this.emit(true);this.wake?.();void this.run();}return {queued};
@@ -97,16 +102,17 @@ export class DownloadQueue {
           const job=this.jobs[this.cursor++];if(job.state!=='waiting'||this.active.has(job.id))continue;
           const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
           task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(async()=>{
-            if(task.cancelled)return;
-            job.phase='checking';try{const confirmed=await this.store.fileStates?.confirmWritten(job.id);if(this.store.fileStates&&!confirmed&&!job.coverOnly)throw Error('已保存文件的当前状态未通过确认');}catch(error){if(!task.cancelled){job.state='failed';job.message='已保存内容保留，文件确认暂未完成：'+error.message;}return;}if(task.cancelled)return;
+            if(task.cancelled||task.retired)return;
+            job.phase='checking';try{const confirmed=await this.store.fileStates?.confirmWritten(job.id);if(this.store.fileStates&&!confirmed&&!job.coverOnly)throw Error('已保存文件的当前状态未通过确认');}catch(error){if(!task.cancelled){job.state='failed';job.message='已保存内容保留，文件确认暂未完成：'+error.message;}return;}if(task.cancelled||task.retired)return;
             job.state='complete';job.progress=100;job.message='文件已保存';
           },e=>{
             if(task.cancelled)return;
+            if(task.retired||e.sourceDeleted){job.state='unavailable';job.message='原作品已失效，已停止自动下载与补齐';return;}
             if(e.code==='AUTH_REQUIRED'){this.pauseReason=e.message;this.pause();}
             const interrupted=task.controller.signal.aborted;
             job.state=interrupted?'waiting':'failed';job.message=interrupted?'已暂停，继续时补齐':e.message;
             if(interrupted)this.cursor=0;
-          }).finally(()=>{this.active.delete(job.id);if(!task.cancelled&&['complete','failed'].includes(job.state))try{this.onJobSettled?.(job);}catch{}this.emit();this.store.save();});
+          }).finally(()=>{this.active.delete(job.id);if(!task.cancelled&&['complete','failed','unavailable'].includes(job.state))try{this.onJobSettled?.(job);}catch{}this.emit();this.store.save();});
         }
         if(!this.active.size)break;
         await Promise.race([...this.active.values()].map(t=>t.promise).concat(new Promise(r=>{this.wake=r;})));this.wake=null;
@@ -116,6 +122,7 @@ export class DownloadQueue {
   }
   async saveWork(job, signal) {
     signal.throwIfAborted();
+    if(job.source!=='nas'&&this.store.work(job.id)?.remoteState==='unavailable')throw sourceError();
     if(job.coverOnly){const w=this.store.work(job.id),d=this.store.download(job.id);if(w?.type!=='video'||!d)throw Error('本机没有可补齐封面的视频');try{await this.ensureHDCover(job,w,d,signal);}finally{if(!signal.aborted){this.saveMetadata(w,d);this.store.put('downloads',d.id,d);const check=inspectWorkFiles(this.store,job.id);if(check.status!=='error')d.state=check.missing.length?'partial':'complete';this.store.put('downloads',d.id,d);this.store.save();}}return;}
     if(job.source==='nas'){
       job.activeSource='nas';job.message='从 NAS 恢复备份';this.emit();
@@ -123,7 +130,7 @@ export class DownloadQueue {
       throw Error('NAS 没有完整媒体备份；已恢复的文件保留，可到收藏或作者作品中尝试下载');
     }
     try{return await this.saveFromDouyin(job,signal);}catch(error){
-      signal.throwIfAborted();if(error.code==='AUTH_REQUIRED'||error.httpStatus===429||!sourceFailure(error)||!this.backupRestore)throw error;
+      signal.throwIfAborted();if(error.sourceDeleted||error.code==='AUTH_REQUIRED'||error.httpStatus===429||!sourceFailure(error)||!this.backupRestore)throw error;
       job.activeSource='nas';job.message='抖音资源未取得，尝试从 NAS 补齐';this.emit();
       try{if(await this.backupRestore(job,signal,{missingOnly:true}))return;}
       catch(nasError){signal.throwIfAborted();throw Error(`抖音下载失败：${error.message}；NAS 补齐失败：${nasError.message}`);}
@@ -194,7 +201,7 @@ export class DownloadQueue {
     d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
   }
   metadata(w, d) {
-    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, coAuthors:w.coAuthors||[], tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url,music:w.music, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState, checkedAt: w.checkedAt, hdCover:d.hdCover, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons,match }) => ({ key, file, size, width, height, source, comparisons,match })) };
+    return { schemaVersion: 1, workId: w.id, workName: w.name, title: w.title, caption:w.caption, description: w.description, author: w.author, coAuthors:w.coAuthors||[], tags: w.tags, rawTags:w.rawTags, localTags: this.store.get('local_tags', w.id)?.tags || [], publishedAt: w.publishedAt, originalURL: w.url,music:w.music, collection: this.store.collection(d.collectionId)?.name || '收藏', collectionId: d.collectionId, savedAt: d.savedAt, remoteState: w.remoteState,sourceStatus:w.sourceStatus,sourceAttempt:w.sourceAttempt, checkedAt: w.checkedAt, hdCover:d.hdCover, coverSource: d.assets.find(a=>a.key==='cover')?.source || w.coverSource, assets: d.assets.filter(a=>a.key!=='metadata').map(({ key, file, size, width, height, source, comparisons,match }) => ({ key, file, size, width, height, source, comparisons,match })) };
   }
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});

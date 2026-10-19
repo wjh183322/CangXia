@@ -46,7 +46,7 @@ fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData'
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let audio,backup,defectRepair,localRemoval,nasRemoval,creatorDetails,repairChecks,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
-const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','retryDownloads','resume','clearCompleted','setTags','checkSource','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
+const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','retryDownloads','resume','clearCompleted','setTags','checkSource','markSourceUnavailable','prepareDelete','confirmDelete','startRepairs','chooseRoot','importExistingLibrary']);
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
@@ -197,7 +197,7 @@ try {
       let file;
       if(u.hostname==='audio'){file=audio.playbackFile(id,filename);} else if (u.hostname === 'stream') {
         if(!backup.status.writable)return new Response('',{status:503});
-        const work=store.work(id);const source=work?.videoUrls?.[0];if(!source)return new Response('',{status:404});
+        const work=store.work(id);if(work?.remoteState==='unavailable')return new Response('',{status:410});const source=work?.videoUrls?.[0];if(!source)return new Response('',{status:404});
         const range=request.headers.get('range');return await collector.fetchMedia(source,{signal:AbortSignal.timeout(120000),headers:range?{Range:range}:{}});
       } else if (u.hostname === 'asset') {
         const d = store.download(id); const asset = d?.assets.find(a => a.file === filename);
@@ -348,7 +348,9 @@ try {
     }
     notify();
   });
-  handler('checkSource', async id => { ids([id]); ensureIdle(); try { await collector.resolveWork(id); } finally { notify(); } });
+  handler('checkSource',id=>{ids([id]);return foregroundRead(()=>collector.verifySource(id));});
+  handler('markSourceUnavailable',id=>{ids([id]);ensureIdle();if(!store.work(id))throw Error('本机已没有此作品记录');return collector.markUnavailable(id,{reason:'用户在抖音确认原作品已失效',method:'user'});});
+  handler('verifySources',selected=>{ensureIdle();return defectRepair.startVerification(Array.isArray(selected)?ids(selected):selected);});
   handler('prepareDelete',(selected,kind,authorScope=null)=>{
     ensureIdle();if(!['local','records'].includes(kind))throw new Error('删除类型无效');
     if(authorScope&&!store.authorSources.get(authorScope))throw Error('作者范围无效');

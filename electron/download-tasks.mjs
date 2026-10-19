@@ -1,5 +1,5 @@
 const durable=j=>Object.fromEntries(['id','title','state','progress','message','coverOnly','source'].filter(k=>j[k]!==undefined).map(k=>[k,j[k]]));
-const dedupe=jobs=>{const map=new Map(),priority={running:4,waiting:3,failed:2,complete:1};for(const job of jobs){const old=map.get(job.id);if(!old||(priority[job.state]||0)>=(priority[old.state]||0))map.set(job.id,job);}return [...map.values()];};
+const dedupe=jobs=>{const map=new Map(),priority={running:4,waiting:3,unavailable:3,failed:2,complete:1};for(const job of jobs){const old=map.get(job.id);if(!old||(priority[job.state]||0)>=(priority[old.state]||0))map.set(job.id,job);}return [...map.values()];};
 export class DownloadTasks{
  constructor(store){this.store=store;this.byId=new Map();this.buckets=new Map();this.dirty=new Set();this.removed=new Set();this.ranks=new Map();this.serialized=new Map();this.jobs=[];this.revision=0;this.maxRank=0;}
  init(){
@@ -34,9 +34,9 @@ export class DownloadTasks{
  list(){return this.jobs.map(j=>durable(j));}
  counts(){return Object.fromEntries([...this.buckets].map(([state,ids])=>[state,ids.size]));}
  page({tab='active',page=1,pageSize=50}={}){
-  if(!['active','failed','complete'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
+  if(!['active','failed','complete','unavailable'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
   const order=ids=>[...ids].sort((a,b)=>this.ranks.get(a)-this.ranks.get(b));
-  const ids=tab==='active'?[...order(this.bucket('running')),...order(this.bucket('waiting'))]:order(this.bucket(tab==='failed'?'failed':'complete'));
+  const ids=tab==='active'?[...order(this.bucket('running')),...order(this.bucket('waiting'))]:order(this.bucket(tab==='unavailable'?'unavailable':tab==='failed'?'failed':'complete'));
   const current=Math.min(page,Math.max(1,Math.ceil(ids.length/pageSize)));return {revision:this.revision,total:ids.length,page:current,pageSize,jobs:ids.slice((current-1)*pageSize,current*pageSize).map(id=>({...this.byId.get(id)}))};
  }
 }

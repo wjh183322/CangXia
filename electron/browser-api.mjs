@@ -28,7 +28,7 @@ export function fetchInPage({url,method,body,key,timeout=12000,maxBytes=8*1024*1
  const control=new AbortController();window[key]=control;const timer=setTimeout(()=>control.abort('timeout'),timeout);
  return (async()=>{try{
   const headers={Accept:'application/json'};if(body!==null)headers['Content-Type']='application/x-www-form-urlencoded';
-  const response=await fetch(url,{method,headers,credentials:'include',redirect:'error',...(body!==null?{body}:{}),signal:control.signal});
+  const response=await fetch(url,{method,headers,credentials:'include',cache:'no-store',redirect:'error',...(body!==null?{body}:{}),signal:control.signal});
   const reader=response.body?.getReader(),parts=[];let size=0;
   if(reader){const decoder=new TextDecoder();try{while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.byteLength;if(size>maxBytes)return {error:'too-large'};parts.push(decoder.decode(chunk.value,{stream:true}));}parts.push(decoder.decode());}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}}
   return {status:response.status,text:parts.join(''),retryAfter:Math.min(3600,Math.max(0,Number(response.headers.get('retry-after'))||0))};

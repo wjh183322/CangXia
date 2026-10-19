@@ -1,3 +1,4 @@
+import {sourceState} from '../shared/source-state.mjs';
 import {setImmediate as yieldLoop} from 'node:timers/promises';import {creatorIndex,workCreators} from '../shared/creators.mjs';
 export class SearchIndex{
  constructor(views){this.views=views;this.store=views.store;this.rows=new Map();this.buckets=new Map();this.dirty=new Set();this.profilesDirty=true;}
@@ -13,7 +14,8 @@ export class SearchIndex{
  update(id){const base=this.views.bases.get(id),work=this.views.view(id),old=this.rows.get(id);if(!base||!work){this.remove(id);if(this.stored.has(id)){this.store.db.run('DELETE FROM search_rows WHERE id=?',[id]);this.stored.delete(id);}return;}
   const localTags=work.localTags,unchanged=old&&old.base===base&&old.localTags===localTags&&old.profile===this.profile;
   const people=unchanged?old.people:workCreators(base,this.profile),text=unchanged?old.text:[base.name,base.title,base.description,...people.flatMap(a=>[a.nickname,a.uniqueId,a.uid,a.secUid]),...(base.tags||[]),...localTags].join(' ').toLocaleLowerCase();
-  const keys=new Set(['type:'+work.type,'download:'+(work.downloaded?'complete':['checking','unknown'].includes(work.localStatus)?'checking':'missing'),...(work.tags||[]).map(t=>'tag:'+t),...localTags.map(t=>'localtag:'+t)]);
+  const keys=new Set(['source:'+sourceState(work),'type:'+work.type,'download:'+(work.downloaded?'complete':['checking','unknown'].includes(work.localStatus)?'checking':'missing'),...(work.tags||[]).map(t=>'tag:'+t),...localTags.map(t=>'localtag:'+t)]);
+  if(work.remoteState==='unavailable')keys.delete('download:missing');
   if(work.localStatus==='none')keys.add('download:unsaved');
   for(const person of people)for(const [prefix,value]of [['uid',person.uid],['sec',person.secUid],['handle',person.uniqueId]])if(value){keys.add('creator:'+prefix+':'+value);keys.add('creator:'+value);}
   this.remove(id);for(const key of keys)this.bucket(key).add(id);this.rows.set(id,{base,localTags,profile:this.profile,people,text,keys});
@@ -27,9 +29,9 @@ export class SearchIndex{
   })().finally(()=>this.loading=null);return this.loading;
  }
  async query(ids,options={}){
-  const {query='',type='all',tags=[],tagMode='any',localTags=[],localTagMode='any',author='',downloaded='all'}=options;
-  if(typeof query!=='string'||query.length>6000||!['all','video','images'].includes(type)||!['all','unsaved','complete','missing','checking'].includes(downloaded)||typeof author!=='string'||![tags,localTags].every(a=>Array.isArray(a)&&a.length<=1000&&a.every(t=>typeof t==='string'&&t.length<=256))||![tagMode,localTagMode].every(m=>['any','all'].includes(m)))throw Error('搜索筛选参数无效');
-  await this.prepare();const filters=[];if(type!=='all')filters.push(this.bucket('type:'+type));if(author)filters.push(this.bucket('creator:'+author));if(downloaded!=='all')filters.push(this.bucket('download:'+downloaded));
+  const {query='',type='all',tags=[],tagMode='any',localTags=[],localTagMode='any',author='',downloaded='all',source='all'}=options;
+  if(typeof query!=='string'||query.length>6000||!['all','video','images'].includes(type)||!['all','unsaved','complete','missing','checking'].includes(downloaded)||!['all','unchecked','available','unavailable','unknown'].includes(source)||typeof author!=='string'||![tags,localTags].every(a=>Array.isArray(a)&&a.length<=1000&&a.every(t=>typeof t==='string'&&t.length<=256))||![tagMode,localTagMode].every(m=>['any','all'].includes(m)))throw Error('搜索筛选参数无效');
+  await this.prepare();const filters=[];if(source!=='all')filters.push(this.bucket('source:'+source));if(type!=='all')filters.push(this.bucket('type:'+type));if(author)filters.push(this.bucket('creator:'+author));if(downloaded!=='all')filters.push(this.bucket('download:'+downloaded));
   for(const [selected,prefix,mode]of [[tags,'tag:',tagMode],[localTags,'localtag:',localTagMode]])if(selected.length){if(mode==='all')for(const value of selected)filters.push(this.bucket(prefix+value));else{const union=new Set();for(const value of selected)for(const id of this.bucket(prefix+value))union.add(id);filters.push(union);}}
   const text=query.trim().toLocaleLowerCase();if(this.fts&&Array.from(text).length>=3&&!text.includes('\0')){try{const phrase='"'+text.replaceAll('"','""')+'"';filters.push(new Set(this.store.rows('SELECT search_rows.id FROM search_fts JOIN search_rows ON search_rows.rowid=search_fts.rowid WHERE search_fts MATCH ?',[phrase]).map(r=>r.id)));}catch{/* Exact cached substring matching remains available. */}}
   return ids.filter(id=>filters.every(set=>set.has(id))&&(!text||this.rows.get(id)?.text.includes(text)));

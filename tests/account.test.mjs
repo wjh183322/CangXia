@@ -14,6 +14,7 @@ import { TOTAL } from '../electron/model.mjs';
 
 const config=()=>JSON.stringify({cookie:'sessionid=TEST_COOKIE_NOT_REAL; ttwid=test',user_agent:'TestBrowser/150',collects_id:'99'});
 const raw=id=>({aweme_id:id,desc:'测试 #cos',author:{uid:'7',nickname:'测试作者'},video:{play_addr:{url_list:['https://v3.douyinvod.com/example.mp4']}}});
+test('explicit unavailable business replies retire the work without invalidating the account session',async t=>{const {store}=await setup(t);store.upsertWork(raw('1'));const a=adapter(store,async()=>Response.json({status_code:42,status_msg:'该作品已下架'}));await a.collector.applyAuth(parseReferenceConfig(config()));const result=await a.collector.verifySource('1');assert.equal(result.state,'unavailable');assert.match(result.reason,/已下架/);assert.notEqual(store.getSetting('authNeedsRefresh'),true);});
 test('media fetch recovers Electron manual redirect cancellation and validates each next hop',async t=>{
  const {store}=await setup(t);const seen=[];const {collector}=adapter(store,async url=>{seen.push(url);if(url.endsWith('/old'))throw Error('Redirect was cancelled');return new Response('media');});
  collector.mediaRedirect=async()=>({status:302,headers:new Headers({location:'/new'})});

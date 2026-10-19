@@ -1,3 +1,4 @@
+import {goneMessage,detailSourceState,sourceError} from '../shared/source-state.mjs';
 import {webCreatorParams} from '../shared/douyin-web.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, parseWork, sleep } from './model.mjs';
@@ -137,7 +138,7 @@ export class Collector{
     await this.ready;this.assertNotCoolingDown();if(!API_PATHS.has(path))throw new Error('不支持的读取接口');
     if(!allowGuest&&!(await this.isAuthenticated())){this.needsLogin('登录会话需要更新，请重新扫码或在专用浏览器完成验证');throw new Error('登录会话需要更新，请重新扫码或完成验证');}
     const url=new URL(path,'https://www.douyin.com');for(const [key,value] of Object.entries({device_platform:'webapp',aid:'6383',channel:'channel_pc_web',...params}))url.searchParams.set(key,String(value));
-    const response=this.requestMode==='browser'&&!allowGuest?await this.requestBrowser(path,{params,method,form,signal}):await this.profile.fetch(url.href,{method,redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),Accept:'application/json',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000)});
+    const response=this.requestMode==='browser'&&!allowGuest?await this.requestBrowser(path,{params,method,form,signal}):await this.profile.fetch(url.href,{method,cache:'no-store',redirect:'manual',headers:{Referer:'https://www.douyin.com/','User-Agent':this.userAgent||this.profile.getUserAgent(),Accept:'application/json',...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},...(form?{body:new URLSearchParams(form).toString()}:{}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000)});
     if(!quiet){this.diagnostics.push({path,status:response.status});if(this.diagnostics.length>40)this.diagnostics.shift();}
     if(response.status===429){this.holdAccess(Number(response.headers.get('retry-after'))||60);throw new Error('平台限制访问频率，已暂停');}
     if(!response.ok){const message=response.status===403&&this.requestMode!=='browser'?'读取被拒绝（HTTP 403），请通过“专用浏览器”登录并连接后重试，已有进度保留':`抖音接口未接受请求（HTTP ${response.status}），请在${this.requestMode==='browser'?'专用浏览器':'登录窗口'}检查账号和验证状态`;record({event:'api-error',httpStatus:response.status,path});if([401,403].includes(response.status))this.needsLogin(message);throw new Error(message);}
@@ -146,8 +147,8 @@ export class Collector{
     const message=String(data.status_msg||data.message||data.data?.status_msg||data.data?.message||'');
     if(/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)){this.holdAccess();throw new Error('平台限制访问频率，已暂停');}
     if(Number(data.status_code||0)!==0){
-      const code=String(data.status_code).slice(0,32);record({event:'api-business-error',path,businessCode:code});const error=new Error(`抖音接口返回访问提示（代码 ${code}），请重新登录或完成验证，已有读取进度保留`);if(!/作品已删除|视频已删除|作品不存在|视频不存在/.test(message))this.needsLogin(error.message);
-      if(/作品已删除|视频已删除|作品不存在|视频不存在/.test(message))error.sourceDeleted=true;
+      const code=String(data.status_code).slice(0,32);record({event:'api-business-error',path,businessCode:code});const error=goneMessage(message)?sourceError(`平台提示：${message}（代码 ${code}）`):new Error(`抖音接口返回访问提示（代码 ${code}），请重新登录或完成验证，已有读取进度保留`);if(!goneMessage(message))this.needsLogin(error.message);
+      if(goneMessage(message))error.sourceDeleted=true;
       throw error;
     }
     return data;
@@ -209,7 +210,19 @@ export class Collector{
       finally{this.busy=false;this.syncController=null;if(!saveFailed&&this.cancelled&&this.stopRequested)this.update('idle','已停止，已读取内容和进度已保留');this.readProgress({stage:'finished',finishedAt:Date.now(),stopped:this.cancelled,saveFailed});this.scheduleBrowserIdle();this.notify();}
     }
   }
-  markUnavailable(id){const w=this.store.work(id);if(w){this.store.put('works',id,{...w,remoteState:'unavailable',checkedAt:new Date().toISOString()});this.store.save();this.notify();}}
+  recordSource(id,result){
+    const work=this.store.work(id);if(!work)return null;
+    const status={state:result.state,reason:String(result.reason||'').replace(/https?:\/\/\S+/g,'[链接]').slice(0,600),method:result.method||'api',checkedAt:new Date().toISOString()};
+    const preserve=work.remoteState==='unavailable'&&status.state==='unknown';
+    this.store.put('works',id,{...work,remoteState:preserve?'unavailable':status.state,sourceStatus:preserve?work.sourceStatus||{state:'unavailable',reason:'此前已确认失效',method:'legacy'}:status,sourceAttempt:status});this.store.save();this.notify();if(!preserve)this.onSourceStatus?.(id,status.state);return {id,...status,preservedUnavailable:preserve};
+  }
+  markUnavailable(id,{reason='平台确认原作品已失效',method='api'}={}){return this.recordSource(id,{state:'unavailable',reason,method});}
+  async verifySource(id,{signal}={}){
+    if(!this.store.work(id))return {id,state:'unknown',reason:'本机作品记录已移除，未核验其他作品'};
+    try{const work=await this.resolveWork(id,{backgroundOnly:true,signal,verifySource:true});return {id,...work.sourceStatus};}
+    catch(error){signal?.throwIfAborted();if(error.sourceDeleted)return {id,...this.store.work(id)?.sourceStatus,state:'unavailable'};
+      return {...this.recordSource(id,{state:'unknown',reason:error.message}),authRequired:error.code==='AUTH_REQUIRED'||this.status.needsLogin||Number(this.store.getSetting('accessHoldUntil')||0)>Date.now()};}
+  }
   async resolveMusic(id,signal){
     await this.ready;signal?.throwIfAborted();this.assertNotCoolingDown();if(!/^\d+$/.test(id)||this.busy||this.waiters.size)throw Error('请等待当前读取任务结束');if(!(await this.isAuthenticated()))throw Object.assign(Error('请连接抖音账号后更新配乐信息'),{code:'AUTH_REQUIRED'});
     const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal,key='audio:'+id;this.waiters.set(key,{reject:()=>controller.abort()});
@@ -222,13 +235,13 @@ export class Collector{
     try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined,quiet:true});const work=parseWork(data.aweme_detail||data.data?.aweme_detail||{});if(!work||work.id!==id)throw new Error('未取得对应作品资源');return work;}
     finally{this.waiters.delete(key);this.scheduleBrowserIdle();}
   }
-  async resolveWork(id,{backgroundOnly=false,signal}={}){
+  async resolveWork(id,{backgroundOnly=false,signal,verifySource=false}={}){
     signal?.throwIfAborted();
     await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){
       const controller=new AbortController();const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;combined.throwIfAborted();this.waiters.set(id,{reject:()=>controller.abort()});
-      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail;if(!raw)throw new Error('未获得作品详情，已有文件仍保留');if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const w=this.store.upsertWork(raw,{fullDetail:true});this.store.save();this.notify();return w;}
-      catch(e){if(e.sourceDeleted)this.markUnavailable(id);if(backgroundOnly&&this.status.needsLogin)e.code='AUTH_REQUIRED';throw e;}
+      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail,message=data.status_msg||data.message||data.data?.status_msg||data.data?.message;if(goneMessage(message))throw sourceError(message);if(!raw)throw Object.assign(new Error('未获得作品详情，已有文件仍保留；原作品状态暂无法确认'),{code:'SOURCE_UNKNOWN'});if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const verdict=detailSourceState(raw,id,parseWork(raw));if(verdict.state==='unavailable')throw sourceError(verdict.reason);if(verifySource&&verdict.state!=='available')throw Object.assign(Error(verdict.reason),{code:'SOURCE_UNKNOWN'});const w=this.store.upsertWork(raw,{fullDetail:true});if(verifySource||w.remoteState!=='unavailable')this.recordSource(id,verdict);this.store.save();this.notify();return this.store.work(id);}
+      catch(e){if(e.sourceDeleted)this.markUnavailable(id,{reason:e.message});else if(e.code==='SOURCE_UNKNOWN')this.recordSource(id,{state:'unknown',reason:e.message});if(backgroundOnly&&this.status.needsLogin)e.code='AUTH_REQUIRED';throw e;}
       finally{this.waiters.delete(id);this.scheduleBrowserIdle();}
     }
     if(backgroundOnly){this.needsLogin('下载资源需要更新，请重新连接抖音账号后继续下载');throw Object.assign(new Error('请重新连接抖音账号后继续下载，已有文件和队列保留'),{code:'AUTH_REQUIRED'});}

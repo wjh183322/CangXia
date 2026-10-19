@@ -1,7 +1,7 @@
 import {setImmediate as yieldLoop} from 'node:timers/promises';
 import {SearchIndex} from './search-index.mjs';
 const person=p=>p&&Object.fromEntries(['uid','secUid','uniqueId','nickname','roleTitle'].filter(k=>p[k]!==undefined).map(k=>[k,p[k]]));
-const base=w=>({...Object.fromEntries(['id','name','title','caption','description','type','tags','readHidden','remoteState','checkedAt','publishedAt','duration','width','height','backupCover','coAuthorsState','creatorInfoVersion','music'].filter(k=>w[k]!==undefined).map(k=>[k,w[k]])),author:person(w.author),coAuthors:(w.coAuthors||[]).map(person),images:[],imageCount:w.images?.length||0,light:true});
+const base=w=>({...Object.fromEntries(['id','name','title','caption','description','type','tags','readHidden','remoteState','sourceStatus','sourceAttempt','checkedAt','publishedAt','duration','width','height','backupCover','coAuthorsState','creatorInfoVersion','music'].filter(k=>w[k]!==undefined).map(k=>[k,w[k]])),author:person(w.author),coAuthors:(w.coAuthors||[]).map(person),images:[],imageCount:w.images?.length||0,light:true});
 const local=d=>({id:d.id,state:d.state,collectionId:d.collectionId,coverSource:d.coverSource,coverWarning:d.coverWarning,hdCover:d.hdCover,bytes:(d.assets||[]).reduce((n,a)=>n+(a.size||0),0),hasMedia:d.assets?.some(a=>a.kind!=='metadata'),hasVideo:d.assets?.some(a=>a.key==='video')});
 const backed=d=>({id:d.id,state:d.state,collectionId:d.collectionId,home:d.home,backupDeleted:d.backupDeleted,backupRemoved:d.backupRemoved,hdCover:d.hdCover,audio:d.audio,assets:(d.assets||[]).map(a=>({sha256:a.sha256,size:a.size,kind:a.kind}))});
 export class WorkViews{

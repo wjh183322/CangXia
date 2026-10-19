@@ -68,6 +68,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem release/backup -Filter '*.exe' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name } | Set-Content release/backup/SHA256-desktop.txt
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backup-source-status-checks
+          path: |
+            .test-output/source-status-*.png
+            .test-output/backup-desktop-result.json
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
         with:
           name: backup-desktop-release
           path: |
