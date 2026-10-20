@@ -33,7 +33,7 @@ export async function confirmDownload(store,id,{signal}={}){
    if(!Array.isArray(d.assets))return failed('UNREGISTERED_ASSET',keys[0],'保存清单没有登记文件');
    for(key of keys)if(!d.assets.some(a=>a.key===key))return failed('UNREGISTERED_ASSET',key,'必需文件未登记，已有同名文件不会直接认领');
    const targets=d.assets.filter(a=>typeof a.key==='string'&&!a.key.startsWith('cover-hd-'));
-   const parentBefore=await parents(root,d.path,signal),assets={},files=[];
+   const parentBefore=await parents(root,d.path,signal),assets={},files=[];let optionalBytes=0,sizeKnown=true;
    for(const a of targets){
     key=a.key;if(typeof a.file!=='string'||!a.file||a.size!==undefined&&(!Number.isSafeInteger(a.size)||a.size<0))return failed('INVALID_RECORD',key,'文件清单内容无效');
     const file=requireInside(d.path,path.join(d.path,a.file)),fileParents=await parents(root,path.dirname(file),signal);
@@ -42,6 +42,9 @@ export async function confirmDownload(store,id,{signal}={}){
     if(stat.size<=0||a.size&&a.size!==stat.size)return failed('SIZE_MISMATCH',key,'文件为空或大小与保存清单不一致');
     assets[key]={exists:true,state:'available',stamp:[stat.size,stat.mtimeMs,stat.ctimeMs]};files.push({file,stamp:stamp(stat),parents:fileParents});
    }
+   for(const a of d.assets.filter(a=>typeof a.key==='string'&&a.key.startsWith('cover-hd-'))){
+    key=a.key;try{if(typeof a.file!=='string')throw Error('无效文件名');const file=requireInside(d.path,path.join(d.path,a.file));await parents(root,path.dirname(file),signal);const stat=await probe(()=>fs.lstat(file),signal);if(!stat.isFile()||stat.isSymbolicLink())throw Error('非普通文件');const exists=stat.size>0&&(!a.size||a.size===stat.size);optionalBytes+=stat.size;assets[key]={exists,state:exists?'available':'invalid',stamp:[stat.size,stat.mtimeMs,stat.ctimeMs]};}catch(error){if(signal?.aborted)throw error;assets[key]={exists:false,state:error.code==='ENOENT'?'missing':'unknown'};if(error.code!=='ENOENT')sizeKnown=false;}
+   }
    let filesChanged=false;
    for(const file of files){const currentParents=await parents(root,path.dirname(file.file),signal),stat=await probe(()=>fs.lstat(file.file),signal);if(!same(currentParents,file.parents)||!stat.isFile()||stat.isSymbolicLink()||!same(stamp(stat),file.stamp)){filesChanged=true;break;}}
    const parentAfter=await parents(root,d.path,signal);
@@ -49,7 +52,7 @@ export async function confirmDownload(store,id,{signal}={}){
    const current=store.rows('SELECT body FROM downloads WHERE id=?',[id])[0]?.body;
    if(filesChanged||!same(parentBefore,parentAfter)||current!==row.body||store.root!==root||!same(required(store.work(id)),keys)){if(attempt===0)continue;return failed('RECORD_CHANGED','','确认期间文件、目录或清单有变化，请稍后重试');}
    const changed=d.state!=='complete',final=changed?{...d,state:'complete',lastError:''}:d,body=changed?JSON.stringify(final):row.body;
-   const snapshot={id,signature:digest(body),root,status:'complete',local:targets.some(a=>a.kind!=='metadata'),bytes:targets.reduce((n,a)=>n+(assets[a.key]?.stamp[0]||0),0),assets,checkedAt:Date.now()};
+   const snapshot={id,signature:digest(body),root,status:'complete',local:targets.some(a=>a.kind!=='metadata'),bytes:targets.reduce((n,a)=>n+(assets[a.key]?.stamp[0]||0),0)+optionalBytes,sizeKnown,assets,checkedAt:Date.now()};
    // There is no asynchronous gap between the final evidence check and commit.
    store.db.run('BEGIN');try{if(changed)store.put('downloads',id,final);store.db.run('INSERT OR REPLACE INTO file_states VALUES(?,?)',[id,JSON.stringify(snapshot)]);store.db.run('COMMIT');}catch(error){store.db.run('ROLLBACK');throw error;}
    if(changed)store.save();return {ok:true,code:'COMPLETE',issues:[],changed,snapshot};

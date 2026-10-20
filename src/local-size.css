@@ -1,0 +1,6 @@
+.filter-grid.source-filters.local-size-filters{grid-template-columns:repeat(6,minmax(0,1fr))}
+.local-size-sort{display:flex;flex-direction:column;justify-content:center;gap:4px;padding:6px 10px;border:1px solid #e5eaf2;border-radius:7px;color:#8190a7;font-size:11px}
+.local-size-sort select{width:100%;border:0;background:transparent;color:#52647e;font-size:12px}
+.local-size-label{display:block;margin:6px 0;color:#8190a7;font-size:11px}
+.local-size-note{font-size:11px;color:#8190a7;margin:8px 0 0;line-height:1.6}
+@media(max-width:1150px){.filter-grid.source-filters.local-size-filters{grid-template-columns:repeat(3,minmax(0,1fr))}}

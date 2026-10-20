@@ -1,4 +1,5 @@
 import {checkSourceStatusUI} from './source-status-ui-checks.mjs';
+import {checkLocalSizeUI} from './local-size-ui-checks.mjs';
 import {checkReadHistoryUI} from './read-history-ui-checks.mjs';
 import {createRequire} from 'node:module';
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
@@ -17,6 +18,7 @@ dom.window.HTMLElement.prototype.getBoundingClientRect=function(){
 };
 dom.window.HTMLMediaElement.prototype.pause=function(){};dom.window.HTMLMediaElement.prototype.play=function(){return Promise.resolve();};
 const {act}=await import('react');globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const duplicateKeyWarnings=[],originalConsoleError=console.error;console.error=(...args)=>{if(String(args[0]).includes('same key'))duplicateKeyWarnings.push(args);originalConsoleError(...args);};
 const base=fs.mkdtempSync(path.resolve('.test-output/v016-dom-'));const store=await Store.open(path.join(base,'test.sqlite'),path.join(base,'media'));
 store.discoverCollections([{collects_id:'9',collects_name:'测试收藏夹'}]);store.setAdded(['9']);
 for(let n=0;n<45;n++)store.upsertWork({aweme_id:String(1000+n),item_title:`测试作品 ${n+1}`,desc:n%2?'#摄影':'#cos',author:{uid:String(n%2+1),nickname:n%2?'测试作者乙':'测试作者甲'},video:{play_addr:{url_list:['https://v3.douyinvod.com/test.mp4']}}});
@@ -202,6 +204,8 @@ try{
  await act(async()=>{notify(connectedData());await settle();});await aria('作品详情 同名但不同账号');check('opening an incomplete work while logged in and NAS writable never refreshes creators automatically',manualCreatorCalls===0&&document.querySelector('.work-creators').textContent.includes('打开详情不会自动更新'));await aria('关闭弹窗');await aria('作品详情 同名但不同账号');await act(async()=>{notify(connectedData());await settle();});check('reopening details and runtime updates do not start a creator request',manualCreatorCalls===0);await click('更新作者信息');check('only the manual creator button starts a forced update',manualCreatorCalls===1&&document.querySelector('.work-creators').textContent.includes('手动作者更新完成'));await aria('关闭弹窗');
  await checkReadHistoryUI({store,notify,data,act,settle,click,aria,check,dom});
  await checkSourceStatusUI({store,notify,data,act,settle,click,aria,check});
+ check('work details keep independent audio and tag controls without duplicate sibling keys',duplicateKeyWarnings.length===0);
+ await checkLocalSizeUI({store,notify,data,act,settle,check});
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

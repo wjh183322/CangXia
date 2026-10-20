@@ -2,6 +2,9 @@ import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, u
 import { ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Volume2, VolumeX, X, Info, Check, Pause, Play } from 'lucide-react';
 import {AudioPlayback} from './work-audio-ui.jsx';
 import {restorePanelScroll} from './stored-detail-navigation.mjs';
+import {localSize} from '../shared/local-size.mjs';
+import './local-size.css';
+export function LocalSizeLabel({work}){const value=localSize(work);let bytes=value.bytes,unit=0;const units=['B','KB','MB','GB','TB'];while(bytes>=1024&&unit<units.length-1){bytes/=1024;unit++;}return <small className="local-size-label" title="已登记的作品文件；共享配乐、缓存及未登记文件另计">{work.audioOnly?'仅配乐（共享）':value.known?`${bytes.toFixed(unit?1:0)} ${units[unit]} 已登记文件`:'大小待确认'}{work.localAudio&&!work.audioOnly?' · 配乐另计':''}</small>;}
 
 const Sound = createContext(null);
 export const useSound=()=>useContext(Sound);
