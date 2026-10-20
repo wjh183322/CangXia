@@ -37,6 +37,47 @@ test('cross-page all selection uses a scan token and only the filtered repairabl
 test('confirmed unavailable works can be selected for status verification but not file repair',async t=>{const f=await setup(t);missingFile(f);f.store.put('works','3',{...f.store.work('3'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'用户确认失效',method:'user'}});const report=await f.manager.scan();assert.equal(f.manager.page({status:'unavailable'}).total,1);assert.equal(f.manager.page({status:'unavailable'}).repairable,0);const input={token:report.token,status:'unavailable',kind:'all',all:true,exclude:[]};assert.deepEqual(f.manager.selection(input),[]);assert.deepEqual(f.manager.selection(input,{verify:true}),['3']);f.manager.start(['3']);await f.manager.wait();assert.deepEqual(f.queued,[]);assert.equal(f.manager.job.items[0].state,'unavailable');});
 test('batch source verification is ordered, cancellable and does not queue media',async t=>{const f=await setup(t),seen=[];f.collector.verifySource=async(id,{signal})=>{assert.equal(signal.aborted,false);seen.push(id);if(id==='1')f.manager.stop();return {id,state:id==='3'?'unavailable':'unknown',reason:'fixture status'};};await f.manager.scan();f.manager.startVerification(['3','1','2']);await f.manager.wait();assert.deepEqual(seen,['3','1']);assert.equal(f.manager.state().phase,'paused');assert.equal(f.manager.state().verified,2);assert.deepEqual(f.queued,[]);});
 test('resumed source verification can stop again and retain its unchecked suffix',async t=>{const f=await setup(t),seen=[];f.collector.verifySource=async id=>{seen.push(id);f.manager.stop();return {id,state:'unknown',reason:'fixture stop'};};f.manager.startVerification(['3','1','2']);await f.manager.wait();assert.equal(f.manager.state().verified,1);f.manager.start(null,{resume:true});await f.manager.wait();assert.equal(f.manager.state().phase,'paused');assert.equal(f.manager.state().verified,2);assert.deepEqual(seen,['3','1']);f.reopen();assert.equal(f.manager.job.items[2].state,'waiting');});
+
+test('saved unknown source state survives rescans and task-database reopening without another network check',async t=>{
+ const f=await setup(t);missingFile(f);f.queue.jobs=[{id:'3',state:'failed',message:'fixture download failure'}];
+ let requests=0;f.collector.verifySource=async id=>{requests++;const sourceStatus={state:'unknown',reason:'fixture empty detail',method:'api',checkedAt:'2026-10-20T03:00:00Z'};f.store.put('works',id,{...f.store.work(id),remoteState:'unknown',sourceStatus});return {id,...sourceStatus};};
+ await f.manager.scan();f.manager.startVerification(['3']);await f.manager.wait();
+ for(const reopen of [false,true]){
+  if(reopen)f.reopen();const scan=await f.manager.scan();
+  const unknown=f.manager.page({status:'sourceUnknown'});assert.equal(unknown.total,1);assert.equal(unknown.items[0].id,'3');assert.equal(unknown.repairable,0);
+  assert.ok(unknown.items[0].issues.some(i=>i.kind==='files'));assert.ok(unknown.items[0].issues.some(i=>i.kind==='source'));
+  assert.equal(f.manager.page({status:'downloadFailed'}).total,0);
+  const selection={token:scan.token,status:'sourceUnknown',kind:'all',all:true,exclude:[]};assert.deepEqual(f.manager.selection(selection,{verify:true}),['3']);assert.deepEqual(f.manager.selection(selection),[]);
+  assert.equal(f.manager.page({view:'results',status:'sourceUnknown'}).total,1);
+ }
+ assert.equal(requests,1);assert.deepEqual(f.queued,[]);
+});
+test('source-only uncertainty is a persistent problem without requiring downloaded files or a current job',async t=>{
+ const f=await setup(t);f.store.put('works','2',{...f.store.work('2'),remoteState:'unknown',sourceStatus:{state:'unknown',reason:'fixture source uncertainty'}});
+ await f.manager.scan();const page=f.manager.page({status:'sourceUnknown',kind:'source'});
+ assert.equal(page.total,1);assert.equal(page.items[0].id,'2');assert.equal(page.repairable,0);assert.equal(f.manager.job,null);
+});
+test('persisted available source remains filterable for file defects but does not list healthy works',async t=>{
+ const f=await setup(t);missingFile(f);for(const id of ['2','3'])f.store.put('works',id,{...f.store.work(id),remoteState:'available',sourceStatus:{state:'available',reason:'fixture available'}});
+ await f.manager.scan();const page=f.manager.page({status:'sourceAvailable'});
+ assert.equal(page.total,1);assert.equal(page.items[0].id,'3');assert.equal(page.repairable,1);
+});
+test('current problems follow saved source changes while previous verification results remain historical',async t=>{
+ const f=await setup(t);missingFile(f);await f.manager.scan();
+ f.collector.verifySource=async id=>{f.store.put('works',id,{...f.store.work(id),remoteState:'unknown',sourceStatus:{state:'unknown',reason:'old attempt'}});return {id,state:'unknown',reason:'old attempt'};};
+ f.manager.startVerification(['3']);await f.manager.wait();
+ f.store.put('works','3',{...f.store.work('3'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'new explicit evidence'}});
+ assert.equal(f.manager.page({status:'unavailable'}).total,1);assert.equal(f.manager.page({status:'sourceUnknown'}).total,0);
+ assert.equal(f.manager.page({view:'results',status:'sourceUnknown'}).total,1);assert.equal(f.manager.state().sourceUnavailable,0);
+ f.store.put('works','3',{...f.store.work('3'),remoteState:'available',sourceStatus:{state:'available',reason:'new available evidence'}});
+ assert.equal(f.manager.page({status:'sourceAvailable'}).total,1);
+});
+test('verification progress after reopening counts saved completed checks instead of waiting unavailable works',async t=>{
+ const f=await setup(t);for(const id of ['1','2','3'])f.store.put('works',id,{...f.store.work(id),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'historical'}});
+ f.collector.verifySource=async id=>{f.manager.stop();return {id,state:'unknown',reason:'new uncertain attempt',preservedUnavailable:true};};
+ f.manager.startVerification(['3','1','2']);await f.manager.wait();f.reopen();
+ const state=f.manager.state();assert.equal(state.verified,1);assert.equal(state.processed,1);assert.equal(state.sourceUnavailable,0);assert.equal(state.sourceUnknown,1);assert.equal(state.pendingVerification,2);
+});
 test('repair results follow queued downloads through failure and later completion',async t=>{
  const f=await setup(t);missingFile(f);f.manager.start(['3']);await f.manager.wait();f.queue.jobs=[{id:'3',state:'failed',message:'fixture offline'}];
  assert.equal(f.manager.page({view:'results',status:'downloadFailed'}).total,1);f.queue.jobs[0].state='complete';assert.equal(f.manager.page({view:'results',status:'complete'}).total,1);
