@@ -146,11 +146,11 @@
 
 **Interfaces:** `pruneSummaries({now,maxAgeDays=90,maxBytes=50*1024*1024}):object` 只清已完成摘要/过期授权；最新 scope state、未解决 pending、恢复所需最小幂等键不在此预算内。保留幂等键及请求摘要，旧回执正文可压缩；旧 operation 重试返回已完成状态，不能再次删除。
 
-- [ ] **Step 1: 写失败测试。** `old unresolved deletion survives summary pruning` 断言 91 天后 pending 与屏障仍在；摘要超 50 MiB 清最旧已完成记录，仍可判断旧 operation 已执行。`interrupted local step never becomes successful by log cleanup`，断言回收失败仍待处理。诊断扫描日志断言无 Cookie、签名 URL、绝对用户路径和原始响应。
-- [ ] **Step 2: 运行红灯。** `node --test tests/deletion-retention.test.mjs`。
-- [ ] **Step 3: 实现日志回收。** 日志仅安全字段、每条摘要有长度上限；按时间及已完成摘要总字节限制清理，不碰当前范围状态。客户端重启核对回执只恢复显示与上传屏障，不自动删除；服务端过期未提交上传只在无引用/活动读取时回收。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/deletion-conflicts.test.mjs tests/deletion-coordinator.test.mjs`。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: bound deletion history while retaining unresolved barriers"`。
+- [x] **Step 1: 写失败测试。** `old unresolved deletion survives summary pruning` 断言 91 天后 pending 与屏障仍在；摘要超 50 MiB 清最旧已完成记录，仍可判断旧 operation 已执行。`interrupted local step never becomes successful by log cleanup`，断言回收失败仍待处理。诊断扫描日志断言无 Cookie、签名 URL、绝对用户路径和原始响应。
+- [x] **Step 2: 运行红灯。** `node --test tests/deletion-retention.test.mjs`。
+- [x] **Step 3: 实现日志回收。** 日志仅安全字段、每条摘要有长度上限；按时间及已完成摘要总字节限制清理，不碰当前范围状态。客户端重启核对回执只恢复显示与上传屏障，不自动删除；服务端过期未提交上传只在无引用/活动读取时回收。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/deletion-conflicts.test.mjs tests/deletion-coordinator.test.mjs`。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: bound deletion history while retaining unresolved barriers"`。
 
 ### Task 10: 双电脑、大库与成对升级验收
 

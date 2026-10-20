@@ -32,6 +32,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const scopes=new ScopeState(db,{now});
  const catalogue=new BackupCatalogue({db,status});
  const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy,protectedObjects:()=>scopes.protectedHashes()});
+ let maintenanceClosed=false;const maintain=()=>{if(!maintenanceClosed)void scopes.pruneSummaries().catch(()=>{});};const retentionTimer=setInterval(maintain,3600000);retentionTimer.unref();setImmediate(maintain);
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
  const handler=async(req,res)=>{
@@ -57,7 +58,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     if(route==='/v1/scopes/delete'){result=scopes.delete(input,device);await actions.collect();}
     else if(route.endsWith('/prepare'))result=scopes.prepareRestore(input,device);
     else {for(const entry of input.records||[]){const b=entry.body,assets=entry.table==='downloads'&&b?[...(b.assets||[]),...(b.audio?[b.audio.object]:[])]:entry.table==='works'&&b?.backupCover?[b.backupCover]:[];if(assets.some(a=>gcBusy.has(a.sha256)))throw error(409,'媒体对象正在清理，请稍后重新准备恢复');}result=scopes.finishRestore(input.grantId,input.records,device);}
-    send(req,res,200,result);return;
+    send(req,res,200,result);queueMicrotask(maintain);return;
    }
    if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){validLease(req);throw error(409,'此操作已升级为范围删除与恢复，请使用新版入口重新确认');}
    const actionReceipt=route.match(/^\/v1\/backup-actions\/([a-f0-9-]{36})$/);if(actionReceipt&&req.method==='GET'){const row=db.prepare('SELECT device,result FROM backup_actions WHERE request=?').get(actionReceipt[1]);if(!row||row.device!==req.headers['x-device-id'])throw error(404,'未找到 NAS 操作回执');send(req,res,200,JSON.parse(row.result));return;}
@@ -112,5 +113,5 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
   }catch(e){if(res.headersSent){res.destroy();return;}send(req,res,e.status||500,{error:e.status?e.message:'备份服务暂时无法处理请求'});}
  };
  const server=tls?https.createServer(tls,handler):http.createServer(handler);server.requestTimeout=120000;server.headersTimeout=15000;
- return {server,db,status,migrationBackup,collectGarbage:actions.collect,async listen(port=0,host='127.0.0.1'){if(!tls&&!['127.0.0.1','::1'].includes(host))throw new Error('非 HTTPS 只允许本机测试');await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});return server.address();},async close(){clearInterval(garbageTimer);server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await actions.collect().catch(()=>{});db.close();}};
+ return {server,db,status,migrationBackup,collectGarbage:actions.collect,async listen(port=0,host='127.0.0.1'){if(!tls&&!['127.0.0.1','::1'].includes(host))throw new Error('非 HTTPS 只允许本机测试');await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});return server.address();},async close(){maintenanceClosed=true;clearInterval(retentionTimer);clearInterval(garbageTimer);server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await actions.collect().catch(()=>{});if(scopes.pruning)await scopes.pruning.catch(()=>{});db.close();}};
 }

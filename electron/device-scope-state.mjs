@@ -1,3 +1,4 @@
+import {DeletionHistory} from './deletion-history.mjs';
 import fs from 'node:fs';import path from 'node:path';import {DatabaseSync} from 'node:sqlite';import {contentHash,validHome,validAuthor,validCollection} from '../shared/backup-protocol.mjs';
 import {normalizeScope,scopeKey} from '../shared/backup-scopes.mjs';
 const scopeForEntry=entry=>entry.table==='members'?{workId:entry.body?.workId||entry.key.split(':')[1],kind:'account',sourceId:'__all__'}:entry.table==='author_members'?{workId:entry.body?.workId||entry.key.slice(entry.key.lastIndexOf(':')+1),kind:'author',sourceId:entry.body?.authorId||entry.key.slice(0,entry.key.lastIndexOf(':'))}:entry.table==='downloads'?{workId:entry.key,kind:'files',sourceId:''}:null;
@@ -20,6 +21,9 @@ export class DeviceScopeState{
  CREATE TABLE IF NOT EXISTS device_scope_values(local_id TEXT,library_id TEXT,key TEXT,value TEXT,PRIMARY KEY(local_id,library_id,key));`);
   const old=this.db.prepare('SELECT library_id FROM device_scope_meta WHERE local_id=?').get(localIdentity);this.libraryId=libraryId||old?.library_id||'unbound';this.db.prepare('INSERT OR IGNORE INTO device_scope_meta VALUES(?,?,0)').run(localIdentity,this.libraryId);if(old&&old.library_id!==this.libraryId)this.db.prepare('UPDATE device_scope_meta SET library_id=?,revision=revision+1 WHERE local_id=?').run(this.libraryId,localIdentity);this.reload();
  }
+ operationHistory(options){this.history||=new DeletionHistory(this);return this.history.page(options);}
+ operationReceipt(id){this.history||=new DeletionHistory(this);return this.history.get(id);}
+ pruneSummaries(input){if(this.pruning)return this.pruning;this.history||=new DeletionHistory(this);this.pruning=this.history.prune(input).finally(()=>this.pruning=null);return this.pruning;}
  historicalSource(kind,id){return this.value('historySource:'+kind+':'+id,null);}
  historicalSources(kind){return this.db.prepare("SELECT value FROM device_scope_values WHERE local_id=? AND library_id=? AND key LIKE ?").all(...this.params(),'historySource:'+kind+':%').map(r=>JSON.parse(r.value));}
  rememberHistoricalSource(source,{restored=true}={}){const kind=source.kind,id=source.id;if(!['author','collection'].includes(kind)||!(kind==='author'?validAuthor(id):validCollection(id)))throw Error('历史来源标识无效');const previous=this.historicalSource(kind,id),folder=source.folder||(kind==='author'?'作者作品/历史作者-':'历史收藏夹-')+contentHash({kind,id}).slice(0,12);if(!validHome({kind,id,folder,workFolder:'test'}))throw Error('历史来源目录无效');const body={id,name:String(source.name||'历史来源').slice(0,120),folder,uid:source.uid,uniqueId:source.uniqueId,url:kind==='author'?'https://www.douyin.com/user/'+id:undefined,added:true,archived:!!source.archived,remoteMissing:true,historical:true,restored:!!restored||!!previous?.restored,rank:Number.MAX_SAFE_INTEGER};if(contentHash(previous||{})===contentHash(body))return previous;this.setValue('historySource:'+kind+':'+id,body);this.changed();return body;}
@@ -47,7 +51,7 @@ export class DeviceScopeState{
  applyHeld(store){for(const item of this.pending.values())for(const e of this.heldRecords(item.scope)){if(e.table==='works'){if(!store.work(e.key))store.put('works',e.key,e.body);}else if(e.table==='local_downloads'){if(!store.download(e.key))store.put('downloads',e.key,e.body);}else if(e.table==='members')store.db.run('INSERT OR IGNORE INTO members VALUES(?,?,?)',[e.body.collectionId,e.body.workId,e.body.rank]);else if(e.table==='author_members')store.db.run('INSERT OR IGNORE INTO author_members VALUES(?,?,?,?)',[e.body.authorId,e.body.workId,e.body.position,e.body.hidden?1:0]);}}
  value(key,fallback=null){const r=this.db.prepare('SELECT value FROM device_scope_values WHERE local_id=? AND library_id=? AND key=?').get(...this.params(),key);return r?JSON.parse(r.value):fallback;}
  setValue(key,value){this.db.prepare('INSERT OR REPLACE INTO device_scope_values VALUES(?,?,?,?)').run(...this.params(),key,JSON.stringify(value));}
- close(){this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');this.db.close();}
+ close(){if(this.closed)return;this.closed=true;this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');this.db.close();}
 }
 /** The backup worker reads only affected scope IDs, never device paths or file trees. */
 export class DeviceScopeReader{

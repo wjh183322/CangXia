@@ -1,0 +1,11 @@
+/** Keep garbage decisions indexed instead of parsing every work JSON on each timer tick. */
+export function initObjectReferences(db){db.exec('CREATE TABLE IF NOT EXISTS object_references(kind TEXT,id TEXT,sha TEXT,PRIMARY KEY(kind,id,sha));CREATE INDEX IF NOT EXISTS object_reference_hash ON object_references(sha);');for(const event of ['INSERT','UPDATE','DELETE']){const ref=event==='DELETE'?'OLD':'NEW';db.exec(`CREATE TRIGGER IF NOT EXISTS object_references_${event.toLowerCase()} AFTER ${event} ON records WHEN ${ref}.kind IN ('works','downloads') BEGIN
+ DELETE FROM object_references WHERE kind=${ref}.kind AND id=${ref}.id;
+ ${event==='DELETE'?'':`INSERT OR IGNORE INTO object_references SELECT ${ref}.kind,${ref}.id,json_extract(${ref}.body,'$.backupCover.sha256') WHERE ${ref}.kind='works' AND ${ref}.body IS NOT NULL AND json_extract(${ref}.body,'$.backupCover.sha256') IS NOT NULL;
+ INSERT OR IGNORE INTO object_references SELECT ${ref}.kind,${ref}.id,json_extract(a.value,'$.sha256') FROM json_each(${ref}.body,'$.assets') a WHERE ${ref}.kind='downloads' AND json_extract(a.value,'$.sha256') IS NOT NULL;
+ INSERT OR IGNORE INTO object_references SELECT ${ref}.kind,${ref}.id,json_extract(${ref}.body,'$.audio.object.sha256') WHERE ${ref}.kind='downloads' AND ${ref}.body IS NOT NULL AND json_extract(${ref}.body,'$.audio.object.sha256') IS NOT NULL;`}
+ END;`);}if(!db.prepare("SELECT 1 FROM meta WHERE key='objectReferenceIndex'").get()){db.exec(`BEGIN IMMEDIATE;
+ INSERT OR IGNORE INTO object_references SELECT kind,id,json_extract(body,'$.backupCover.sha256') FROM records WHERE kind='works' AND body IS NOT NULL AND json_extract(body,'$.backupCover.sha256') IS NOT NULL;
+ INSERT OR IGNORE INTO object_references SELECT r.kind,r.id,json_extract(a.value,'$.sha256') FROM records r,json_each(r.body,'$.assets') a WHERE r.kind='downloads' AND r.body IS NOT NULL AND json_extract(a.value,'$.sha256') IS NOT NULL;
+ INSERT OR IGNORE INTO object_references SELECT kind,id,json_extract(body,'$.audio.object.sha256') FROM records WHERE kind='downloads' AND body IS NOT NULL AND json_extract(body,'$.audio.object.sha256') IS NOT NULL;
+ INSERT OR REPLACE INTO meta VALUES('objectReferenceIndex','1');COMMIT;`);}}

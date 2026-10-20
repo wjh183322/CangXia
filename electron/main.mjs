@@ -49,7 +49,8 @@ else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getP
 fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-let nasCatalogue,scopedDeletion,scopedTask,scopedPreparing,scopedExit=false,scopedFileIds=new Set();
+let retentionTimer,nasCatalogue,scopedDeletion,scopedTask,scopedPreparing,scopedExit=false,scopedFileIds=new Set();
+const prunePrivateHistory=()=>{if(quitting||!store||store.deviceScopes.closed)return;void store.deviceScopes.pruneSummaries().catch(error=>diagnostics?.record({event:'operation-summary-prune-failed',code:error.code}));void nasCatalogue?.pruneIntents().catch(error=>diagnostics?.record({event:'recovery-intent-prune-failed',code:error.code}));};
 const scopedActive=()=>!!(scopedDeletion?.running||scopedDeletion?.preparing||backup?.deletions?.state().running||nasCatalogue?.restoring||nasCatalogue?.preparingPromise);
 let audio,backup,defectRepair,localRemoval,nasRemoval,creatorDetails,repairChecks,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
 const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectionRead','flatPrepare','flatStart','flatResume','flatRetry','sync','addCollections','importLink','download','retryDownloads','resume','clearCompleted','setTags','checkSource','markSourceUnavailable','startRepairs','chooseRoot','importExistingLibrary']);
@@ -139,6 +140,7 @@ try {
   flatQueue=new FlatDownloadQueue({store,collector,fetchMedia:(url,options)=>collector.fetchMedia(url,options),notify,protectedPaths:[profile]});
   queue.backupRestore=(job,signal,options)=>job.catalogueLibrary?nasCatalogue.restoreJob(job,signal,(w,d)=>queue.metadata(w,d),options):backup.restoreWork(job,signal,(w,d)=>queue.metadata(w,d),options);
   queue.onIdle=()=>backup.afterDownloads();
+  retentionTimer=setInterval(prunePrivateHistory,3600000);retentionTimer.unref();setTimeout(prunePrivateHistory,5000).unref();
   nasCatalogue=new NasCatalogue({store,backup,profile,onChange:notify,restoreFiles:async selected=>{const media=selected.filter(id=>store.get('backup_downloads',id)?.assets?.length),sounds=selected.filter(id=>store.get('backup_downloads',id)?.audio);if(media.length)queue.enqueue(media,{source:'nas',catalogueLibrary:backup.meta.libraryId});if(sounds.length)await audio.enqueue(sounds,'restore');}});backup.catalogue=nasCatalogue;
   handler('nasCataloguePage',input=>({...nasCatalogue.page(input),overview:nasCatalogue.overview()}));
   handler('nasCatalogueGroups',input=>nasCatalogue.groups(input));
@@ -155,10 +157,10 @@ try {
   backup.deletions.localCoordinator=scopedDeletion;backup.deletions.trash=dir=>shell.trashItem(dir);
   backup.beforeScopedDeletion=async input=>{scopedFileIds=new Set(input.files?input.ids:[]);try{if(input.files){const pending=['download','audioSave','repairVideoCover','retryDownloads','flatStart','startRepairs'].map(name=>actionDrains.get(name)?.promise).filter(Boolean);await waitDeletionWriter(Promise.all(pending),{signal:input.signal});input.signal?.throwIfAborted();}await quiesceSelectedDeletion(input,{queue,audio,flatQueue,reconcile:store.localReconcile,signal:input.signal});}catch(error){scopedFileIds.clear();throw error;}return()=>{scopedFileIds.clear();notify();};};
   const prepareScoped=async input=>{if(readLocked()||loggingOut||repairChecks.running||defectRepair?.running||backupBusy||backup.deletions.state().running)throw Error('请先停止读取或检查再准备删除');ids(input?.ids);if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['ids','source','records','files','target'].includes(k)))throw Error('删除范围参数无效');scopedPreparing=scopedDeletion.prepare(input);try{return await scopedPreparing;}finally{scopedPreparing=null;notify();}};
-  const beginScoped=promise=>{scopedTask=Promise.resolve(promise).catch(error=>{window?.webContents.send('cangxia:notice',error.message);}).finally(()=>{scopedTask=null;store.invalidateViews();notify();});notify();return scopedDeletion.state();};
+  const beginScoped=promise=>{scopedTask=Promise.resolve(promise).catch(error=>{window?.webContents.send('cangxia:notice',error.message);}).finally(()=>{scopedTask=null;store.invalidateViews();notify();prunePrivateHistory();});notify();return scopedDeletion.state();};
   handler('prepareScopedDeletion',prepareScoped);
   handler('prepareCatalogueDeletion',async input=>{if(!input||!['nas','local-nas','local'].includes(input.target))throw Error('删除范围无效');const selected=nasCatalogue.selection(input.selection);await nasCatalogue.refresh();nasCatalogue.selection(input.selection);return prepareScoped({ids:selected,source:input.source,records:input.records,files:input.files,target:input.target});});
-  handler('cancelPreparedDeletion',token=>scopedDeletion.discard(token));
+  handler('cancelPreparedDeletion',token=>{const discarded=scopedDeletion.discard(token);if(discarded)prunePrivateHistory();return discarded;});
   handler('confirmScopedDeletion',token=>{if(backup.deletions.state().running)throw Error('请先停止待处理操作');return beginScoped(scopedDeletion.confirm(token));});
   handler('stopScopedDeletion',()=>{scopedDeletion.stop();return scopedDeletion.state();});
   handler('retryScopedDeletion',id=>{if(backup.deletions.state().running)throw Error('请先停止待处理操作');return beginScoped(scopedDeletion.retry(id));});
@@ -468,7 +470,7 @@ app.on('before-quit', event => {
   if(readLocked()||loggingOut){event.preventDefault();if(readLocked())lockedNotice();return;}
   if(!exitConfirmed&&flatQueue?.hasUnfinished()){event.preventDefault();confirmFlatExit();return;}
   if(!exitApproved&&window&&!window.isDestroyed()&&(backup?.syncing||(backup?.config&&backup?.status.pending))){event.preventDefault();window.webContents.send('cangxia:exit-requested');return;}
-  event.preventDefault();quitting=true;qrLogin?.cancel();queue?.pause();const flatClose=flatQueue?.dispose();const browserClose=collector?.dispose();clearTimeout(timer);
+  event.preventDefault();quitting=true;qrLogin?.cancel();queue?.pause();const flatClose=flatQueue?.dispose();const browserClose=collector?.dispose();clearTimeout(timer);clearInterval(retentionTimer);
   void (async()=>{
     try{await flatClose;}catch{dialog.showErrorBox('临时文件未完全清理','单独下载任务已取消；目标目录中的 .cangxia-flat- 开头临时文件夹可能仍有未完成片段，可在退出后删除。');}
     for(let i=0;i<50&&(queue?.running||collector?.busy);i++)await new Promise(r=>setTimeout(r,100));

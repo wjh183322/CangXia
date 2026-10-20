@@ -1,3 +1,4 @@
+import {initObjectReferences} from './object-references.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {contentHash,validateEntry} from '../shared/backup-protocol.mjs';
@@ -5,7 +6,7 @@ const fail=(status,message)=>Object.assign(Error(message),{status});
 
 export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,activeReads,gcBusy,protectedObjects=()=>new Set()}){
  db.exec('CREATE TABLE IF NOT EXISTS backup_actions(request TEXT PRIMARY KEY,device TEXT,hash TEXT,result TEXT); CREATE TABLE IF NOT EXISTS garbage(sha TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS deleted_hashes(sha TEXT,work TEXT,PRIMARY KEY(sha,work));');
- const directory=path.resolve(dataDir,'objects');let collecting=null;
+ initObjectReferences(db);const directory=path.resolve(dataDir,'objects');let collecting=null,partialCursor='';
  // Upgrade old exclusions once. Keep the empty manifest so preview-only sync cannot
  // recreate deleted copies when no computer has local media left.
  if(!db.prepare("SELECT 1 FROM meta WHERE key='automaticRebackupPolicy'").get()){
@@ -15,10 +16,11 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
    setMeta('automaticRebackupPolicy',1);db.exec('COMMIT');
   }catch(e){db.exec('ROLLBACK');throw e;}
  }
- function referenced(){const set=new Set();for(const row of db.prepare("SELECT kind,body FROM records WHERE kind IN ('works','downloads') AND body IS NOT NULL").all()){const body=JSON.parse(row.body);for(const asset of row.kind==='works'?[body.backupCover]:[...(body.assets||[]),body.audio?.object])if(asset?.sha256)set.add(asset.sha256);}return set;}
+ function referenced(){return new Set(db.prepare('SELECT DISTINCT sha FROM object_references').all().map(row=>row.sha));}
+ async function oldPartials(){const dir=path.join(dataDir,'uploads');let names;try{const root=await fs.realpath(dataDir),actual=await fs.realpath(dir);if(actual!==path.join(root,'uploads'))return [];names=(await fs.readdir(dir)).filter(name=>/^[a-f0-9]{64}\.part$/.test(name)).sort();}catch{return [];}const chosen=names.filter(name=>name>partialCursor).slice(0,100);if(!chosen.length){partialCursor='';return [];}partialCursor=chosen.at(-1);const result=[];for(const name of chosen){const file=path.resolve(dir,name);if(path.dirname(file)!==path.resolve(dir))throw Error('临时文件路径不属于上传目录');const stat=await fs.lstat(file).catch(()=>null);if(stat?.isFile()&&!stat.isSymbolicLink()&&now()-stat.mtimeMs>24*60*60*1000)result.push({sha:name.slice(0,64),file,size:stat.size});}return result;}
  async function collect(){
   if(collecting)return collecting;
-  collecting=(async()=>{let refs=referenced(),revision=status().revision,removed=0,bytes=0,pending=0;const started=Date.now();let handled=0;
+  collecting=(async()=>{const partials=await oldPartials();if(!partials.length&&!db.prepare('SELECT 1 FROM garbage LIMIT 1').get())return {removedObjects:0,freedBytes:0,pendingObjects:0,removedPartials:0,freedPartialBytes:0};let refs=referenced(),revision=status().revision,removed=0,bytes=0,pending=0,removedPartials=0,freedPartialBytes=0;const started=Date.now();let handled=0;
    for(const {sha} of db.prepare('SELECT sha FROM garbage').all()){
     if(handled++>=5000||Date.now()-started>5000)break;if(!db.prepare('SELECT 1 FROM garbage WHERE sha=?').get(sha))continue;
     if(!/^[a-f0-9]{64}$/.test(sha))continue;
@@ -31,7 +33,8 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
      db.prepare('DELETE FROM objects WHERE sha=?').run(sha);db.prepare('DELETE FROM garbage WHERE sha=?').run(sha);if(known){removed++;bytes+=known.size;}
     }catch{pending++;}finally{gcBusy.delete(sha);}
    }
-   return {removedObjects:removed,freedBytes:bytes,pendingObjects:db.prepare('SELECT COUNT(*) n FROM garbage').get().n};
+   for(const part of partials){if(status().revision!==revision){refs=referenced();revision=status().revision;}if(refs.has(part.sha)||busyUploads.has(part.sha)||activeReads.has(part.sha)||protectedObjects().has(part.sha))continue;gcBusy.add(part.sha);try{const current=await fs.lstat(part.file).catch(()=>null);if(!current?.isFile()||current.isSymbolicLink()||current.size!==part.size||now()-current.mtimeMs<=24*60*60*1000)continue;await fs.unlink(part.file);removedPartials++;freedPartialBytes+=part.size;}catch(error){if(error.code!=='ENOENT')pending++;}finally{gcBusy.delete(part.sha);}}
+   return {removedPartials,freedPartialBytes,removedObjects:removed,freedBytes:bytes,pendingObjects:db.prepare('SELECT COUNT(*) n FROM garbage').get().n};
   })().finally(()=>collecting=null);return collecting;
  }
  async function execute(action,input,device,name){
