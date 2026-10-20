@@ -8,7 +8,7 @@
 
 **Tech Stack:** Electron 44、React 19、Node ESM、node:sqlite / sql.js、node:test、现有 DOM 与桌面验收脚本；不新增依赖。
 
-**Spec:** [已确认方案](../../research/2026-10-20-download-repair-and-unfavorite.md)。状态：计划待审阅，产品代码未改。
+**Spec:** [已确认方案](../../research/2026-10-20-download-repair-and-unfavorite.md)。状态：用户已批准按本会话执行；任务进度以执行记录及提交为准。
 
 ## Global Constraints
 
@@ -43,11 +43,11 @@
 
 **Interfaces:** 新增 `confirmDownload(store,id,{signal}={}):Promise<ConfirmResult>`；保留 `FileStates.confirmWritten(id):Promise<boolean>` 兼容现有调用。确认器核对必需 key、边界、文件类型及大小，并在提交前复核清单原始内容与文件身份；队列使用详细结果输出原因。
 
-- [ ] **Step 1: 写失败测试。** 创建隔离 fixture 工厂，返回 `{store,queue,files,networkCalls,changeDuringCheck}`；fixture 必须登记视频、封面、元数据。测试 `partial record with complete registered files is promoted without download` 断言 `result.ok===true`、`store.download(id).state==='complete'`、`networkCalls===0`、三文件哈希不变；测试 `missing required video never passes` 断言 `ok===false`、`issues` 含 video；测试 `changed record or symlink is not confirmed` 断言不提交 complete；测试 `zero-byte metadata part does not invalidate valid final files` 断言最终文件正常即通过。
-- [ ] **Step 2: 运行红灯。** `node --test tests/download-confirmation.test.mjs`；预期新模块缺失或 partial 状态断言失败，不接受环境错误作为功能红灯。
-- [ ] **Step 3: 实现确认器。** 复用检查规则，在后台对单作品检查；所有必需资产通过后，用原记录比较后原子提升状态并写文件缓存。确认时变化最多重试 1 次，仍变化返回 `RECORD_CHANGED`；停止返回 `CANCELLED`。目录未知、缺失、大小不符、链接、未登记分别返回不同 code，不能仅检查已列出的 assets。不得在 Electron 主线程同步遍历所有作品。
-- [ ] **Step 4: 运行绿灯。** `node --test tests/download-confirmation.test.mjs tests/file-states.test.mjs tests/download-source.test.mjs tests/download-concurrency.test.mjs`；预期全部通过，原文件保留，NAS 显式恢复及已失效任务退队逻辑保持正确。
-- [ ] **Step 5: 提交。** 仅暂存本任务上述 5 个文件，`git commit --quiet -m "fix: reconcile verified download records without redownloading"`。
+- [x] **Step 1: 写失败测试。** 创建隔离 fixture 工厂，返回 `{store,queue,files,networkCalls,changeDuringCheck}`；fixture 必须登记视频、封面、元数据。测试 `partial record with complete registered files is promoted without download` 断言 `result.ok===true`、`store.download(id).state==='complete'`、`networkCalls===0`、三文件哈希不变；测试 `missing required video never passes` 断言 `ok===false`、`issues` 含 video；测试 `changed record or symlink is not confirmed` 断言不提交 complete；测试 `zero-byte metadata part does not invalidate valid final files` 断言最终文件正常即通过。
+- [x] **Step 2: 运行红灯。** `node --test tests/download-confirmation.test.mjs`；预期新模块缺失或 partial 状态断言失败，不接受环境错误作为功能红灯。
+- [x] **Step 3: 实现确认器。** 复用检查规则，在后台对单作品检查；所有必需资产通过后，用原记录比较后原子提升状态并写文件缓存。确认时变化最多重试 1 次，仍变化返回 `RECORD_CHANGED`；停止返回 `CANCELLED`。目录未知、缺失、大小不符、链接、未登记分别返回不同 code，不能仅检查已列出的 assets。不得在 Electron 主线程同步遍历所有作品。
+- [x] **Step 4: 运行绿灯。** `node --test tests/download-confirmation.test.mjs tests/file-states.test.mjs tests/download-source.test.mjs tests/download-concurrency.test.mjs`；预期全部通过，原文件保留，NAS 显式恢复及已失效任务退队逻辑保持正确。
+- [x] **Step 5: 提交。** 仅暂存本任务上述 5 个文件，`git commit --quiet -m "fix: reconcile verified download records without redownloading"`。
 
 ### Task 2: 处理未登记文件并提供小范围诊断
 
@@ -55,11 +55,11 @@
 
 **Interfaces:** `buildWorkDiagnostic(store,id):Promise<object>` 返回 schemaVersion、workId、下载 state、必需 key、登记资产的脱敏文件名/大小/当前状态、源状态与小量错误摘要，不包含绝对路径、Cookie、URL、整库内容；IPC `exportWorkDiagnostic(id):Promise<{cancelled:boolean}>` 用保存对话框落盘。它不修复或重扫其他作品。
 
-- [ ] **Step 1: 写失败测试。** `cover-only metadata does not prove existing video identity` 使用匿名同结构样本，视频存在但记录仅 cover；断言不能直接完成。`unregistered existing video survives repair` 断言现有视频哈希不变，缺项通过新临时文件下载验证后登记到不同安全 basename，第二次重试不再下载。`diagnostic exports only selected work` 断言仅所选 ID、无其他作品、无绝对路径/签名参数，输出不超过 128 KiB。
-- [ ] **Step 2: 运行红灯。** `node --test tests/work-diagnostic.test.mjs tests/download-confirmation.test.mjs`，预期导出接口或未登记文件保护失败。
-- [ ] **Step 3: 实现安全补缺与导出。** 优先已有可信下载记录/校验摘要；没有身份依据时不按文件名复用。刷新该作品合法详情，仅下载缺少资产到唯一临时位置，验证后登记新文件，保留未登记旧文件并说明。元数据以当前清单重新生成并原子替换；残留 `.part` 不作为丢失证据。导出按资产最多 256 条、每条摘要 256 字符截断，注明截断；未知/离线区别于文件缺失。导出属于只读 IPC，检查和下载期间可用。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，并用 fixture 视频＋旧 JSON＋0 KB part 重试两次，确认只有首次补缺请求；导出不修改 fixture。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "fix: preserve unregistered media and export focused diagnostics"`。
+- [x] **Step 1: 写失败测试。** `cover-only metadata does not prove existing video identity` 使用匿名同结构样本，视频存在但记录仅 cover；断言不能直接完成。`unregistered existing video survives repair` 断言现有视频哈希不变，缺项通过新临时文件下载验证后登记到不同安全 basename，第二次重试不再下载。`diagnostic exports only selected work` 断言仅所选 ID、无其他作品、无绝对路径/签名参数，输出不超过 128 KiB。
+- [x] **Step 2: 运行红灯。** `node --test tests/work-diagnostic.test.mjs tests/download-confirmation.test.mjs`，预期导出接口或未登记文件保护失败。
+- [x] **Step 3: 实现安全补缺与导出。** 优先已有可信下载记录/校验摘要；没有身份依据时不按文件名复用。刷新该作品合法详情，仅下载缺少资产到唯一临时位置，验证后登记新文件，保留未登记旧文件并说明。元数据以当前清单重新生成并原子替换；残留 `.part` 不作为丢失证据。导出按资产最多 256 条、每条摘要 256 字符截断，注明截断；未知/离线区别于文件缺失。导出属于只读 IPC，检查和下载期间可用。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，并用 fixture 视频＋旧 JSON＋0 KB part 重试两次，确认只有首次补缺请求；导出不修改 fixture。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "fix: preserve unregistered media and export focused diagnostics"`。
 
 ### Task 3: 补充已知空文字过滤原因识别
 
@@ -67,11 +67,11 @@
 
 **Interfaces:** 沿用 `filteredSourceState(data,id)` 的原返回形状；只扩展已提供的 `status_audit_self_see`，不把 status_code 0 本身当失效。
 
-- [ ] **Step 1: 写失败测试。** `audit self-see with matching ID and empty explanation is unavailable` 使用用户提供的匿名化响应结构，断言 unavailable、原因等于“原作品当前不可访问，平台未提供具体原因”。分别测试 ID 不符、未知 reason、非 0 code、登录/验证/限流提示仍不能确认 unavailable；有效目标 detail 优先，不被空过滤信息覆盖。
-- [ ] **Step 2: 运行红灯。** `node --test tests/source-status.test.mjs`，预期已知审查原因案例失败。
-- [ ] **Step 3: 实现精确分支。** 成功响应、明确空 detail、匹配字符串 ID、精确已知 reason、无账号/验证/限流证据才判当前不可访问；不宣称作品已删除或具体审核原因，其他代码维持保守判断。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，保留现有 `status_self_see` 与普通空响应回归。
-- [ ] **Step 5: 提交。** `git add shared/source-state.mjs tests/source-status.test.mjs`；`git commit --quiet -m "fix: recognize the verified audit self-see response"`。
+- [x] **Step 1: 写失败测试。** `audit self-see with matching ID and empty explanation is unavailable` 使用用户提供的匿名化响应结构，断言 unavailable、原因等于“原作品当前不可访问，平台未提供具体原因”。分别测试 ID 不符、未知 reason、非 0 code、登录/验证/限流提示仍不能确认 unavailable；有效目标 detail 优先，不被空过滤信息覆盖。
+- [x] **Step 2: 运行红灯。** `node --test tests/source-status.test.mjs`，预期已知审查原因案例失败。
+- [x] **Step 3: 实现精确分支。** 成功响应、明确空 detail、匹配字符串 ID、精确已知 reason、无账号/验证/限流证据才判当前不可访问；不宣称作品已删除或具体审核原因，其他代码维持保守判断。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，保留现有 `status_self_see` 与普通空响应回归。
+- [x] **Step 5: 提交。** `git add shared/source-state.mjs tests/source-status.test.mjs`；`git commit --quiet -m "fix: recognize the verified audit self-see response"`。
 
 ### Task 4: 持久问题总览，与单轮任务分开
 

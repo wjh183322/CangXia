@@ -1,5 +1,6 @@
 import {parentPort,workerData} from 'node:worker_threads';
 import {DatabaseSync} from 'node:sqlite';import fs from 'node:fs/promises';import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {requireInside} from './model.mjs';
 let cancelled=false;const acknowledgements=new Map();
 parentPort.on('message',message=>{if(message.cancel)cancelled=true;if(message.ack!==undefined){acknowledgements.get(message.ack)?.();acknowledgements.delete(message.ack);}});
@@ -16,6 +17,7 @@ async function inspect(id){
   const w=workStatement.get(id);if(!w)throw Error('作品信息不存在');result.name=String(w.name||id).slice(0,200);
   if(context.unavailable)throw Error(context.unavailable);
   const record=downloadStatement.get(id),d=record?JSON.parse(record.body):null;
+  result.signature=createHash('sha256').update(record?.body||'').digest('hex');result.root=root;
   const expected=w.type==='video'?[['video','视频'],['cover','高清单图']]:imageStatement.all(id).map(im=>['image-'+im.idx,'图片 '+(im.idx+1)]);if(w.type==='images'&&!expected.length)throw Error('缺少原始图片数量，无法判断完整性');expected.push(['metadata','作品信息']);
   if(d)await parents(d.path);const assets=new Map((d?.assets||[]).map(a=>[a.key,a]));
   for(const [key,label]of expected){

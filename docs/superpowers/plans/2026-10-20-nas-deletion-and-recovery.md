@@ -8,7 +8,7 @@
 
 **Tech Stack:** Electron、React、Node ESM、SQLite、现有 HTTPS 备份协议和媒体对象库、node:test 与双客户端隔离集成测试；不新增运行时依赖。
 
-**Spec:** [已确认设计](../specs/2026-10-20-cross-device-deletion-and-recovery-design.md)。状态：计划待审阅；应在本机改进计划交付后执行。
+**Spec:** [已确认设计](../specs/2026-10-20-cross-device-deletion-and-recovery-design.md)。状态：用户已批准按本会话执行；在本机改进计划交付后继续，不再重复询问设计确认。
 
 ## Global Constraints
 

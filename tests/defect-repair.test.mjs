@@ -11,6 +11,35 @@ import {sha256} from '../shared/backup-protocol.mjs';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==','base64');
 test('targeted repair uses the indexed browsing cache without refreshing already available work',async t=>{const f=await setup(t);const cache=await f.backup.cache.writeCover(png,'.png',{alias:'1'});f.backup.fetchCover=async()=>{throw Error('no network request expected');};f.manager.start(['1']);await f.manager.wait();assert.equal(f.manager.state().done,1);assert.equal(f.calls.length,0);assert.equal(f.queued.length,0);assert.deepEqual(fs.readFileSync(cache.file),png);assert.equal(f.store.work('1').backupCover,undefined);assert.equal(f.backup.status.pendingCovers,1);});
+
+test('persistent overview retains 204 unrelated unavailable works when 74 failures are verified and the manager restarts',async t=>{
+ const f=await setup(t);missingFile(f);const template=f.store.download('3'),cover=f.store.work('3').backupCover,selected=[];
+ f.store.db.run('BEGIN');for(let n=0;n<278;n++){const id=String(1000+n);f.store.upsertWork(raw(id));f.store.put('works',id,{...f.store.work(id),backupCover:cover,...(n<204?{remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture previous result'}}:{})});if(n>=204){f.store.put('downloads',id,{...template,id});selected.push(id);}}f.store.db.run('COMMIT');f.queue.jobs=selected.map(id=>({id,state:'failed',message:'fixture failure'}));
+ await f.manager.scan();f.collector.verifySource=async id=>{const sourceStatus={state:selected.indexOf(id)<9?'available':'unknown',reason:'fixture new result',checkedAt:new Date().toISOString()};f.store.put('works',id,{...f.store.work(id),remoteState:sourceStatus.state,sourceStatus});return {id,...sourceStatus};};
+ f.manager.startVerification(selected);await f.manager.wait();assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,204);assert.equal(f.manager.page({fileStatus:'downloadFailed'}).total,74);
+ f.reopen();assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,204);assert.equal(f.manager.page({sourceStatus:'unknown'}).total,65);assert.equal((await f.manager.overview()).checked,281);
+});
+
+test('loading the saved overview never starts disk or platform checks',async t=>{
+ const f=await setup(t);f.store.put('works','2',{...f.store.work('2'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'saved evidence'}});
+ f.manager.checks.check=async()=>{throw Error('opening must not scan files');};f.collector.verifySource=async()=>{throw Error('opening must not verify source');};
+ const overview=await f.manager.overview();assert.ok(overview.total>=1);assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,1);assert.equal(f.manager.running,false);assert.equal(f.manager.state()?.overviewRevision,f.manager.registry.revision);
+});
+
+test('source verification preserves a previously checked missing-file finding',async t=>{
+ const f=await setup(t);missingFile(f);f.store.put('downloads','3',{...f.store.download('3'),assets:[...f.store.download('3').assets,{key:'video',file:'视频.mp4',kind:'video',size:42}]});await f.manager.scan();
+ f.collector.verifySource=async id=>{f.store.put('works',id,{...f.store.work(id),remoteState:'unknown',sourceStatus:{state:'unknown',reason:'empty response',checkedAt:new Date().toISOString()}});return {id,state:'unknown',reason:'empty response'};};
+ f.manager.startVerification(['3']);await f.manager.wait();const row=f.manager.page({sourceStatus:'unknown'}).items.find(i=>i.id==='3');assert.ok(row.issues.some(i=>i.kind==='files'&&i.type==='video'));assert.ok(!row.issues.some(i=>i.kind==='checking'));
+});
+
+test('a changed manifest cannot reuse a previous worker missing-file result',async t=>{
+ const f=await setup(t);missingFile(f);let changed=false;
+ f.manager.checks.notify=()=>{if(!changed&&f.manager.checks.state()?.checked>=1){changed=true;const d=f.store.download('3');fs.writeFileSync(path.join(d.path,'视频.mp4'),'saved');f.store.put('downloads','3',{...d,state:'complete',assets:[...d.assets,{key:'video',file:'视频.mp4',kind:'video',size:5}]});}};
+ await f.manager.scan();const row=f.manager.page().items.find(i=>i.id==='3');assert.ok(!row?.issues.some(i=>i.kind==='files'&&i.type==='video'));
+});
+test('completed queue history is not re-inspected while constructing the manager',async t=>{
+ const f=await setup(t);f.queue.jobs=Array.from({length:3000},(_,n)=>({id:String(n+1),state:'complete'}));const work=f.store.work.bind(f.store);let reads=0;t.mock.method(f.store,'work',(...args)=>{reads++;return work(...args);});f.reopen();assert.ok(reads<10,'opening re-read '+reads+' historical works');
+});
 const raw=id=>({aweme_id:id,desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:[]}}});
 async function setup(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-defect-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));store.setSetting('browserAccountKey','uid:1');
