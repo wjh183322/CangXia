@@ -1,0 +1,3 @@
+import fs from 'node:fs';import path from 'node:path';
+// Screenshots are supporting evidence; functional and geometry assertions run separately.
+export async function captureDesktop(win,file){const root=path.resolve('.test-output'),target=path.resolve(file);if(!target.startsWith(root+path.sep))throw Error('截图路径超出测试输出目录');try{fs.writeFileSync(target,(await win.webContents.capturePage()).toPNG());fs.writeFileSync(target+'.capture.json',JSON.stringify({captured:true,at:new Date().toISOString()}));return true;}catch(error){fs.writeFileSync(target+'.capture.json',JSON.stringify({captured:false,at:new Date().toISOString(),reason:String(error.message).slice(0,200)}));return false;}}

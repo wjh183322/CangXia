@@ -95,7 +95,8 @@ export class Store {
   getSetting(key) { if(key==='downloadJobs'&&this.downloadTasks)return this.downloadTasks.present?this.downloadTasks.list():null;const r = this.rows('SELECT value FROM settings WHERE key=?', [key])[0]; return r ? JSON.parse(r.value) : null; }
   setSetting(key, value) { if(key==='downloadJobs'&&this.downloadTasks){this.downloadTasks.replace(value);this.downloadTasks.flush();return;}if(JSON.stringify(this.getSetting(key))===JSON.stringify(value))return;if(this.backup&&!this.backup.localKey(key))this.backup.assertWritable();this.db.run('INSERT OR REPLACE INTO settings VALUES (?,?)', [key, JSON.stringify(value)]);if(key==='root')this.viewCache.clear();this.revision++; }
   get root() { return this.getSetting('root'); }
-  collection(id) { return this.authorSources.collection(id)||this.get('collections', id); }
+  collection(id) { const author=this.authorSources.collection(id);if(author)return author;const source=this.get('collections',id);if(source&&!source.remoteMissing)return source;const history=this.deviceScopes?.historicalSource('collection',id);return source?.remoteMissing&&history?.restored&&!history.archived?{...source,historical:true}:source||history; }
+  visibleCollections(){const existing=this.all('collections'),known=new Set(existing.map(c=>c.id));return [...existing.map(c=>c.remoteMissing?this.collection(c.id):c),...(this.deviceScopes?.historicalSources('collection')||[]).filter(c=>!known.has(c.id)&&this.rows('SELECT 1 FROM members WHERE collection_id=? LIMIT 1',[c.id]).length)];}
   work(id) { return this.get('works', id); }
   hasRead(id) { const w=this.work(id);return this.deviceScopes?this.deviceScopes.visibleAccount(id,w):!!w&&!w.readHidden; }
   visibleAuthorRows(id){return this.rows('SELECT author_id,position FROM author_members WHERE work_id=? AND hidden=0 ORDER BY author_id,position',[id]).filter(r=>!this.deviceScopes?.isHidden({workId:id,kind:'author',sourceId:r.author_id}));}
@@ -171,7 +172,8 @@ export class Store {
       let folder = safeName(name, 52);
       if (folder === '收藏' || this.all('collections').some(c => c.id !== id && c.folder.toLowerCase() === folder.toLowerCase())) folder += '-' + id.slice(-6);
       if(old&&(old.name!==name||old.folder!==folder))this.localReconcile.scope(id);
-      this.put('collections', id, { ...old, id, name, folder, added: old?.added || false, remoteMissing: false, count: Number(raw.total_number || 0), rank: index, discoveredAt: new Date().toISOString() });
+      const previous={...old};delete previous.historical;delete previous.restored;
+      this.put('collections', id, { ...previous, id, name, folder, added: old?.added || false, remoteMissing: false, count: Number(raw.total_number || 0), rank: index, discoveredAt: new Date().toISOString() });
     });
     if (complete) for (const c of this.all('collections')) if (c.id !== TOTAL && !seen.has(c.id)) this.put('collections', c.id, { ...c, remoteMissing: true });
     this.save();
@@ -373,7 +375,7 @@ export class Store {
       const view={ ...w, readHidden:!this.deviceScopes.visibleAccount(w.id,w), videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:!!backups.get(w.id)?.assets?.length&&!backups.get(w.id).backupDeleted,backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
       this.viewCache.set(id,view);return view;
     });
-    const collections = this.all('collections').sort((a,b) => a.rank - b.rank);
+    const collections = this.visibleCollections().sort((a,b) => a.rank - b.rank);
     const members = {}, pendingMembers = {},localMembers={},localPendingMembers={};
     const hidden=new Set(works.filter(w=>w.readHidden).map(w=>w.id));
     for (const c of collections) {

@@ -67,7 +67,7 @@ export class DownloadQueue {
     }
     this.notify();
   }
-  enqueue(ids,{coverOnly=false,source='douyin'}={}) {
+  enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
     if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
     if(ids.some(id=>this.active.get(id)?.cancelled))throw Error('该任务正在取消，请稍后重新添加');
     const requested=new Set(ids);if(this.jobs.some(j=>requested.has(j.id)&&['waiting','running'].includes(j.state)&&(!!j.coverOnly!==coverOnly||(!coverOnly&&(j.source||'douyin')!==source))))throw Error('所选作品已有不同类型或来源的任务，请先完成或取消该任务');
@@ -75,7 +75,7 @@ export class DownloadQueue {
     for (const id of [...new Set(ids)]) {
       if(busy.has(id))continue;
       const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;if(source!=='nas'&&w.remoteState==='unavailable'){const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(previous)this.retireUnavailable([id]);continue;}
-      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source });
+      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source,...(catalogueLibrary?{catalogueLibrary}:{}) });
     }
     const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
     this.paused = false;this.pauseReason=''; this.emit(true);this.wake?.();void this.run();

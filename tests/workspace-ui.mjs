@@ -1,5 +1,6 @@
 import {checkSourceStatusUI} from './source-status-ui-checks.mjs';
 import {checkDeletionUI} from './deletion-ui-checks.mjs';
+import {checkNasCatalogueUI} from './nas-catalogue-ui-checks.mjs';
 import {checkLocalSizeUI} from './local-size-ui-checks.mjs';
 import {checkReadHistoryUI} from './read-history-ui-checks.mjs';
 import {createRequire} from 'node:module';
@@ -211,6 +212,7 @@ try{
  check('work details keep independent audio and tag controls without duplicate sibling keys',duplicateKeyWarnings.length===0);
  await checkLocalSizeUI({store,notify,data,act,settle,check});
  await checkDeletionUI({store,notify,data,act,settle,click,aria,check});
+ await checkNasCatalogueUI({store,notify,data,act,settle,click,aria,check});
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

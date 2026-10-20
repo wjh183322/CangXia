@@ -1,0 +1,3 @@
+// Save committed source names before their shared definitions disappear. No memberships are created.
+export function rememberLocalSource(store,kind,id){const source=kind==='author'?store.authorSources.get(id):store.collection(id);if(source)store.deviceScopes.rememberHistoricalSource({...source,kind,id},{restored:false});}
+export function rememberLocalSources(store){if(!store.deviceScopes)return;store.deviceScopes.batch(()=>{for(const source of store.all('authors'))rememberLocalSource(store,'author',source.id);for(const source of store.all('collections'))rememberLocalSource(store,'collection',source.id);});}

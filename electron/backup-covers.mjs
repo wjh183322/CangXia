@@ -18,7 +18,7 @@ export class BackupCovers {
     signal.throwIfAborted();this.active++;try{return await action();}finally{this.active--;this.waiters.shift()?.();}
   }
   async shared(key,signal,action){signal??=new AbortController().signal;signal.throwIfAborted();let entry=this.pending.get(key);if(!entry){const controller=new AbortController();entry={controller,users:new Set()};entry.promise=this.slot(()=>action(AbortSignal.any([controller.signal,this.controller.signal])),AbortSignal.any([controller.signal,this.controller.signal])).finally(()=>this.pending.delete(key));entry.promise.catch(()=>{});this.pending.set(key,entry);}const user=randomUUID();entry.users.add(user);let reject;const cancelled=new Promise((_,r)=>reject=r),abort=()=>{entry.users.delete(user);if(!entry.users.size)entry.controller.abort();reject(signal.reason);};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();try{return await Promise.race([entry.promise,cancelled]);}finally{signal.removeEventListener('abort',abort);entry.users.delete(user);if(!entry.users.size)entry.controller.abort();}}
-  get(id,{preferDouyin=false,signal}={}){return this.shared('cover:'+id+':'+preferDouyin,signal,s=>this.getFile(id,{preferDouyin,signal:s}));}
+  get(id,{preferDouyin=false,signal,asset}={}){return this.shared('cover:'+id+':'+preferDouyin+':'+(asset?.sha256||''),signal,s=>this.getFile(id,{preferDouyin,signal:s,asset}));}
   async fromDouyin(id,signal){
     const file=path.join(this.client.profile,'covers',id+'.jpg');
     const alias=await this.client.cache?.alias('cover',id);if(alias)return alias.file;
@@ -35,12 +35,13 @@ export class BackupCovers {
       return file;
     })();
   }
-  async getFile(id,{preferDouyin=false,signal}={}){
+  async getFile(id,{preferDouyin=false,signal,asset:catalogueAsset}={}){
     id=String(id);if(!/^\d+$/.test(id))throw Error('封面作品标识无效');
     const assets=this.client.store.get('backup_downloads',id)?.assets||[];
-    const candidates=[bestCover(this.client.store.get('backup_downloads',id)),this.client.store.work(id)?.backupCover,assets.find(a=>a.key==='cover'),assets.find(a=>a.key==='image-0'),...assets.filter(a=>a.kind==='image')];
+    const candidates=[catalogueAsset,bestCover(this.client.store.get('backup_downloads',id)),this.client.store.work(id)?.backupCover,assets.find(a=>a.key==='cover'),assets.find(a=>a.key==='image-0'),...assets.filter(a=>a.kind==='image')];
     const asset=candidates.find(a=>a?.kind==='image'&&/^[a-f0-9]{64}$/.test(a.sha256)&&Number.isSafeInteger(a.size)&&a.size>0&&a.size<=20*1024*1024);
     if(!asset){if(preferDouyin){try{const file=await this.fromDouyin(id,signal);if(file)this.clearProblem(id);return file;}catch(error){if(!signal.aborted)this.reportProblem(id,'抖音封面暂不可用：'+(error.code||error.message),'source');throw error;}}return null;}
+    if(catalogueAsset){const cached=await this.client.cache?.get('cover:'+asset.sha256);if(cached){this.clearProblem(id);return cached.file;}}
     const extension=path.extname(asset.file||'').toLowerCase();
     const suffix=['.jpg','.jpeg','.png','.webp','.gif','.avif'].includes(extension)?extension:'.img';
     const directory=path.join(this.client.profile,'covers','backup');
@@ -55,5 +56,5 @@ export class BackupCovers {
     if(!this.client.status.connected||!this.client.transport){this.reportProblem(id,'NAS 未连接，本机暂无可用封面缓存');return null;}
     try{signal.throwIfAborted();await fs.mkdir(directory,{recursive:true});const reservation=await this.client.cache?.reserve('cover',asset.size);try{await this.client.transport.download(asset,file,{signal:AbortSignal.any([signal,AbortSignal.timeout(60000)])});if(this.client.cache)await this.client.cache.register('cover','cover:'+asset.sha256,file,asset.size);}finally{reservation?.release();const partial=file+'.backup-part';if(await fs.lstat(partial).catch(()=>null))await fs.unlink(partial);}this.clearProblem(id);return file;}catch(error){if(!signal.aborted)this.reportProblem(id,'NAS 封面取回失败：'+(error.code||error.message));throw error;}
   }
-  async close(){this.controller.abort();await Promise.allSettled([...this.pending.values()]);if(this.problemTimer){clearTimeout(this.problemTimer);this.problemTimer=null;this.saveProblems();}}
+  async close(){this.controller.abort();await Promise.allSettled([...this.pending.values()].map(entry=>entry.promise||entry));if(this.problemTimer){clearTimeout(this.problemTimer);this.problemTimer=null;this.saveProblems();}}
 }

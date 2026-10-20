@@ -134,11 +134,11 @@
 
 **Interfaces:** GET `/v1/catalogue` 参数 `{tab:'all'|'collection'|'author',query,page,limit:20,content:'all'|'records'|'files'|'incomplete'}`，返回 `{libraryId,revision,total,items}`，每项含真实来源与文件存在性摘要，不依赖本机可见集合。GET `/v1/catalogue/index` 参数 `{after:number,limit:100}` 返回 `{revision,next,hasMore,items}`，为本机目录索引提供首次分批快照及后续增量，包含明确移除的索引项。`NasCatalogue.page(options)` 查询持久目录摘要；`prepareRestore({ids,records,files,sources})`/`restore(token)` 校验最新目录后分范围执行。本机状态过滤从同 revision 的目录摘要与设备索引计算，不能先远端分页再过滤当页。
 
-- [ ] **Step 1: 写失败测试。** `records-only backup remains browsable after local hide` 断言总览纳入、显示仅记录、能恢复来源关联且不下载视频。`file restore does not unhide records` 反向独立；`missing remote source is not reconstructed from file home`。关键词/来源/本机移除过滤先于分页，支持全选。无写入租约可浏览/预览；过期目录点击恢复重新验证，不能恢复新删范围。
-- [ ] **Step 2: 运行红灯。** `node --test tests/nas-catalogue.test.mjs tests/nas-library.test.mjs`，预期现有 assets-only 列表漏记录。
-- [ ] **Step 3: 实现目录与恢复。** 服务端建 catalogue/source 的事务投影和索引；精确 ID 使用 B-tree，标题/作者建立 SQLite FTS5 trigram 查询与短词 LIKE 回退，避免逐次解析全部 JSON。首次摘要分批≤100 获取到设备专属 SQLite，此后增量更新；索引同步异步且显示进度，不把数万条全部放入内存或 renderer。筛选先于分页，revision 切换原子更新，页 IPC 仍≤20；快照过期重取时保留旧页并提示，不混合库 ID。保留现有三个标签，加入本机已移除/无文件/内容类型筛选。记录恢复来源/收藏夹，已删除来源作为本地历史来源；文件恢复校验 NAS 摘要，不重建缺失记录。预览使用已有受限缓存与按需流读取，不要求全库恢复；只有记录显示没有原媒体。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，加 `npm run test:ui`、`npm run test:backup-preview`，验证本机隐藏不影响远端查询、恢复不清其他来源 mask。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: browse and restore NAS records independently of local visibility"`。
+- [x] **Step 1: 写失败测试。** `records-only backup remains browsable after local hide` 断言总览纳入、显示仅记录、能恢复来源关联且不下载视频。`file restore does not unhide records` 反向独立；`missing remote source is not reconstructed from file home`。关键词/来源/本机移除过滤先于分页，支持全选。无写入租约可浏览/预览；过期目录点击恢复重新验证，不能恢复新删范围。
+- [x] **Step 2: 运行红灯。** `node --test tests/nas-catalogue.test.mjs tests/nas-library.test.mjs`，预期现有 assets-only 列表漏记录。
+- [x] **Step 3: 实现目录与恢复。** 服务端建 catalogue/source 的事务投影和索引；精确 ID 使用 B-tree，标题/作者建立 SQLite FTS5 trigram 查询与短词 LIKE 回退，避免逐次解析全部 JSON。首次摘要分批≤100 获取到设备专属 SQLite，此后增量更新；索引同步异步且显示进度，不把数万条全部放入内存或 renderer。筛选先于分页，revision 切换原子更新，页 IPC 仍≤20；快照过期重取时保留旧页并提示，不混合库 ID。保留现有三个标签，加入本机已移除/无文件/内容类型筛选。记录恢复来源/收藏夹，已删除来源作为本地历史来源；文件恢复校验 NAS 摘要，不重建缺失记录。预览使用已有受限缓存与按需流读取，不要求全库恢复；只有记录显示没有原媒体。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，加 `npm run test:ui`、`npm run test:backup-preview`，验证本机隐藏不影响远端查询、恢复不清其他来源 mask。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: browse and restore NAS records independently of local visibility"`。
 
 ### Task 9: 有界日志、未解决状态保留及故障恢复
 

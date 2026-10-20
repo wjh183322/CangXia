@@ -1,3 +1,4 @@
+import {captureDesktop} from './capture-desktop.mjs';
 import assert from 'node:assert/strict';import path from 'node:path';import fs from 'node:fs';import {randomUUID} from 'node:crypto';
 export async function checkAudioDesktop({win,call,check,profile,ids}){
  const [first,second]=ids,sleep=()=>new Promise(r=>setTimeout(r,100));
@@ -24,12 +25,12 @@ export async function checkAudioDesktop({win,call,check,profile,ids}){
  await win.webContents.executeJavaScript(`document.querySelector('[aria-label="设置"]').click()`);await sleep();
  check('cache limits and protected data are exposed in desktop settings',await win.webContents.executeJavaScript(`document.querySelector('.cache-settings').innerText.includes('旧文件待核实')`));
  await win.webContents.executeJavaScript(`document.querySelector('.cache-settings').scrollIntoView({block:'center'})`);await sleep();
- fs.writeFileSync('.test-output/audio-cache-settings.png',(await win.webContents.capturePage()).toPNG());
+ await captureDesktop(win,'.test-output/audio-cache-settings.png');
  await win.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭弹窗"]').click()`);
  const page=await call('audioPage',1,'complete');check('private audio queue pages expose completed jobs without full-library payloads',page.total===2&&page.jobs.length===2&&page.pages===1);
  await win.webContents.executeJavaScript(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim().startsWith('下载管理')).click()`);await sleep();
  await win.webContents.executeJavaScript(`[...document.querySelectorAll('.download-mode-tabs button')].find(b=>b.textContent==='图文配乐').click()`);await sleep();
  check('desktop audio queue exposes state filters and bounded pagination',await win.webContents.executeJavaScript(`!!document.querySelector('[aria-label="配乐任务状态"]')&&document.querySelector('.modal').innerText.includes('每页 50 条')`));
- fs.writeFileSync('.test-output/audio-queue-desktop.png',(await win.webContents.capturePage()).toPNG());
+ await captureDesktop(win,'.test-output/audio-queue-desktop.png');
  await win.webContents.executeJavaScript(`document.querySelector('[aria-label="关闭弹窗"]').click()`);
 }

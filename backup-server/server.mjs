@@ -1,3 +1,4 @@
+import {BackupCatalogue} from './catalogue.mjs';
 import {createBackupActions} from './backup-actions.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import http from 'node:http';import https from 'node:https';import {randomUUID,randomBytes,timingSafeEqual,createHash} from 'node:crypto';import {gzipSync,gunzipSync} from 'node:zlib';import {DatabaseSync} from 'node:sqlite';import {pipeline} from 'node:stream/promises';
 import {PROTOCOL,BACKUP_SCHEMA,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
@@ -29,6 +30,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const validLease=req=>{audioWriter(req);const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
  const status=()=>({protocol:PROTOCOL,capabilities:{...(scopedDeletion?{scopedDeletion:1}:{}),backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
  const scopes=new ScopeState(db,{now});
+ const catalogue=new BackupCatalogue({db,status});
  const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy,protectedObjects:()=>scopes.protectedHashes()});
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
@@ -39,6 +41,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    const supplied=Buffer.from(String(req.headers.authorization||'').replace(/^Bearer /,'')),expected=Buffer.from(token);if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))throw error(401,'访问密钥不正确');
    if(route==='/v1/status'&&req.method==='GET'){send(req,res,200,status());return;}
    if(String(req.headers['x-cangxia-protocol']||'')!==String(PROTOCOL))throw error(426,'请配套升级藏匣桌面端和 NAS 服务，旧写入协议不能操作删除版本库');
+   if(req.method==='GET'&&route.startsWith('/v1/catalogue')){const input=Object.fromEntries(url.searchParams);const result=route==='/v1/catalogue'?await catalogue.page(input):route==='/v1/catalogue/index'?await catalogue.index(input):route==='/v1/catalogue/works'?await catalogue.details((input.ids||'').split(','),input.revision):route==='/v1/catalogue/work'?await catalogue.detail(input.id,input.revision):route==='/v1/catalogue/overview'?await catalogue.overview(input.revision):null;if(!result)throw error(404,'目录接口不存在');send(req,res,200,result);return;}
    if(route==='/v1/lease'&&req.method==='POST'){
     audioWriter(req);
     const input=await json(req);if(!/^[a-f0-9-]{36}$/.test(input.deviceId)||typeof input.name!=='string'||!input.name.trim()||input.name.length>80)throw error(400,'设备信息无效');
@@ -101,8 +104,8 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     }
     if(kind==='objects'&&req.method==='GET'){
      if(gcBusy.has(sha))throw error(409,'备份文件正在清理');
-     const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(!known)throw error(404,'备份文件不存在');const range=req.headers.range;let start=0;if(range){const m=String(range).match(/^bytes=(\d+)-$/);if(!m||(start=Number(m[1]))>=known.size)throw error(416,'下载范围无效');}
-     activeReads.set(sha,(activeReads.get(sha)||0)+1);try{res.writeHead(range?206:200,{'content-type':'application/octet-stream','content-length':known.size-start,'accept-ranges':'bytes','etag':sha,...(range?{'content-range':`bytes ${start}-${known.size-1}/${known.size}`}:{})});await pipeline(fs.createReadStream(file,{start}),res);}finally{const n=activeReads.get(sha)-1;if(n)activeReads.set(sha,n);else activeReads.delete(sha);}return;
+     const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(!known)throw error(404,'备份文件不存在');const range=req.headers.range;let start=0,end=known.size-1;if(range){const m=String(range).match(/^bytes=(\d+)-(\d*)$/);if(!m||(start=Number(m[1]))>=known.size||!Number.isSafeInteger(start)||m[2]&&(!Number.isSafeInteger(Number(m[2]))||Number(m[2])<start))throw error(416,'下载范围无效');if(m[2])end=Math.min(Number(m[2]),end);}
+     activeReads.set(sha,(activeReads.get(sha)||0)+1);try{res.writeHead(range?206:200,{'content-type':'application/octet-stream','content-length':end-start+1,'accept-ranges':'bytes','etag':sha,...(range?{'content-range':`bytes ${start}-${end}/${known.size}`}:{})});await pipeline(fs.createReadStream(file,{start,end}),res);}finally{const n=activeReads.get(sha)-1;if(n)activeReads.set(sha,n);else activeReads.delete(sha);}return;
     }
    }
    throw error(404,'接口不存在');
