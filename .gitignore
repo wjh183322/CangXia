@@ -2,6 +2,7 @@ node_modules/
 dist/
 release/
 .test-output/
+.worktrees/
 *.log
 *.sqlite
 *.sqlite.bak
