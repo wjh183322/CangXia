@@ -27,7 +27,7 @@ export class LocalRemoval {
     const record=this.store.download(id);
     this.progress.current=this.store.work(id)?.name||id;this.progress.phase='deleting';this.progress.message='正在移入系统回收站';this.persist();
     try{
-     this.store.audio?.assertRemovable(id);if(record){this.store.assertDirectory(record.path);await fs.promises.stat(path.parse(path.resolve(this.store.root)).root);let stat;try{stat=await fs.promises.lstat(record.path);}catch(e){if(e.code!=='ENOENT')throw e;}if(stat){if(!stat.isDirectory()||stat.isSymbolicLink())throw Error('作品路径不是普通文件夹');await this.trash(record.path);}this.store.forgetDownloads([id],{localOnly:true,pruneHistory:false});}
+     this.store.audio?.assertRemovable(id);if(record){this.store.assertDirectory(record.path);await fs.promises.stat(path.parse(path.resolve(this.store.root)).root);let stat;try{stat=await fs.promises.lstat(record.path);}catch(e){if(e.code!=='ENOENT')throw e;}if(stat){if(!stat.isDirectory()||stat.isSymbolicLink())throw Error('作品路径不是普通文件夹');await this.trash(record.path);if(await fs.promises.lstat(record.path).catch(e=>{if(e.code==='ENOENT')return null;throw e;}))throw Error('作品文件夹仍存在，未声明删除成功');}this.store.forgetDownloads([id],{localOnly:true,pruneHistory:false});}
      await this.store.audio?.removeLocal(id,{trash:this.trash});
      this.progress.deleted++;
     }catch(error){this.progress.failed++;this.progress.lastError=error.message;}

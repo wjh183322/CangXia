@@ -33,3 +33,4 @@ test('trash failure retains its record and reports partial completion',async t=>
  const {store}=await fixture(t);const task=new LocalRemoval({store,trash:async dir=>{if(dir===store.download('1').path)throw Error('access denied');await fs.promises.rename(dir,dir+'.recycled');}});
  task.start(['1','2']);await task.wait();assert.equal(task.state().phase,'partial');assert.equal(task.state().failed,1);assert.ok(store.download('1'));assert.equal(store.download('2'),null);
 });
+test('a resolved trash call cannot claim success while the folder still exists',async t=>{const {store}=await fixture(t),task=new LocalRemoval({store,trash:async()=>{}});task.start(['1']);await task.wait();assert.equal(task.state().deleted,0);assert.equal(task.state().failed,1);assert.ok(store.download('1'));});

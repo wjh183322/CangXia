@@ -1,12 +1,13 @@
 import {clearCollectionCheckpoints} from './collection-checkpoint-reset.mjs';
 import {contentHash,SHARED_SETTINGS,validateEntry,authorPublic} from '../shared/backup-protocol.mjs';
 export const recordId=e=>e.table+':'+e.key;
+export const sharedBackupWork=work=>({...work,readHidden:false});
 export function exportRecords(store){
- const entries=[],remote=store.all('backup_downloads'),local=store.all('downloads');const saved=new Set([...remote,...local].map(d=>d.id)),authorWorks=new Set(store.rows('SELECT work_id FROM author_members').map(r=>r.work_id));const works=store.all('works').filter(w=>!w.readHidden||saved.has(w.id)||authorWorks.has(w.id)),ids=new Set(works.map(w=>w.id));
- for(const w of works)entries.push({table:'works',key:w.id,body:w});
+ const entries=[],remote=store.all('backup_downloads'),works=store.all('works'),ids=new Set(works.map(w=>w.id));
+ for(const w of works)entries.push({table:'works',key:w.id,body:sharedBackupWork(w)});
  for(const c of store.all('collections'))entries.push({table:'collections',key:c.id,body:c});
  for(const a of store.all('authors'))entries.push({table:'authors',key:a.id,body:authorPublic(a)});
- for(const r of store.rows('SELECT author_id,work_id,position,hidden FROM author_members'))if(ids.has(r.work_id))entries.push({table:'author_members',key:r.author_id+':'+r.work_id,body:{authorId:r.author_id,workId:r.work_id,position:r.position,hidden:!!r.hidden}});
+ for(const r of store.rows('SELECT author_id,work_id,position,hidden FROM author_members'))if(ids.has(r.work_id))entries.push({table:'author_members',key:r.author_id+':'+r.work_id,body:{authorId:r.author_id,workId:r.work_id,position:r.position,hidden:false}});
  for(const r of store.rows('SELECT collection_id,work_id,rank FROM members'))if(ids.has(r.work_id))entries.push({table:'members',key:r.collection_id+':'+r.work_id,body:{collectionId:r.collection_id,workId:r.work_id,rank:r.rank}});
  for(const t of store.all('local_tags'))if(ids.has(t.id))entries.push({table:'local_tags',key:t.id,body:t});
  for(const key of SHARED_SETTINGS){const value=store.getSetting(key);if(value!==null)entries.push({table:'settings',key,body:{value}});}
@@ -23,6 +24,6 @@ export function applyChanges(store,changes,{replace=false,reset=true}={}){
   else{const target=table==='downloads'?'backup_downloads':table;if(body)store.put(target,key,{...body,id:key});else if(table==='works'&&store.download(key)){const w=store.work(key);if(w)store.put('works',key,{...w,readHidden:true});}else store.db.run(`DELETE FROM ${target} WHERE id=?`,[key]);}
  }if(replace)store.db.run('INSERT OR IGNORE INTO works SELECT id,body FROM preserved_local_works;DELETE FROM preserved_local_works;');store.deviceScopes?.applyHeld(store);store.db.run('COMMIT');}catch(e){store.db.run('ROLLBACK');throw e;}store.invalidateViews();store.save();
 }
-export async function applyChangesAsync(store,changes,{replace=false,onProgress=()=>{}}={}){
- store.db.run('BEGIN');try{for(let start=0;start<Math.max(1,changes.length);start+=200){applyChanges(store,changes.slice(start,start+200),{replace:replace&&start===0,reset:start===0});onProgress(Math.min(start+200,changes.length),changes.length);await new Promise(resolve=>setImmediate(resolve));}store.db.run('COMMIT');}catch(error){store.db.run('ROLLBACK');store.invalidateViews();throw error;}
+export async function applyChangesAsync(store,changes,{replace=false,reset=true,onProgress=()=>{}}={}){
+ store.db.run('BEGIN');try{for(let start=0;start<Math.max(1,changes.length);start+=200){applyChanges(store,changes.slice(start,start+200),{replace:replace&&start===0,reset:reset&&start===0});onProgress(Math.min(start+200,changes.length),changes.length);await new Promise(resolve=>setImmediate(resolve));}store.db.run('COMMIT');}catch(error){store.db.run('ROLLBACK');store.invalidateViews();throw error;}
 }

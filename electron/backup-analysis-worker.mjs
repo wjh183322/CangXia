@@ -1,6 +1,6 @@
 import {parentPort} from 'node:worker_threads';
 import {DatabaseSync} from 'node:sqlite';
-import {exportRecords,recordId} from './backup-model.mjs';
+import {exportRecords,recordId,sharedBackupWork} from './backup-model.mjs';
 import {contentHash,authorPublic,SHARED_SETTINGS} from '../shared/backup-protocol.mjs';
 import {validPreview} from './backup-previews.mjs';
 import {sendAnalysisResult} from './backup-analysis-transfer.mjs';
@@ -10,16 +10,16 @@ import {DeviceScopeReader} from './device-scope-state.mjs';
 
 let db,file,scopeReader,version=-1,records=new Map(),digests={},covers=new Set(),localWorks=new Set(),related=new Map(),analyzedRecords=0;
 function ensureSource(source){if(file===source)return;scopeReader?.close();db?.close();file=source;db=new DatabaseSync(file,{readOnly:true,timeout:5000});const identity=db.prepare("SELECT 1 FROM sqlite_master WHERE name='local_identity'").get()?db.prepare('SELECT value FROM local_identity WHERE id=1').get()?.value:'legacy';scopeReader=new DeviceScopeReader(path.dirname(source),identity);version=-1;}
-function get(table,key){const row=db.prepare('SELECT body FROM '+table+' WHERE id=?').get(key);return row?JSON.parse(row.body):null;}
-function eligible(work){return work&&(!work.readHidden||db.prepare('SELECT 1 FROM downloads WHERE id=? UNION SELECT 1 FROM backup_downloads WHERE id=? UNION SELECT 1 FROM author_members WHERE work_id=? LIMIT 1').get(work.id,work.id,work.id));}
+function get(table,key){const row=db.prepare('SELECT body FROM '+table+' WHERE id=?').get(key);return row?(table==='works'?sharedBackupWork(JSON.parse(row.body)):JSON.parse(row.body)):null;}
+function eligible(work){return !!work;}
 function remember(entry,workId){const id=recordId(entry);if(entry.body===null||scopeReader&&!scopeReader.exportable(entry)){records.delete(id);delete digests[id];return;}records.set(id,{table:entry.table,key:entry.key,workId});digests[id]=contentHash(entry.body);analyzedRecords++;if(workId){if(!related.has(workId))related.set(workId,new Set());related.get(workId).add(id);}}
-function readRaw(meta){const {table,key}=meta;if(table==='settings'){if(!SHARED_SETTINGS.has(key))return null;const row=db.prepare('SELECT value FROM settings WHERE key=?').get(key);return row?{table,key,body:{value:JSON.parse(row.value)}}:null;}if(table==='members'){const index=key.indexOf(':'),r=db.prepare('SELECT collection_id,work_id,rank FROM members WHERE collection_id=? AND work_id=?').get(key.slice(0,index),key.slice(index+1));return r?{table,key,body:{collectionId:r.collection_id,workId:r.work_id,rank:r.rank}}:null;}if(table==='author_members'){const index=key.lastIndexOf(':'),r=db.prepare('SELECT author_id,work_id,position,hidden FROM author_members WHERE author_id=? AND work_id=?').get(key.slice(0,index),key.slice(index+1));return r?{table,key,body:{authorId:r.author_id,workId:r.work_id,position:r.position,hidden:!!r.hidden}}:null;}let body=get(table==='downloads'?'backup_downloads':table,key);if(table==='authors'&&body)body=authorPublic(body);return body?{table,key,body}:null;}
+function readRaw(meta){const {table,key}=meta;if(table==='settings'){if(!SHARED_SETTINGS.has(key))return null;const row=db.prepare('SELECT value FROM settings WHERE key=?').get(key);return row?{table,key,body:{value:JSON.parse(row.value)}}:null;}if(table==='members'){const index=key.indexOf(':'),r=db.prepare('SELECT collection_id,work_id,rank FROM members WHERE collection_id=? AND work_id=?').get(key.slice(0,index),key.slice(index+1));return r?{table,key,body:{collectionId:r.collection_id,workId:r.work_id,rank:r.rank}}:null;}if(table==='author_members'){const index=key.lastIndexOf(':'),r=db.prepare('SELECT author_id,work_id,position,hidden FROM author_members WHERE author_id=? AND work_id=?').get(key.slice(0,index),key.slice(index+1));return r?{table,key,body:{authorId:r.author_id,workId:r.work_id,position:r.position,hidden:false}}:null;}let body=get(table==='downloads'?'backup_downloads':table,key);if(table==='authors'&&body)body=authorPublic(body);return body?{table,key,body}:null;}
 function read(meta){const entry=readRaw(meta);return entry&&scopeReader.exportable(entry)?entry:null;}
 function updateWork(id){
  for(const key of related.get(id)||[]){records.delete(key);delete digests[key];}related.delete(id);covers.delete(id);
  const body=get('works',id);if(!eligible(body))return;remember({table:'works',key:id,body},id);
  for(const r of db.prepare('SELECT collection_id,rank FROM members WHERE work_id=?').all(id))remember({table:'members',key:r.collection_id+':'+id,body:{collectionId:r.collection_id,workId:id,rank:r.rank}},id);
- for(const r of db.prepare('SELECT author_id,position,hidden FROM author_members WHERE work_id=?').all(id))remember({table:'author_members',key:r.author_id+':'+id,body:{authorId:r.author_id,workId:id,position:r.position,hidden:!!r.hidden}},id);
+ for(const r of db.prepare('SELECT author_id,position,hidden FROM author_members WHERE work_id=?').all(id))remember({table:'author_members',key:r.author_id+':'+id,body:{authorId:r.author_id,workId:id,position:r.position,hidden:false}},id);
  for(const table of ['local_tags','downloads']){const entry=read({table,key:id});if(entry)remember(entry,id);}
  const d=get('backup_downloads',id),backed=d&&(d.assets?.some(validPreview)||d.backupDeleted||d.backupRemoved);if(!body.readHidden&&body.thumbnail&&!validPreview(body.backupCover)&&!backed)covers.add(id);
 }

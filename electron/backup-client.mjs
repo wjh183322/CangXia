@@ -5,6 +5,7 @@ import {BackupTransport,normalizeEndpoint,normalizeFingerprint} from './backup-t
 import {BackupCovers} from './backup-covers.mjs';
 import {MediaCache} from './media-cache.mjs';
 import {BackupAnalysis} from './backup-analysis.mjs';
+import {normalizeScope,scopeKey} from '../shared/backup-scopes.mjs';
 
 const localKeys=new Set(['authNeedsRefresh','loggedOut','root','sessionConnected','accessHoldUntil','downloadJobs','downloadConcurrency','localRemoval','nasRemovalJob','mediaCacheLimits']);
 export class BackupClient{
@@ -24,6 +25,19 @@ export class BackupClient{
  emit(){this.onChange();}
  publicConfig(){return {url:this.config?.url||'',fingerprint:this.config?.fingerprint||'',deviceName:this.status.deviceName,intervalMinutes:this.config?.intervalMinutes||5,hasToken:!!this.config?.sealedToken};}
  assertWritable(){if(this.applying||this.localReadDepth)return;if(!this.status.writable)throw new Error(this.status.message||'请先连接 NAS 并完成同步检查');}
+ assertScopeWritable(){if(!this.status.connected||!this.status.writable||!this.status.scopedDeletion)throw Error('请连接支持范围删除的 NAS 并取得写入权');}
+ async scopeStatePage(after=0){const page=await this.transport.json('GET','/v1/scopes/state?after='+after+'&limit=100');if(page.libraryId!==this.meta.libraryId)throw Error('这是另一份 NAS 备份库，未应用删除状态');return page;}
+ async refreshScopeVersions(){if(this.deletions)return this.deletions.refresh();let after=0;for(;;){const page=await this.scopeStatePage(after);for(const item of page.items)this.store.deviceScopes.remember(item);if(!page.hasMore)return page;after=page.next;await new Promise(r=>setImmediate(r));}}
+ async scopeProofs(inputs){const scopes=inputs.map(normalizeScope);if(!scopes.length)return [];await this.refreshScopeVersions();return scopes.map(scope=>({scope,generation:this.store.deviceScopes.versions.get(scopeKey(scope))?.generation||0}));}
+ async scopeReceipt(operationId){const receipt=await this.transport.json('GET','/v1/scopes/receipt?operationId='+encodeURIComponent(operationId));if(receipt.libraryId&&receipt.libraryId!==this.meta.libraryId)throw Error('NAS 回执来自其他资料库');return receipt;}
+ async deleteScopes(command,{signal}={}){this.assertScopeWritable();const head=await this.renew();if(head.revision!==this.meta.baseRevision||this.meta.pendingCommit)throw Error('NAS 比对状态已变化，请先重新检查同步，再确认删除');return this.transport.json('POST','/v1/scopes/delete',{data:command,signal});}
+ async acceptScopeReceipt(receipt){if(receipt.libraryId&&receipt.libraryId!==this.meta.libraryId)throw Error('范围回执所属资料库不同');const update=await this.fetchChanges(this.meta.baseRevision||0);if(update.libraryId!==this.meta.libraryId)throw Error('NAS 资料库已经变化');const selected=new Set(receipt.items.map(i=>i.scope.workId)),changes=[];
+  for(const entry of update.changes){validateEntry(entry);const workId=entry.table==='members'?entry.key.split(':')[1]:entry.table==='author_members'?entry.key.slice(entry.key.lastIndexOf(':')+1):entry.key;if(!selected.has(workId)||!['works','downloads','members','author_members'].includes(entry.table))throw Error('NAS 还有其他资料变更，请先核对同步，剩余本机步骤未执行');if(entry.table==='works'&&entry.body){const current=this.store.work(entry.key);if(current){const body={...current};if(entry.body.backupCover)body.backupCover=entry.body.backupCover;else delete body.backupCover;changes.push({...entry,body});continue;}}changes.push(entry);}
+  this.applying=true;try{await applyChangesAsync(this.store,changes,{replace:false,reset:false});for(const entry of update.changes)this.baselineSet(recordId(entry),entry.body===null?undefined:contentHash(entry.body));this.meta.baseRevision=update.revision;this.status.lastSync=update.lastSync||this.status.lastSync;this.persist();}finally{this.applying=false;}this.emit();
+ }
+ async prepareScopeRestore(command){this.assertScopeWritable();await this.renew();return this.transport.json('POST','/v1/scopes/restore/prepare',{data:command});}
+ async commitScopeRestore(grantId,records,{signal}={}){this.assertScopeWritable();await this.renew();return this.transport.json('POST','/v1/scopes/restore/commit',{data:{grantId,records},signal});}
+ async quiesceDeletion(input){if(this.localReadDepth)throw Error('已有读取或文件操作正在进行');this.localReadDepth++;try{this.cancel();if(this.syncing)await this.syncing.catch(()=>{});if(this.checking)await this.checking.catch(()=>{});if(this.beforeScopedDeletion)await this.beforeScopedDeletion(input);else if(this.store.localReconcile.controller||this.store.audio?.running||this.store.audio?.pending?.size)throw Error('后台文件任务尚未停止');return()=>{this.localReadDepth--;this.deferSync();};}catch(error){this.localReadDepth--;throw error;}}
  unavailable(message,phase='offline'){this.reconnectAt=Date.now()+15000;this.status={...this.status,connected:false,writable:false,phase,message,pending:!!this.meta.dirty||!!this.status.pendingCovers};this.onDiagnostic({event:'nas-unavailable',reason:message,path:phase});this.onUnavailable();this.emit();}
  canSync(){return !this.localReadDepth&&this.isIdle();}
  deferSync(){
