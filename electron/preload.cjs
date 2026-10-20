@@ -13,6 +13,7 @@ methods.push('audioPage','audioStatus','audioPrepare','audioRelease','audioRenew
 methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');
 methods.push('exportWorkDiagnostic');
 methods.push('defectOverview');
+methods.push('validateDefectSelection','validateDownloadSelection');
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);

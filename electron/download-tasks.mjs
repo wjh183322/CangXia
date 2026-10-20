@@ -33,6 +33,7 @@ export class DownloadTasks{
  }
  list(){return this.jobs.map(j=>durable(j));}
  counts(){return Object.fromEntries([...this.buckets].map(([state,ids])=>[state,ids.size]));}
+ validateSelection({tab,ids}){if(!['active','failed','unavailable','complete'].includes(tab)||!Array.isArray(ids)||ids.length>100000||ids.some(id=>typeof id!=='string'||!/^\d+$/.test(id)))throw Error('下载选择无效');const selected=[...new Set(ids)],valid=selected.filter(id=>{const state=this.byId.get(id)?.state;return tab==='active'?['waiting','running'].includes(state):state===(tab==='complete'?'complete':tab);});return {ids:valid,invalid:selected.length-valid.length};}
  page({tab='active',page=1,pageSize=50}={}){
   if(!['active','failed','complete','unavailable'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
   const order=ids=>[...ids].sort((a,b)=>this.ranks.get(a)-this.ranks.get(b));

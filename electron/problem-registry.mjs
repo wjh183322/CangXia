@@ -65,4 +65,5 @@ export class ProblemRegistry{
   for(const row of rows)if(!omit.has(row.id))ids.push(row.id);return ids;
  }
  rows(){return this.db.prepare('SELECT body FROM problems WHERE problem=1 ORDER BY rank,id').all().map(r=>publicRow(JSON.parse(r.body)));}
+ validateSelection(input){if(!Array.isArray(input.ids)||input.ids.length>100000||input.ids.some(id=>!safeId(id)))throw Error('作品选择无效');const selected=[...new Set(input.ids)],f=filter(options(input)),query=this.db.prepare("SELECT id,repairable FROM problems WHERE id=? AND file_status<>'processing' AND "+f.sql),ids=[],repairableIds=[];for(const id of selected){const row=query.get(id,...f.args);if(row){ids.push(id);if(row.repairable)repairableIds.push(id);}}return {ids,repairableIds,invalid:selected.length-ids.length};}
 }

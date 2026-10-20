@@ -19,3 +19,7 @@ test('cancelled row cannot return from the retained legacy JSON after restart',a
  const reopened=await Store.open(file,path.join(dir,'media'));try{const next=new DownloadQueue(reopened,{},null,()=>{});assert.deepEqual(next.jobs.map(j=>j.id),['8']);assert.equal(next.taskRows.page({tab:'complete',page:1,pageSize:50}).total,1);}finally{reopened.close();}store.close=()=>{};
 });
 test('whole-history clear preserves pending tasks and file records',async t=>{const {store}=await fixture(t);store.setSetting('downloadJobs',[{id:'1',state:'complete'},{id:'2',state:'failed'},{id:'3',state:'waiting'}]);store.put('downloads','1',{id:'1',path:store.root,assets:[],state:'complete'});const queue=new DownloadQueue(store,{},null,()=>{});queue.clearCompleted(null);assert.deepEqual(queue.jobs.map(j=>j.id),['2','3']);assert.ok(store.download('1'));});
+test('returning to a queue retains only selected IDs still in that tab',async t=>{
+ const {store}=await fixture(t);store.setSetting('downloadJobs',[{id:'1',state:'waiting'},{id:'2',state:'running'},{id:'3',state:'failed'}]);
+ assert.deepEqual(store.downloadTasks.validateSelection({tab:'active',ids:['1','2','3']}),{ids:['1','2'],invalid:1});store.downloadTasks.byId.get('1').state='complete';assert.deepEqual(store.downloadTasks.validateSelection({tab:'active',ids:['1','2']}),{ids:['2'],invalid:1});assert.throws(()=>store.downloadTasks.validateSelection({tab:'bogus',ids:['1']}));
+});

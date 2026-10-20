@@ -37,3 +37,7 @@ test('one problem page deserializes only its twenty rows and selection reads IDs
 test('unchanged facts with a newer check time do not invalidate a selection',async t=>{
  const {registry:r}=await fixture(t),file={status:'pending',issues:[{kind:'files'}]};r.patchMany([{id:'1',file,checkedAt:at}]);const page=r.page({});r.patchMany([{id:'1',file,checkedAt:'2026-10-20T12:00:01.000Z'}]);assert.deepEqual(r.resolveSelection({token:page.token,all:true,exclude:[]}),['1']);
 });
+test('returning from details validates explicit selections against current problems and filters',async t=>{
+ const {registry:r}=await fixture(t);r.patchMany([{id:'1',file:{status:'pending',issues:[{kind:'files'}]},source:{state:'available'},checkedAt:at},{id:'2',source:{state:'unavailable'},checkedAt:at}]);
+ assert.deepEqual(r.validateSelection({ids:['1','2'],sourceStatus:'available'}),{ids:['1'],repairableIds:['1'],invalid:1});r.patchMany([{id:'1',file:{status:'complete',issues:[]},checkedAt:at}]);assert.deepEqual(r.validateSelection({ids:['1'],sourceStatus:'available'}),{ids:[],repairableIds:[],invalid:1});
+});
