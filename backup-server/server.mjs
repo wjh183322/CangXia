@@ -28,8 +28,8 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const audioWriter=req=>{if(get('audioEnabled')&&req.headers['x-cangxia-audio-aware']!=='1')throw error(423,'此库已保存共享配乐；旧客户端只读，请升级藏匣至 0.3.28 或更新版本');};
  const validLease=req=>{audioWriter(req);const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
  const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
- const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy});
  const scopes=new ScopeState(db,{now});
+ const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy,protectedObjects:()=>scopes.protectedHashes()});
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
  const handler=async(req,res)=>{
@@ -50,13 +50,13 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    if(route==='/v1/scopes/state'&&req.method==='GET'){send(req,res,200,scopes.statePage({after:Number(url.searchParams.get('after')||0),limit:Number(url.searchParams.get('limit')||100)}));return;}
    if(route==='/v1/scopes/receipt'&&req.method==='GET'){send(req,res,200,scopes.receipt(url.searchParams.get('operationId'),{id:String(req.headers['x-device-id']||'')}));return;}
    if(['/v1/scopes/delete','/v1/scopes/restore/prepare','/v1/scopes/restore/commit'].includes(route)&&req.method==='POST'){
-    const id=validLease(req),device={id,name:db.prepare('SELECT name FROM devices WHERE id=?').get(id).name},input=await json(req);let result;
+    const input=await json(req),id=validLease(req),device={id,name:db.prepare('SELECT name FROM devices WHERE id=?').get(id).name};let result;
     if(route==='/v1/scopes/delete'){result=scopes.delete(input,device);await actions.collect();}
     else if(route.endsWith('/prepare'))result=scopes.prepareRestore(input,device);
-    else result=scopes.finishRestore(input.grantId,input.records,device);
+    else {for(const entry of input.records||[]){const b=entry.body,assets=entry.table==='downloads'&&b?[...(b.assets||[]),...(b.audio?[b.audio.object]:[])]:entry.table==='works'&&b?.backupCover?[b.backupCover]:[];if(assets.some(a=>gcBusy.has(a.sha256)))throw error(409,'媒体对象正在清理，请稍后重新准备恢复');}result=scopes.finishRestore(input.grantId,input.records,device);}
     send(req,res,200,result);return;
    }
-   if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){const input=await json(req),device=validLease(req);const result=await actions.execute(route.endsWith('delete')?'delete':'enable',input,device,lease.name);send(req,res,200,result);return;}
+   if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){validLease(req);throw error(409,'此操作已升级为范围删除与恢复，请使用新版入口重新确认');}
    const actionReceipt=route.match(/^\/v1\/backup-actions\/([a-f0-9-]{36})$/);if(actionReceipt&&req.method==='GET'){const row=db.prepare('SELECT device,result FROM backup_actions WHERE request=?').get(actionReceipt[1]);if(!row||row.device!==req.headers['x-device-id'])throw error(404,'未找到 NAS 操作回执');send(req,res,200,JSON.parse(row.result));return;}
    if(route==='/v1/preview-index'&&req.method==='GET'){
     const revision=Number(url.searchParams.get('revision')),after=url.searchParams.get('after')||'';if(revision!==get('revision')||after&&!/^\d+$/.test(after))throw error(409,'封面核实期间资料库变化，请重新检查');
@@ -77,6 +77,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     if(!Array.isArray(input.changes)||input.changes.length>100000)throw error(400,'变更数量无效');const seen=new Set();
     for(const entry of input.changes){try{validateEntry(entry);}catch(e){throw error(400,e.message);}const key=entry.table+':'+entry.key;if(seen.has(key))throw error(400,'变更重复');seen.add(key);if(entry.table==='downloads'&&entry.body?.backupDeleted===true)throw error(409,'旧客户端停止备份标记已停用，请升级客户端并重新检查');const assets=entry.table==='downloads'&&entry.body?[...entry.body.assets,...(entry.body.audio?[entry.body.audio.object]:[])]:entry.table==='works'&&entry.body?.backupCover?[entry.body.backupCover]:[];for(const a of assets){if(gcBusy.has(a.sha256))throw error(409,'媒体正在清理，请稍后重试');const object=db.prepare('SELECT size FROM objects WHERE sha=?').get(a.sha256);if(!object||object.size!==a.size)throw error(409,'媒体尚未上传并校验完成');}}
     const proposed=new Map(input.changes.map(e=>[e.table+':'+e.key,e.body]));const present=(table,id)=>proposed.has(table+':'+id)?proposed.get(table+':'+id)!==null:!!db.prepare('SELECT 1 FROM records WHERE kind=? AND id=? AND body IS NOT NULL').get(table,id);
+    scopes.assertWrite({deviceId:device,proofs:input.scopeProofs,changes:input.changes});
     for(const e of input.changes)if(e.body&&e.table==='author_members'&&(!present('authors',e.body.authorId)||!present('works',e.body.workId)))throw error(409,'作者或作品资料尚未提交');
     for(const e of input.changes)if(e.body&&e.table==='downloads'&&e.body.home?.kind==='author'&&(!present('authors',e.body.home.id)||!present('works',e.key)))throw error(409,'作者文件归属尚未提交');
     if(!input.changes.length){send(req,res,200,status());return;}
@@ -87,14 +88,14 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    }
    const match=route.match(/^\/v1\/(uploads|objects)\/([a-f0-9]{64})$/);
    if(match){const [,kind,sha]=match,file=objectPath(sha),partial=path.join(dataDir,'uploads',sha+'.part');
-    if(kind==='uploads'&&req.method==='GET'){validLease(req);const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);let offset=0;try{offset=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}send(req,res,200,{complete:!!known,size:known?.size||0,offset:known?known.size:offset});return;}
+    if(kind==='uploads'&&req.method==='GET'){const device=validLease(req);scopes.bindUpload(sha,device,req.headers['x-cangxia-upload-context']);const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);let offset=0;try{offset=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}send(req,res,200,{complete:!!known,size:known?.size||0,offset:known?known.size:offset});return;}
     if(kind==='uploads'&&req.method==='PUT'){
-     validLease(req);if(busyUploads.has(sha)||gcBusy.has(sha))throw error(409,'此文件正在处理');db.prepare('DELETE FROM garbage WHERE sha=?').run(sha);busyUploads.add(sha);
+     const uploadDevice=validLease(req);scopes.bindUpload(sha,uploadDevice,req.headers['x-cangxia-upload-context']);if(busyUploads.has(sha)||gcBusy.has(sha))throw error(409,'此文件正在处理');busyUploads.add(sha);
      try{const total=Number(req.headers['upload-length']),offset=Number(req.headers['upload-offset']);if(!Number.isSafeInteger(total)||total<=0||total>100*1024**3||!Number.isSafeInteger(offset)||offset<0)throw error(400,'上传长度无效');
       const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha);if(known){if(known.size!==total)throw error(409,'文件长度冲突');send(req,res,200,{complete:true,offset:total,size:total});return;}
       let actual=0;try{actual=(await fsp.stat(partial)).size;}catch(e){if(e.code!=='ENOENT')throw e;}if(offset!==actual)throw error(409,'上传位置已变化，请重新检查进度');
-      const chunk=await body(req,MAX_CHUNK);validLease(req);if((!chunk.length&&offset!==total)||offset+chunk.length>total)throw error(400,'上传分块无效');if(chunk.length)await fsp.appendFile(partial,chunk,{flush:true});const next=offset+chunk.length;
-      if(next===total){if(await hashFile(partial)!==sha){await fsp.unlink(partial);throw error(422,'文件内容校验失败，原有备份未改变');}await fsp.rename(partial,file);db.prepare('INSERT OR REPLACE INTO objects VALUES(?,?)').run(sha,total);}
+      const chunk=await body(req,MAX_CHUNK);validLease(req);scopes.bindUpload(sha,uploadDevice,req.headers['x-cangxia-upload-context']);if((!chunk.length&&offset!==total)||offset+chunk.length>total)throw error(400,'上传分块无效');if(chunk.length)await fsp.appendFile(partial,chunk,{flush:true});const next=offset+chunk.length;
+      if(next===total){if(await hashFile(partial)!==sha){await fsp.unlink(partial);throw error(422,'文件内容校验失败，原有备份未改变');}validLease(req);scopes.bindUpload(sha,uploadDevice,req.headers['x-cangxia-upload-context']);await fsp.rename(partial,file);try{validLease(req);scopes.bindUpload(sha,uploadDevice,req.headers['x-cangxia-upload-context']);db.prepare('INSERT OR REPLACE INTO objects VALUES(?,?)').run(sha,total);}catch(e){db.prepare('INSERT OR IGNORE INTO garbage VALUES(?)').run(sha);throw e;}}
       send(req,res,200,{complete:next===total,offset:next,size:total});return;
      }finally{busyUploads.delete(sha);}
     }

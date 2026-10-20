@@ -3,7 +3,7 @@ import path from 'node:path';
 import {contentHash,validateEntry} from '../shared/backup-protocol.mjs';
 const fail=(status,message)=>Object.assign(Error(message),{status});
 
-export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,activeReads,gcBusy}){
+export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,activeReads,gcBusy,protectedObjects=()=>new Set()}){
  db.exec('CREATE TABLE IF NOT EXISTS backup_actions(request TEXT PRIMARY KEY,device TEXT,hash TEXT,result TEXT); CREATE TABLE IF NOT EXISTS garbage(sha TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS deleted_hashes(sha TEXT,work TEXT,PRIMARY KEY(sha,work));');
  const directory=path.resolve(dataDir,'objects');let collecting=null;
  // Upgrade old exclusions once. Keep the empty manifest so preview-only sync cannot
@@ -12,7 +12,7 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
   db.exec('BEGIN IMMEDIATE');try{
    const rows=db.prepare("SELECT id,body FROM records WHERE kind='downloads' AND body IS NOT NULL").all().filter(r=>JSON.parse(r.body).backupDeleted);
    if(rows.length){const revision=status().revision+1;for(const row of rows){const old=JSON.parse(row.body);delete old.deletedHashes;old.backupDeleted=false;old.backupRemoved=true;db.prepare("UPDATE records SET body=?,revision=? WHERE kind='downloads' AND id=?").run(JSON.stringify(old),revision,row.id);}setMeta('revision',revision);db.prepare('INSERT INTO commits(revision,device,name,time,count) VALUES(?,?,?,?,?)').run(revision,'service','自动备份策略更新',new Date(now()).toISOString(),rows.length);}
-   db.exec('DELETE FROM deleted_hashes');setMeta('automaticRebackupPolicy',1);db.exec('COMMIT');
+   setMeta('automaticRebackupPolicy',1);db.exec('COMMIT');
   }catch(e){db.exec('ROLLBACK');throw e;}
  }
  function referenced(){const set=new Set();for(const row of db.prepare("SELECT kind,body FROM records WHERE kind IN ('works','downloads') AND body IS NOT NULL").all()){const body=JSON.parse(row.body);for(const asset of row.kind==='works'?[body.backupCover]:[...(body.assets||[]),body.audio?.object])if(asset?.sha256)set.add(asset.sha256);}return set;}
@@ -24,7 +24,7 @@ export function createBackupActions({db,dataDir,now,status,setMeta,busyUploads,a
     if(!/^[a-f0-9]{64}$/.test(sha))continue;
     if(status().revision!==revision){refs=referenced();revision=status().revision;}
     if(refs.has(sha)){db.prepare('DELETE FROM garbage WHERE sha=?').run(sha);continue;}
-    if(busyUploads.has(sha)||activeReads.has(sha)){pending++;continue;}
+    if(busyUploads.has(sha)||activeReads.has(sha)||protectedObjects().has(sha)){pending++;continue;}
     gcBusy.add(sha);try{
      const known=db.prepare('SELECT size FROM objects WHERE sha=?').get(sha),file=path.resolve(directory,sha);if(path.dirname(file)!==directory)throw Error('Invalid object path');
      try{await fs.unlink(file);}catch(e){if(e.code!=='ENOENT')throw e;}
