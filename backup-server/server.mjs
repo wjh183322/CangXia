@@ -2,6 +2,7 @@ import {createBackupActions} from './backup-actions.mjs';
 import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';import http from 'node:http';import https from 'node:https';import {randomUUID,randomBytes,timingSafeEqual,createHash} from 'node:crypto';import {gzipSync,gunzipSync} from 'node:zlib';import {DatabaseSync} from 'node:sqlite';import {pipeline} from 'node:stream/promises';
 import {PROTOCOL,BACKUP_SCHEMA,validateEntry,contentHash} from '../shared/backup-protocol.mjs';
 import {openBackupDatabase} from './database.mjs';
+import {ScopeState} from './scope-state.mjs';
 
 const MAX_JSON=32*1024*1024,MAX_CHUNK=4*1024*1024;
 function error(status,message){return Object.assign(new Error(message),{status});}
@@ -28,6 +29,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  const validLease=req=>{audioWriter(req);const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
  const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
  const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy});
+ const scopes=new ScopeState(db,{now});
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
  const objectPath=sha=>{if(!/^[a-f0-9]{64}$/.test(sha))throw error(400,'文件标识无效');return path.join(dataDir,'objects',sha);};
  const handler=async(req,res)=>{
@@ -45,6 +47,15 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
     db.prepare('INSERT OR REPLACE INTO devices VALUES(?,?)').run(input.deviceId,input.name);send(req,res,200,{...status(),leaseToken:lease.token,leaseMs});return;
    }
    if(route==='/v1/lease'&&req.method==='DELETE'){validLease(req);lease=null;send(req,res,200,{ok:true});return;}
+   if(route==='/v1/scopes/state'&&req.method==='GET'){send(req,res,200,scopes.statePage({after:Number(url.searchParams.get('after')||0),limit:Number(url.searchParams.get('limit')||100)}));return;}
+   if(route==='/v1/scopes/receipt'&&req.method==='GET'){send(req,res,200,scopes.receipt(url.searchParams.get('operationId'),{id:String(req.headers['x-device-id']||'')}));return;}
+   if(['/v1/scopes/delete','/v1/scopes/restore/prepare','/v1/scopes/restore/commit'].includes(route)&&req.method==='POST'){
+    const id=validLease(req),device={id,name:db.prepare('SELECT name FROM devices WHERE id=?').get(id).name},input=await json(req);let result;
+    if(route==='/v1/scopes/delete'){result=scopes.delete(input,device);await actions.collect();}
+    else if(route.endsWith('/prepare'))result=scopes.prepareRestore(input,device);
+    else result=scopes.finishRestore(input.grantId,input.records,device);
+    send(req,res,200,result);return;
+   }
    if(['/v1/backup-delete','/v1/backup-enable'].includes(route)&&req.method==='POST'){const input=await json(req),device=validLease(req);const result=await actions.execute(route.endsWith('delete')?'delete':'enable',input,device,lease.name);send(req,res,200,result);return;}
    const actionReceipt=route.match(/^\/v1\/backup-actions\/([a-f0-9-]{36})$/);if(actionReceipt&&req.method==='GET'){const row=db.prepare('SELECT device,result FROM backup_actions WHERE request=?').get(actionReceipt[1]);if(!row||row.device!==req.headers['x-device-id'])throw error(404,'未找到 NAS 操作回执');send(req,res,200,JSON.parse(row.result));return;}
    if(route==='/v1/preview-index'&&req.method==='GET'){
