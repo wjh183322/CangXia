@@ -33,12 +33,12 @@ export class ProblemRegistry{
  CREATE TABLE IF NOT EXISTS problem_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);INSERT OR IGNORE INTO problem_meta VALUES('revision','0');`);}
  get revision(){return Number(this.db.prepare("SELECT value FROM problem_meta WHERE key='revision'").get().value);}
  get(id){const row=this.db.prepare('SELECT body FROM problems WHERE id=?').get(id);return row?JSON.parse(row.body):null;}
- patchMany(patches){
+ patchMany(patches,{authoritative=false}={}){
   const read=this.db.prepare('SELECT body FROM problems WHERE id=?'),put=this.db.prepare('INSERT OR REPLACE INTO problems VALUES(?,?,?,?,?,?,?,?)'),clearKinds=this.db.prepare('DELETE FROM problem_kinds WHERE work_id=?'),putKind=this.db.prepare('INSERT OR IGNORE INTO problem_kinds VALUES(?,?)');let changed=false;
   this.db.exec('BEGIN IMMEDIATE');try{
    for(const p of patches){if(!safeId(p.id))throw Error('作品 ID 无效');const previous=read.get(p.id)?.body,old=previous?JSON.parse(previous):null,facts={...old?.facts,id:p.id};
     for(const key of ['name','author','sourceLabel'])if(p[key]!==undefined)facts[key]=text(p[key]);if(Number.isFinite(p.rank))facts.rank=p.rank;
-    for(const key of ['file','source','task'])if(p[key]){const incoming={...p[key]},oldFact=facts[key],checkedAt=incoming.checkedAt||p.checkedAt||new Date().toISOString();if(time(oldFact?.checkedAt)>time(checkedAt))continue;if(key==='source'&&!sourceStates.includes(incoming.state))throw Error('原作品状态无效');if(key==='file'&&!fileStates.includes(incoming.status))throw Error('文件状态无效');
+    for(const key of ['file','source','task'])if(p[key]){const incoming={...p[key]},oldFact=facts[key],checkedAt=incoming.checkedAt||p.checkedAt||new Date().toISOString();if(!authoritative&&time(oldFact?.checkedAt)>time(checkedAt))continue;if(key==='source'&&(!sourceStates.includes(incoming.state)||incoming.state==='all'))throw Error('原作品状态无效');if(key==='file'&&(!fileStates.includes(incoming.status)||incoming.status==='all'))throw Error('文件状态无效');
      if(key==='file'){incoming.kinds=[...new Set((incoming.issues||[]).flatMap(i=>[i.kind,i.type].filter(v=>kinds.includes(v))))];incoming.issues=(incoming.issues||[]).slice(0,16).map(i=>({kind:i.kind,type:i.type,label:text(i.label,80),reason:reason(i.reason)}));}
      if(key==='source')incoming.reason=reason(incoming.reason);if(key==='task')incoming.message=reason(incoming.message);facts[key]={...incoming,checkedAt};}
     const row=project(facts),body=JSON.stringify(row);if(body===previous)continue;put.run(p.id,row.rank,row.problem?1:0,row.fileStatus,row.sourceStatus,row.status,actionable(row)?1:0,body);clearKinds.run(p.id);if(row.problem)for(const kind of row.kinds)putKind.run(p.id,kind);if(!old||JSON.stringify({...row,facts:undefined})!==JSON.stringify({...old,facts:undefined}))changed=true;

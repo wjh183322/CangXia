@@ -79,11 +79,11 @@
 
 **Interfaces:** `ProblemRegistry(db)` 使用现有 defect-repair.sqlite，建立独立 problems 表；`patchMany(patches:ProblemPatch[]):void` 事务按维度合并；`page({page=1,limit=20,fileStatus='all',sourceStatus='all',kind='all'}):object`；`selection(options):{token:string,total:number}`。`DefectRepair.overview():object` 只读摘要；`page({view:'problems'|'results',...})` 继续支持现有分页。
 
-- [ ] **Step 1: 写失败测试。** `selected verification preserves unrelated unavailable works across restart` 建立 204 失效＋74 失败，核验 74 后断言 overview 仍含 204；`repair nine updates only nine` 断言其他问题不变；`unprocessed cancellation preserves old facts` 断言停止未处理项保持旧状态；`available and failed are independent filters` 断言同一 ID 能同时匹配两个维度、总数按 ID 去重；`log pruning keeps unresolved problems` 断言任务日志清理后总览不丢。
-- [ ] **Step 2: 运行红灯。** `node --test tests/problem-registry.test.mjs tests/defect-repair.test.mjs`，预期缺少持久投影或旧单轮覆盖断言失败。
-- [ ] **Step 3: 实现持久投影。** 迁移时只从已有下载任务/源状态/保存的检查结果建索引，不触发文件扫描；无证据的旧问题标注待检查。核验只 patch source，文件检查只 patch file，队列结束 patch task，且不受当前 job 归属限制；分别比较源核验时间、文件清单签名、任务 ID，旧事件不得覆盖对应维度的新事实。索引覆盖状态、问题类别、作品 ID；按收藏顺序从新到旧，其他来源用现有读取顺序。全选快照绑定筛选与版本，变化时拒绝扩大范围；resolved 可压缩，未解决项不受日志保留期影响。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，确认旧任务数据库能重开，分页默认 20、只序列化当页，取消未处理项不消失。
-- [ ] **Step 5: 提交。** 显式暂存上述文件，`git commit --quiet -m "feat: persist the problem overview independently of repair jobs"`。
+- [x] **Step 1: 写失败测试。** `selected verification preserves unrelated unavailable works across restart` 建立 204 失效＋74 失败，核验 74 后断言 overview 仍含 204；`repair nine updates only nine` 断言其他问题不变；`unprocessed cancellation preserves old facts` 断言停止未处理项保持旧状态；`available and failed are independent filters` 断言同一 ID 能同时匹配两个维度、总数按 ID 去重；`log pruning keeps unresolved problems` 断言任务日志清理后总览不丢。
+- [x] **Step 2: 运行红灯。** `node --test tests/problem-registry.test.mjs tests/defect-repair.test.mjs`，预期缺少持久投影或旧单轮覆盖断言失败。
+- [x] **Step 3: 实现持久投影。** 迁移时只从已有下载任务/源状态/保存的检查结果建索引，不触发文件扫描；无证据的旧问题标注待检查。核验只 patch source，文件检查只 patch file，队列结束 patch task，且不受当前 job 归属限制；分别比较源核验时间、文件清单签名、任务 ID，旧事件不得覆盖对应维度的新事实。索引覆盖状态、问题类别、作品 ID；按收藏顺序从新到旧，其他来源用现有读取顺序。全选快照绑定筛选与版本，变化时拒绝扩大范围；resolved 可压缩，未解决项不受日志保留期影响。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，确认旧任务数据库能重开，分页默认 20、只序列化当页，取消未处理项不消失。
+- [x] **Step 5: 提交。** 显式暂存上述文件，`git commit --quiet -m "feat: persist the problem overview independently of repair jobs"`。
 
 ### Task 5: 手动检查入口与独立筛选
 
@@ -91,11 +91,11 @@
 
 **Interfaces:** IPC `defectOverview():Promise<object>` 读取 Task 4 总览；`inspectDefects({ids?:string[]}={}):Promise<object>` 是手动扫描；不传 ids 表示全部。旧 `defectPage` 增加 fileStatus/sourceStatus；UI 显示“问题总览”“本轮结果”。
 
-- [ ] **Step 1: 写失败 UI 用例。** 打开面板断言 overview 1 次、inspectDefects 0 次；点击“检查全部”才扫描。任务开始不切换标签、不重置筛选；核验 74 条后在总览仍能筛选 204 失效项，本轮结果明确只含 74。重开默认总览；首次无已保存结果说明需手动检查。后台监测只更新涉及项，不增加全扫描。
-- [ ] **Step 2: 运行红灯。** `npm run test:ui`，预期打开即扫描或任务强制跳标签断言失败。
-- [ ] **Step 3: 实现入口与 UI。** 用总览替换打开即 inspectDefects；保留已有周期文件监测。增加“检查全部”“检查选中”“核验原作品状态”，源状态与文件/处理状态各自筛选，说明分类数量可重叠。总览/分页只读 IPC 加入后台任务允许列表；手动写入操作仍按现有互斥规则。显示本轮 completed/total，不混入历史统计。
-- [ ] **Step 4: 运行绿灯。** `npm run test:ui` 与 `node --test tests/defect-repair.test.mjs tests/problem-registry.test.mjs`，预期全部通过。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: open saved problems without starting a full scan"`。
+- [x] **Step 1: 写失败 UI 用例。** 打开面板断言 overview 1 次、inspectDefects 0 次；点击“检查全部”才扫描。任务开始不切换标签、不重置筛选；核验 74 条后在总览仍能筛选 204 失效项，本轮结果明确只含 74。重开默认总览；首次无已保存结果说明需手动检查。后台监测只更新涉及项，不增加全扫描。
+- [x] **Step 2: 运行红灯。** `npm run test:ui`，预期打开即扫描或任务强制跳标签断言失败。
+- [x] **Step 3: 实现入口与 UI。** 用总览替换打开即 inspectDefects；保留已有周期文件监测。增加“检查全部”“检查选中”“核验原作品状态”，源状态与文件/处理状态各自筛选，说明分类数量可重叠。总览/分页只读 IPC 加入后台任务允许列表；手动写入操作仍按现有互斥规则。显示本轮 completed/total，不混入历史统计。
+- [x] **Step 4: 运行绿灯。** `npm run test:ui` 与 `node --test tests/defect-repair.test.mjs tests/problem-registry.test.mjs`，预期全部通过。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: open saved problems without starting a full scan"`。
 
 ### Task 6: 活动下载及检查标题打开本地详情，返回原位置
 
@@ -103,11 +103,11 @@
 
 **Interfaces:** `capturePanelReturn({panel,tab,page,filters,selection,scrollTop}):object` 为纯快照；main 持有返回状态，`openStoredDetail(id,{returnTo}={})` 成功后打开本地详情，关闭后恢复原面板。不通过标题搜索，不恢复已经无效的选择。
 
-- [ ] **Step 1: 写失败用例。** downloading/waiting/failed/unavailable 标题均可键盘/点击打开精确 ID；详情失败仍停原面板。下载继续、collector 请求次数不增加；返回保持 tab、页码、筛选、滚动和仍有效选择。检查面板两标签同样可用，外链仍单独打开抖音。任务变化使所选项失效时提示且不选择替代项。
-- [ ] **Step 2: 运行红灯。** `npm run test:ui`，预期活动标题不可点击或返回状态丢失。
-- [ ] **Step 3: 实现导航。** 标题使用 button 并有可访问标签；提升需要跨 modal 保存的状态或保持组件挂载，使用精确 ID 调用 workDetail。它允许选中作品的本机文件检查，不新增源状态核验、暂停下载或作者刷新；返回只恢复界面状态。
-- [ ] **Step 4: 运行绿灯。** `npm run test:ui`、`npm run test:backup-desktop`，预期导航与队列并行验收通过。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: open local work details from download and repair titles"`。
+- [x] **Step 1: 写失败用例。** downloading/waiting/failed/unavailable 标题均可键盘/点击打开精确 ID；详情失败仍停原面板。下载继续、collector 请求次数不增加；返回保持 tab、页码、筛选、滚动和仍有效选择。检查面板两标签同样可用，外链仍单独打开抖音。任务变化使所选项失效时提示且不选择替代项。
+- [x] **Step 2: 运行红灯。** `npm run test:ui`，预期活动标题不可点击或返回状态丢失。
+- [x] **Step 3: 实现导航。** 标题使用 button 并有可访问标签；提升需要跨 modal 保存的状态或保持组件挂载，使用精确 ID 调用 workDetail。它允许选中作品的本机文件检查，不新增源状态核验、暂停下载或作者刷新；返回只恢复界面状态。
+- [x] **Step 4: 运行绿灯。** `npm run test:ui`、`npm run test:backup-desktop`，预期导航与队列并行验收通过。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: open local work details from download and repair titles"`。
 
 ### Task 7: 本地媒体库索引大小排序
 
@@ -115,11 +115,11 @@
 
 **Interfaces:** `SearchIndex.query(ids,options)` 新增 `sort:'original'|'size-desc'|'size-asc'`，返回有序 ID 数组；缓存 `localBytes` 与 `sizeKnown`。IPC filterWorks 保持 `{ids:string[]}`；前端保留数组顺序，不再仅用 Set 过滤 source。
 
-- [ ] **Step 1: 写失败测试。** 输入大小 `[10,未知,30,10]`，升序结果 `[第一10,第二10,30,未知]`，降序 `[30,第一10,第二10,未知]`；作者筛选先于排序，页码/详情位置/全选顺序一致；文件状态变化触发重排。断言排序没有文件系统访问，共享配乐不重复计入可释放空间，浏览缓存不计入正式大小。
-- [ ] **Step 2: 运行红灯。** `node --test tests/search-index.test.mjs` 与 `npm run test:ui`，预期新排序断言失败。
-- [ ] **Step 3: 实现索引排序。** 只在本地媒体库显示三种选项；默认 original，稳定 tie 使用输入 rank，未知放末尾。使用已有文件状态/资产字节缓存，索引变化使排序缓存失效；采用分批可让出事件循环的稳定排序，禁止比较器读文件。没有其他筛选但选了大小排序时也使用索引；过期请求不能覆盖新排序。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，确认普通收藏列表读取顺序没有改写。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: sort local media by indexed file size"`。
+- [x] **Step 1: 写失败测试。** 输入大小 `[10,未知,30,10]`，升序结果 `[第一10,第二10,30,未知]`，降序 `[30,第一10,第二10,未知]`；作者筛选先于排序，页码/详情位置/全选顺序一致；文件状态变化触发重排。断言排序没有文件系统访问，共享配乐不重复计入可释放空间，浏览缓存不计入正式大小。
+- [x] **Step 2: 运行红灯。** `node --test tests/search-index.test.mjs` 与 `npm run test:ui`，预期新排序断言失败。
+- [x] **Step 3: 实现索引排序。** 只在本地媒体库显示三种选项；默认 original，稳定 tie 使用输入 rank，未知放末尾。使用已有文件状态/资产字节缓存，索引变化使排序缓存失效；采用分批可让出事件循环的稳定排序，禁止比较器读文件。没有其他筛选但选了大小排序时也使用索引；过期请求不能覆盖新排序。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，确认普通收藏列表读取顺序没有改写。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: sort local media by indexed file size"`。
 
 ### Task 8: 大库、真实诊断边界与本机版本交付
 
@@ -127,10 +127,10 @@
 
 **Interfaces:** 隔离 30000 记录、1000 问题 fixture；交付沿用当前桌面版本后下一可用 patch，不修改 NAS 服务版本。
 
-- [ ] **Step 1: 写验收失败用例。** `overview and sort remain bounded for 30000 works` 断言单页≤20、IPC 无完整资产列表、零全盘扫描；计数器证明处理间有事件循环让出，停止后不启动后续批次。重启后总览与未完成任务保留；合成完整视频＋partial 状态重复重试无网络。未登记视频路径按 Task 2 验证保留旧文件。
-- [ ] **Step 2: 运行验收。** `node --test tests/local-library-responsiveness.test.mjs`；先确认新增断言确实覆盖遗漏，再完成仅必要修正。
-- [ ] **Step 3: 运行交付检查。** `node --test --test-concurrency=4 tests/*.test.mjs`、`npm run test:ui`、`npm run test:backup-desktop`、`npm run test:backup-preview`、`npm run build`。只在全部通过后运行现有打包流程，核对 ASAR 所含新模块及安装包 SHA256。合成验收与遵义实机验收分开报告，不能用前者宣布所有 9 条真实作品均已修复。
-- [ ] **Step 4: 更新版本与说明并提交。** 版本只在准备发布时分配；记录两种确认路径、手动检查、问题总览、详情返回、大小排序及审查原因识别。显式暂存本任务文件，`git commit --quiet -m "release: ship local download and problem overview improvements"`。发布用已验证渠道，不覆盖已有发布 tag；不要提交诊断导出或用户素材。
+- [x] **Step 1: 写验收失败用例。** `overview and sort remain bounded for 30000 works` 断言单页≤20、IPC 无完整资产列表、零全盘扫描；计数器证明处理间有事件循环让出，停止后不启动后续批次。重启后总览与未完成任务保留；合成完整视频＋partial 状态重复重试无网络。未登记视频路径按 Task 2 验证保留旧文件。
+- [x] **Step 2: 运行验收。** `node --test tests/local-library-responsiveness.test.mjs`；先确认新增断言确实覆盖遗漏，再完成仅必要修正。
+- [x] **Step 3: 运行交付检查。** `node --test --test-concurrency=4 tests/*.test.mjs`、`npm run test:ui`、`npm run test:backup-desktop`、`npm run test:backup-preview`、`npm run build`。只在全部通过后运行现有打包流程，核对 ASAR 所含新模块及安装包 SHA256。合成验收与遵义实机验收分开报告，不能用前者宣布所有 9 条真实作品均已修复。
+- [x] **Step 4: 更新版本与说明并提交。** 版本只在准备发布时分配；记录两种确认路径、手动检查、问题总览、详情返回、大小排序及审查原因识别。显式暂存本任务文件，`git commit --quiet -m "release: ship local download and problem overview improvements"`。发布用已验证渠道，不覆盖已有发布 tag；不要提交诊断导出或用户素材。
 
 ## 自审与交付顺序
 

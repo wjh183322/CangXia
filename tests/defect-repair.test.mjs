@@ -14,7 +14,7 @@ test('targeted repair uses the indexed browsing cache without refreshing already
 
 test('persistent overview retains 204 unrelated unavailable works when 74 failures are verified and the manager restarts',async t=>{
  const f=await setup(t);missingFile(f);const template=f.store.download('3'),cover=f.store.work('3').backupCover,selected=[];
- f.store.db.run('BEGIN');for(let n=0;n<278;n++){const id=String(1000+n);f.store.upsertWork(raw(id));f.store.put('works',id,{...f.store.work(id),backupCover:cover,...(n<204?{remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture previous result'}}:{})});if(n>=204){f.store.put('downloads',id,{...template,id});selected.push(id);}}f.store.db.run('COMMIT');f.queue.jobs=selected.map(id=>({id,state:'failed',message:'fixture failure'}));
+ f.store.db.run('BEGIN');for(let n=0;n<278;n++){const id=String(1000+n);f.store.upsertWork(raw(id));f.store.db.run('INSERT INTO members VALUES(?,?,?)',['__all__',id,n+3]);f.store.put('works',id,{...f.store.work(id),backupCover:cover,...(n<204?{remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture previous result'}}:{})});if(n>=204){f.store.put('downloads',id,{...template,id});selected.push(id);}}f.store.db.run('COMMIT');f.queue.jobs=selected.map(id=>({id,state:'failed',message:'fixture failure'}));
  await f.manager.scan();f.collector.verifySource=async id=>{const sourceStatus={state:selected.indexOf(id)<9?'available':'unknown',reason:'fixture new result',checkedAt:new Date().toISOString()};f.store.put('works',id,{...f.store.work(id),remoteState:sourceStatus.state,sourceStatus});return {id,...sourceStatus};};
  f.manager.startVerification(selected);await f.manager.wait();assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,204);assert.equal(f.manager.page({fileStatus:'downloadFailed'}).total,74);
  f.reopen();assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,204);assert.equal(f.manager.page({sourceStatus:'unknown'}).total,65);assert.equal((await f.manager.overview()).checked,281);
@@ -44,6 +44,15 @@ test('manual selected inspection checks only those IDs and retains the global ov
  const f=await setup(t);for(const id of ['1','2','3'])missingFile(f,id);await f.manager.scan();
  const report=await f.manager.scan({ids:['2'],compact:true});assert.equal(f.manager.checks.job.total,1);assert.equal(f.manager.scanState.total,1);assert.equal(report.checked,3);assert.equal(report.total,3);assert.equal(f.manager.page({fileStatus:'pending'}).total,3);
  await assert.rejects(f.manager.scan({ids:[]}),/选择/);
+});
+test('current saved source evidence wins when the computer clock has moved backwards',async t=>{
+ const f=await setup(t);missingFile(f);f.store.put('works','3',{...f.store.work('3'),remoteState:'unavailable',sourceStatus:{state:'unavailable',checkedAt:'2030-01-01T00:00:00Z',reason:'old clock'}});await f.manager.scan();f.store.put('works','3',{...f.store.work('3'),remoteState:'available',sourceStatus:{state:'available',checkedAt:'2026-10-20T00:00:00Z',reason:'current verified result'}});assert.equal(f.manager.page({sourceStatus:'available'}).total,1);assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,0);
+});
+test('explicitly removed reading records leave the problem overview when no local file or author scope remains',async t=>{
+ const f=await setup(t);f.store.put('works','1',{...f.store.work('1'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture'}});await f.manager.scan();assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,1);f.store.deleteReadRecords(['1']);assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,0);
+});
+test('removing account records preserves author problems until the author records are removed',async t=>{
+ const f=await setup(t),author='MS4wLjABAAAA_PROBLEM_AUTHOR';f.store.authorSources.add(author,{user:{uid:'7',sec_uid:author,nickname:'fixture author'}});for(const id of ['1','8']){if(id==='8')f.store.upsertWork(raw(id));f.store.put('works',id,{...f.store.work(id),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture'}});f.store.db.run('INSERT INTO author_members VALUES(?,?,?,0)',[author,id,Number(id)]);}f.store.deleteReadRecords(['1']);await f.manager.scan();const page=f.manager.page({sourceStatus:'unavailable'});assert.equal(page.total,2);assert.ok(page.items.every(i=>i.source==='作者作品'));f.store.authorSources.hide(author,['1','8']);assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,0);
 });
 const raw=id=>({aweme_id:id,desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:[]}}});
 async function setup(t){

@@ -1,6 +1,7 @@
 import {normalizeCreator,creatorKey,sameCreator,mergeCreator} from '../shared/creators.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
+import {randomUUID} from 'node:crypto';
 import {SqliteStore} from './sqlite-store.mjs';
 import {SyncState} from './sync-state.mjs';
 import {AuthorSources} from './author-sources.mjs';
@@ -21,6 +22,7 @@ export class Store {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const db = await SqliteStore.open(file);
     const s = new Store(db, file);
+    db.run('CREATE TABLE IF NOT EXISTS local_identity(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)');db.run('INSERT OR IGNORE INTO local_identity VALUES(1,?)',[randomUUID()]);s.localIdentity=s.rows('SELECT value FROM local_identity WHERE id=1')[0].value;
     db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS works (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, body TEXT NOT NULL);

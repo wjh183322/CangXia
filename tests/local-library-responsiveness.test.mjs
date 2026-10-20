@@ -1,0 +1,18 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import {Store} from '../electron/store.mjs';import {DefectRepair} from '../electron/defect-repair.mjs';
+test('overview and sort remain bounded for 30000 works and cancellation keeps unprocessed problems',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-large-overview-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media')),ids=Array.from({length:30000},(_,n)=>String(n+1));
+ const backup={meta:{dirty:true,baseRevision:null},covers:{problems:new Map(),saveProblems(){}},status:{writable:true}},queue={jobs:[],enqueue(){}};
+ let manager=new DefectRepair({store,backup,queue,collector:{cancelResolve(){}},profile:dir,runForeground:action=>action()});
+ t.after(async()=>{manager.close();await store.fileStates.close();store.close();assert.equal(path.dirname(dir),os.tmpdir());fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});});
+ store.db.run('BEGIN');for(const [rank,id]of ids.entries()){const bytes=(rank%97+1)*1024+2,source=rank<1000?{remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture saved result',checkedAt:'2026-10-20T00:00:00Z'}}:{};
+  store.db.run('INSERT INTO works VALUES(?,?)',[id,JSON.stringify({id,name:'large fixture '+id,type:'images',images:[{index:0}],tags:[],author:{nickname:'fixture'},thumbnail:'https://p3.douyinpic.com/fixture.jpg',...source})]);store.db.run('INSERT INTO members VALUES(?,?,?)',['__all__',id,rank]);store.db.run('INSERT INTO downloads VALUES(?,?)',[id,JSON.stringify({id,path:path.join(store.root,id),state:'complete',assets:[{key:'image-0',file:'image.jpg',kind:'image',size:bytes-2},{key:'metadata',file:'info.json',kind:'metadata',size:2}]})]);store.fileStates.cache.set(id,{id,root:store.root,status:'complete',local:true,bytes,assets:{'image-0':{exists:true,state:'available'},metadata:{exists:true,state:'available'}}});
+ }store.db.run('COMMIT');
+ let turns=0,heartbeat=true;const pulse=()=>{if(heartbeat){turns++;setImmediate(pulse);}};t.after(()=>{heartbeat=false;});setImmediate(pulse);
+ let fileScans=0;const checkFiles=store.fileStates.check.bind(store.fileStates);store.fileStates.check=async()=>{fileScans++;throw Error('overview and sort cannot scan files');};
+ const overview=await manager.overview();assert.equal(overview.total,1000);assert.ok(overview.items.length<=20);assert.ok(Buffer.byteLength(JSON.stringify(overview))<65536);assert.ok(!JSON.stringify(overview).includes('assets'));assert.ok(turns>2);
+ const work=store.work.bind(store);let reads=0;store.work=(...args)=>{reads++;return work(...args);};await manager.overview();assert.equal(reads,0,'warm overview must not replay pre-migration history');store.work=work;
+ await store.lightViews.search.query(ids,{sort:'original'});turns=0;const ordered=await store.lightViews.search.query(ids,{sort:'size-desc'});assert.equal(ordered.length,30000);assert.equal(ordered[0],'97');assert.equal(ordered.at(-1),'29974');assert.ok(turns>2);assert.equal(fileScans,0);
+ manager.close();manager=new DefectRepair({store,backup,queue,collector:{cancelResolve(){}},profile:dir,runForeground:action=>action()});assert.equal((await manager.overview()).total,1000);
+ store.fileStates.check=checkFiles;manager.checks.notify=()=>{if(manager.checks.state()?.checked>=20)manager.stop();};const stopped=await manager.scan({compact:true});assert.equal(stopped.cancelled,true);assert.ok(manager.checks.job.checked<30000);assert.ok(stopped.items.length<=20);assert.equal(manager.page({sourceStatus:'unavailable'}).total,1000);assert.equal(store.rows('SELECT COUNT(*) n FROM works')[0].n,30000);heartbeat=false;
+});
