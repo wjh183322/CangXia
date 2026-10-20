@@ -1,16 +1,15 @@
-import {Worker} from 'node:worker_threads';import {createHash} from 'node:crypto';import fs from 'node:fs/promises';import path from 'node:path';import {requireInside} from './model.mjs';
+import {Worker} from 'node:worker_threads';import {createHash} from 'node:crypto';
+import {confirmDownload} from './download-confirmation.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 export class FileStates{
  constructor(store){this.store=store;this.cache=new Map();this.pending=new Set();this.sequence=0;this.waiters=new Map();this.queued=[];this.generation=0;}
  init(){this.store.db.run('CREATE TABLE IF NOT EXISTS file_states(id TEXT PRIMARY KEY,body TEXT NOT NULL)');for(const row of this.store.rows('SELECT id,body FROM file_states'))this.cache.set(row.id,JSON.parse(row.body));}
  get(id){return this.cache.get(id);}
- async confirmWritten(id){
-  const store=this.store,row=store.rows('SELECT body FROM downloads WHERE id=?',[id])[0];if(!row)return false;const d=JSON.parse(row.body);if(d.state!=='complete'||!d.assets?.length)return false;
-  // Called only after a successful downloader/verified NAS restore, never for UI guesses.
-  const assets={};for(const a of d.assets){const file=requireInside(d.path,path.join(d.path,a.file)),stat=await fs.lstat(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size<=0||a.size&&a.size!==stat.size)return false;assets[a.key]={exists:true,state:'available',stamp:[stat.size,stat.mtimeMs,stat.ctimeMs]};}
-  if(store.rows('SELECT body FROM downloads WHERE id=?',[id])[0]?.body!==row.body)return false;
-  const result={id,signature:hash(row.body),root:store.root,status:'complete',local:d.assets.some(a=>a.kind!=='metadata'),bytes:d.assets.reduce((n,a)=>n+(a.size||0),0),assets,checkedAt:Date.now()};
-  store.db.run('INSERT OR REPLACE INTO file_states VALUES(?,?)',[id,JSON.stringify(result)]);this.cache.set(id,result);store.viewCache.delete(id);store.lightViews?.invalidateFiles(id);store.revision++;this.generation++;this.onChange?.();
+ async confirmWritten(id,{signal,onResult}={}){
+  const store=this.store;let result=await confirmDownload(store,id,{signal});
+  if(result.ok){const current=store.rows('SELECT body FROM downloads WHERE id=?',[id])[0]?.body;if(!current||hash(current)!==result.snapshot.signature||store.root!==result.snapshot.root){store.db.run("DELETE FROM file_states WHERE id=? AND json_extract(body,'$.signature')=?",[id,result.snapshot.signature]);result={ok:false,code:'RECORD_CHANGED',issues:[{key:'',code:'RECORD_CHANGED',message:'文件清单已更新，请按当前记录重新确认'}],changed:false};}}
+  onResult?.(result);if(!result.ok)return false;
+  this.cache.set(id,result.snapshot);this.pending.delete(id);store.viewCache.delete(id);store.lightViews?.invalidateFiles(id);store.revision++;this.generation++;this.onChange?.();
   return true;
  }
  invalidate(id){this.cache.delete(id);this.pending.add(id);this.store.viewCache.delete(id);this.store.lightViews?.invalidateFiles(id);if(this.onChange)this.schedule();}
