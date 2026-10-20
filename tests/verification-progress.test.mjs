@@ -8,7 +8,7 @@ function screenshotFixture({completed=true,kind='verify'}={}){
   return {id:String(n),issues:[],state:verified?'verified':'waiting',...(verified?{verification:{state:n<=31?'unavailable':'unknown'}}:{})};
  })};
  manager.store={work:id=>({remoteState:Number(id)<=205?'unavailable':'unknown'})};
- manager.queue={jobs:[]};manager.running=true;manager.currentIndex=208;
+ manager.queue={jobs:[]};manager.registry={revision:0};manager.running=true;manager.currentIndex=208;
  return manager;
 }
 test('34 checks among 988 show 31 unavailable and 3 unknown without counting 174 historical markers',()=>{
