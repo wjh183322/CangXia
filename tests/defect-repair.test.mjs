@@ -40,6 +40,11 @@ test('a changed manifest cannot reuse a previous worker missing-file result',asy
 test('completed queue history is not re-inspected while constructing the manager',async t=>{
  const f=await setup(t);f.queue.jobs=Array.from({length:3000},(_,n)=>({id:String(n+1),state:'complete'}));const work=f.store.work.bind(f.store);let reads=0;t.mock.method(f.store,'work',(...args)=>{reads++;return work(...args);});f.reopen();assert.ok(reads<10,'opening re-read '+reads+' historical works');
 });
+test('manual selected inspection checks only those IDs and retains the global overview',async t=>{
+ const f=await setup(t);for(const id of ['1','2','3'])missingFile(f,id);await f.manager.scan();
+ const report=await f.manager.scan({ids:['2'],compact:true});assert.equal(f.manager.checks.job.total,1);assert.equal(f.manager.scanState.total,1);assert.equal(report.checked,3);assert.equal(report.total,3);assert.equal(f.manager.page({fileStatus:'pending'}).total,3);
+ await assert.rejects(f.manager.scan({ids:[]}),/选择/);
+});
 const raw=id=>({aweme_id:id,desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:[]}}});
 async function setup(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-defect-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));store.setSetting('browserAccountKey','uid:1');

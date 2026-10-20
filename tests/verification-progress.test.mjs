@@ -38,3 +38,8 @@ test('normal repair summaries still recognize historical unavailable work as ski
  const manager=screenshotFixture({completed:false,kind:'repair'}),state=manager.state();
  assert.equal(state.sourceUnavailable,205);assert.equal(state.processed,205);
 });
+test('round-result filters keep source verification separate from the saved file status',()=>{
+ const manager=screenshotFixture();for(const item of manager.job.items)item.fileStatus='downloadFailed';
+ const page=manager.page({view:'results',fileStatus:'downloadFailed',sourceStatus:'unknown'});assert.equal(page.total,3);assert.equal(page.counts.sourceStatus.unavailable,31);assert.equal(page.counts.sourceStatus.unchecked,954);assert.equal(page.counts.fileStatus.downloadFailed,988);
+ assert.equal(manager.page({view:'results',fileStatus:'complete',sourceStatus:'unknown'}).total,0);
+});

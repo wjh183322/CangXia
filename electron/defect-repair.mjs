@@ -101,21 +101,22 @@ export class DefectRepair{
   const fileStatus=failed?'downloadFailed':issues.length&&issues.every(i=>['blocked','checking'].includes(i.kind))?'checking':'pending';
   return this.sourceProblem({id,name:String(work.name).slice(0,256),author:work.author?.nickname||'',url:work.url,issues,status:fileStatus,fileStatus},work);
  }
- async scan({compact=false}={}){
+ async scan({compact=false,ids:selected}={}){
+  if(selected!==undefined&&(!Array.isArray(selected)||!selected.length||selected.some(id=>!safeId(id))))throw Error('请选择要检查的作品');const selectedSet=selected?new Set(selected):null,previousReport=this.scanReport;
   if(this.scanState?.running||this.running)throw Error('已有检查或补齐任务正在进行');
   this.scanState={running:true,checked:0,total:0,cancelled:false};this.onChange();
   try{
    await this.prepareOverview();
-   const candidates=new Set(this.store.rows('SELECT id FROM downloads').map(r=>r.id));for(const j of this.queue.jobs)if(j.state==='failed')candidates.add(j.id);const candidateIds=[...candidates];
+   const candidates=new Set(selected?selected.filter(id=>this.store.rows('SELECT 1 FROM downloads WHERE id=?',[id]).length):this.store.rows('SELECT id FROM downloads').map(r=>r.id));for(const j of this.queue.jobs)if(j.state==='failed'&&(!selectedSet||selectedSet.has(j.id)))candidates.add(j.id);const candidateIds=[...candidates];
    const checked=candidates.size?await this.checks.check(candidateIds):null,problems=new Map((this.checks.job?.problems||[]).map(i=>[i.id,i])),stoppedInFiles=this.scanState.cancelled;
-   const allIds=this.store.rows('SELECT id FROM works'),ids=stoppedInFiles?candidateIds.slice(0,checked?.checked||0).map(id=>({id})):allIds,items=[];this.scanState.total=allIds.length;
+   const allIds=selected?[...selectedSet].map(id=>({id})):this.store.rows('SELECT id FROM works'),ids=stoppedInFiles?candidateIds.slice(0,checked?.checked||0).map(id=>({id})):allIds,items=[];this.scanState.total=allIds.length;
    for(let index=0;index<ids.length;index++){
     if(this.scanState.cancelled&&!stoppedInFiles)break;const id=ids[index].id;
     const files=candidates.has(id)?problems.get(id)||{status:stoppedInFiles||checked?.phase==='done'?'complete':'checking',missing:[],...this.checks.job?.proofs?.get(id)}:undefined;
     const item=this.inspect(id,undefined,files);if(item)items.push(item);this.scanState.checked++;
     if(index%50===49){this.onChange();await yieldLoop();}
    }
-   this.scanItems=this.sort(items);this.scanToken=randomUUID();this.scanRevision=(this.scanRevision||0)+1;const report={token:this.scanToken,revision:this.scanRevision,checked:this.scanState.checked,cancelled:this.scanState.cancelled,covers:items.filter(i=>i.issues.some(v=>v.kind==='cover')).length,files:items.filter(i=>i.issues.some(v=>v.kind==='files')).length,blocked:items.filter(i=>i.issues.some(v=>v.kind==='blocked')).length};this.scanReport=report;
+   this.scanItems=this.sort(items);this.scanToken=randomUUID();this.scanRevision=(this.scanRevision||0)+1;const report={token:this.scanToken,revision:this.scanRevision,checked:selected?previousReport?.checked||0:this.scanState.checked,cancelled:selected?previousReport?.cancelled||false:this.scanState.cancelled,lastCheck:{scope:selected?'selected':'all',checked:this.scanState.checked,cancelled:this.scanState.cancelled},covers:items.filter(i=>i.issues.some(v=>v.kind==='cover')).length,files:items.filter(i=>i.issues.some(v=>v.kind==='files')).length,blocked:items.filter(i=>i.issues.some(v=>v.kind==='blocked')).length};this.scanReport=report;
    for(let start=0;start<this.scanState.checked;start+=50){const batch=ids.slice(start,Math.min(start+50,this.scanState.checked)).map(r=>r.id),reports=new Map(batch.map(id=>[id,candidates.has(id)?problems.get(id)||{status:checked?.phase==='done'?'complete':'checking',missing:[],...this.checks.job?.proofs?.get(id)}:{status:'complete',missing:[]}]));this.refreshProblemIds(batch,reports);await yieldLoop();}this.problemReady=true;this.db.prepare("INSERT OR REPLACE INTO problem_meta VALUES('seeded','1')").run();this.problemCursor=this.store.backupRevision();this.db.prepare("INSERT OR REPLACE INTO problem_meta VALUES('journal',?)").run(String(this.problemCursor));this.scanToken=this.registry.selection().token;report.token=this.scanToken;this.db.prepare("INSERT OR REPLACE INTO problem_meta VALUES('lastScan',?)").run(JSON.stringify(report));
    return {...report,...(compact?this.page():{items:this.scanItems})};
   }finally{this.scanState.running=false;this.onChange();}
@@ -138,7 +139,7 @@ export class DefectRepair{
  }
  rows(view){
   const tasks=new Map((this.job?.items||[]).map(i=>[i.id,i]));
-  if(view==='results')return [...tasks.values()].map(i=>this.result(i));
+  if(view==='results')return [...tasks.values()].map(i=>{const row=this.result(i),sourceStatus=this.job.kind==='verify'?(i.verification?.state||'unchecked'):sourceState(this.sourceWork(i.id)),originalFile=i.downloadResult?.state==='complete'?(i.repairFailed?'repairFailed':'complete'):['done','skipped'].includes(i.state)?'complete':i.fileStatus||'pending';return {...row,fileStatus:this.job.kind==='verify'?(i.fileStatus||'pending'):['unavailable','sourceAvailable','sourceUnknown'].includes(row.status)?originalFile:row.status,sourceStatus};});
   return this.scanItems.map(i=>{
    const task=this.job?.kind!=='verify'&&this.job?.scanToken===this.scanToken?tasks.get(i.id):null,result=task?this.result(task):null;
    const row=result?{...i,...result,fileStatus:result.status}:i;
@@ -148,9 +149,10 @@ export class DefectRepair{
  page({view='problems',page=1,status='all',kind='all',fileStatus='all',sourceStatus='all'}={}){
   if(view==='problems'){this.refreshProblemJournal();return this.registry.page({page,status,kind,fileStatus,sourceStatus});}
   if(!['problems','results'].includes(view)||!Number.isInteger(page)||page<1||!['all','pending','checking','processing','downloadFailed','repairFailed','complete','unavailable','sourceUnknown','sourceAvailable'].includes(status)||!['all','cover','files','video','image','invalid','metadata','blocked','source'].includes(kind))throw Error('检查筛选参数无效');
-  const rows=this.rows(view),counts={status:{},kind:{}};
-  for(const row of rows){counts.status[row.status]=(counts.status[row.status]||0)+1;for(const key of new Set(row.issues.flatMap(i=>[i.kind,i.type].filter(Boolean))))counts.kind[key]=(counts.kind[key]||0)+1;}
-  const matches=rows.filter(i=>(status==='all'||i.status===status)&&(kind==='all'||i.issues.some(v=>v.kind===kind||v.type===kind))),pages=Math.max(1,Math.ceil(matches.length/20)),current=Math.min(page,pages);
+  if(!['all','checking','pending','processing','downloadFailed','repairFailed','complete','blocked'].includes(fileStatus)||!['all','unchecked','available','unavailable','unknown'].includes(sourceStatus))throw Error('检查筛选参数无效');
+  const rows=this.rows(view),counts={status:{},fileStatus:{},sourceStatus:{},kind:{}};
+  for(const row of rows){for(const key of ['status','fileStatus','sourceStatus'])counts[key][row[key]]=(counts[key][row[key]]||0)+1;for(const key of new Set(row.issues.flatMap(i=>[i.kind,i.type].filter(Boolean))))counts.kind[key]=(counts.kind[key]||0)+1;}
+  const matches=rows.filter(i=>(status==='all'||i.status===status)&&(fileStatus==='all'||i.fileStatus===fileStatus)&&(sourceStatus==='all'||i.sourceStatus===sourceStatus)&&(kind==='all'||i.issues.some(v=>v.kind===kind||v.type===kind))),pages=Math.max(1,Math.ceil(matches.length/20)),current=Math.min(page,pages);
   return {token:view==='results'?this.job?.id:this.scanToken,revision:(this.scanRevision||0)+(this.queue.taskRows?.revision||0),items:matches.slice((current-1)*20,current*20),total:matches.length,page:current,pages,counts,repairable:matches.filter(repairable).length,selectable:matches.filter(i=>i.status!=='processing').length};
  }
  selection(input,{verify=false}={}){
@@ -158,11 +160,12 @@ export class DefectRepair{
   if(input?.view!=='results'){this.refreshProblemJournal();return this.registry.resolveSelection(input,{verify});}
   if(!input||input.token!==(input.view==='results'?this.job?.id:this.scanToken)||input.all!==true||!Array.isArray(input.exclude)||input.exclude.some(id=>!safeId(id)))throw Error('检查结果已更新，请重新选择');
   this.page({...input,page:1});const omit=new Set(input.exclude);
-  return this.rows(input.view||'problems').filter(row=>(input.status==='all'||!input.status||row.status===input.status)&&(input.kind==='all'||!input.kind||row.issues.some(i=>i.kind===input.kind||i.type===input.kind))&&!omit.has(row.id)&&(verify?row.status!=='processing':repairable(row))).map(i=>i.id);
+  return this.rows(input.view||'problems').filter(row=>(input.status==='all'||!input.status||row.status===input.status)&&(input.fileStatus==='all'||!input.fileStatus||row.fileStatus===input.fileStatus)&&(input.sourceStatus==='all'||!input.sourceStatus||row.sourceStatus===input.sourceStatus)&&(input.kind==='all'||!input.kind||row.issues.some(i=>i.kind===input.kind||i.type===input.kind))&&!omit.has(row.id)&&(verify?row.status!=='processing':repairable(row))).map(i=>i.id);
  }
+ jobItem(id,indexed){const saved=this.registry.get(id),previous=indexed.get(id);return {id,name:saved?.name||previous?.name||this.store.lightViews?.bases.get(id)?.name||id,issues:saved?.issues||previous?.issues||[],fileStatus:saved?.fileStatus||previous?.fileStatus||'pending',state:'waiting',message:''};}
  startVerification(input){
   if(this.running||this.scanState?.running)throw Error('已有检查或补齐任务正在进行');const ids=this.selection(input,{verify:true});if(!ids.length||ids.length>100000||ids.some(id=>!safeId(id)))throw Error('请选择要核验的作品');
-  const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),kind:'verify',scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在批量核验原作品状态',items:this.sort(ids.map(id=>({id,name:indexed.get(id)?.name||this.store.lightViews?.bases.get(id)?.name||id,issues:indexed.get(id)?.issues||[],state:'waiting',message:''})))};
+  const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),kind:'verify',scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在批量核验原作品状态',items:this.sort(ids.map(id=>this.jobItem(id,indexed)))};
   return this.runVerification();
  }
  runVerification(){
@@ -175,7 +178,7 @@ export class DefectRepair{
   if(this.running)throw new Error('已有补齐任务正在运行');
   if(resume&&this.job?.kind==='verify'){if(this.job.accountKey!==this.store.getSetting('browserAccountKey'))throw Error('账号已变化，无法继续核验');return this.runVerification();}
   if(resume){if(!this.job||this.job.accountKey!==this.store.getSetting('browserAccountKey'))throw new Error('没有可继续的同账号补齐任务');for(const item of this.job.items){const result=this.result(item);Object.assign(item,{state:['done','skipped'].includes(result.state)?result.state:'waiting',message:result.message,queueFiles:false,downloadResult:null});}}
-  else {ids=this.selection(ids);if(!ids.length||ids.length>100000||ids.some(id=>!safeId(id)))throw new Error('请选择有效的问题作品');const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在准备定向补齐',items:ids.map(id=>({id,name:indexed.get(id)?.name||this.store.lightViews?.bases.get(id)?.name||id,issues:indexed.get(id)?.issues||[],state:'waiting',message:''}))};}
+  else {ids=this.selection(ids);if(!ids.length||ids.length>100000||ids.some(id=>!safeId(id)))throw new Error('请选择有效的问题作品');const indexed=new Map(this.scanItems.map(i=>[i.id,i]));this.job={id:randomUUID(),scanToken:this.scanToken,accountKey:this.store.getSetting('browserAccountKey'),phase:'running',message:'正在准备定向补齐',items:ids.map(id=>this.jobItem(id,indexed))};}
   this.indexJob();this.controller=new AbortController();this.running=true;this.persistAll=true;this.currentIndex=0;this.job.phase='running';this.emit();
   this.promise=this.runForeground(()=>this.execute(this.controller.signal)).then(()=>{const planned=this.job.items.filter(i=>i.queueFiles);if(this.job.phase==='done'&&this.backup.status.writable){const groups=new Map();for(const item of planned){const options=item.downloadOptions||{source:'douyin',coverOnly:false},key=JSON.stringify(options);if(!groups.has(key))groups.set(key,{options,ids:[]});groups.get(key).ids.push(item.id);}for(const group of groups.values())this.queue.enqueue(group.ids,group.options);}else for(const item of planned){item.state='waiting';item.queueFiles=false;item.message='文件补齐尚未启动，恢复连接后可继续';this.job.phase='paused';this.persistAll=true;}}).catch(error=>{this.job.phase='paused';this.job.message=error.message;}).finally(()=>{this.running=false;this.controller=null;for(const item of this.job.items)if(item.state==='running')item.state='waiting';this.persistAll=true;this.emit();});
   return this.state();
