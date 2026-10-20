@@ -42,11 +42,12 @@ export class DefectRepair{
  refreshProblemIds(ids,filesById,checkedAt=new Date().toISOString()){
   if(this.closed||this.store.db.depth)return;
   const patches=[];for(const id of new Set(ids)){
-   const work=this.store.work(id),old=this.registry.get(id);if(!this.hasProblemContext(id,work)){if(old)patches.push({id,file:{status:'complete',issues:[]},source:{state:'unchecked'},task:{state:'complete'},checkedAt});continue;}
+   const work=this.store.work(id),old=this.registry.get(id);if(!this.hasProblemContext(id,work)){if(old)patches.push({id,file:{status:'complete',issues:[]},source:{state:'unchecked'},task:{state:'complete'},repair:{state:'complete'},checkedAt});continue;}
    const item=this.inspect(id,work,filesById?.get(id)||this.cachedFiles(id)),task=this.queue.taskRows?.byId.get(id)||this.queue.jobs.find(j=>j.id===id),issues=(item?.issues||[]).filter(i=>i.kind!=='source'&&i.kind!=='download');
    if(!item&&!old)continue;
    patches.push({id,name:work.name,author:work.author?.nickname,...this.problemRank(id),file:{status:issues.length?(task?.state==='failed'?'downloadFailed':issues.every(i=>['blocked','checking'].includes(i.kind))?'checking':'pending'):'complete',issues},source:{state:sourceState(work),reason:work.sourceStatus?.reason,checkedAt:work.sourceStatus?.checkedAt||'1970-01-01T00:00:00.000Z'},task:task?{state:task.state,message:task.message}:old?.facts.task?.state==='failed'?{state:'complete'}:undefined,checkedAt});
   }
+  for(const patch of patches)if(patch.file?.issues?.length===0)patch.repair={state:'complete'};
   if(patches.length)this.registry.patchMany(patches,{authoritative:true});
  }
  refreshProblemJournal(limit=200){
@@ -57,7 +58,7 @@ export class DefectRepair{
  }
  refreshSourceFacts(ids){
   if(this.closed||this.store.db.depth)return;const patches=[];
-  for(const id of new Set(ids)){const work=this.store.work(id),old=this.registry.get(id);if(!this.hasProblemContext(id,work)){if(old)patches.push({id,file:{status:'complete',issues:[]},source:{state:'unchecked'},task:{state:'complete'}});continue;}const state=sourceState(work);if(!old&&!['unavailable','unknown'].includes(state))continue;patches.push({id,name:work.name,author:work.author?.nickname,...this.problemRank(id,work),source:{state,reason:work.sourceStatus?.reason,checkedAt:work.sourceStatus?.checkedAt||'1970-01-01T00:00:00.000Z'}});}
+  for(const id of new Set(ids)){const work=this.store.work(id),old=this.registry.get(id);if(!this.hasProblemContext(id,work)){if(old)patches.push({id,file:{status:'complete',issues:[]},source:{state:'unchecked'},task:{state:'complete'},repair:{state:'complete'}});continue;}const state=sourceState(work);if(!old&&!['unavailable','unknown'].includes(state))continue;patches.push({id,name:work.name,author:work.author?.nickname,...this.problemRank(id,work),source:{state,reason:work.sourceStatus?.reason,checkedAt:work.sourceStatus?.checkedAt||'1970-01-01T00:00:00.000Z'}});}
   if(patches.length)this.registry.patchMany(patches,{authoritative:true});
  }
  async prepareOverview(){
@@ -231,7 +232,7 @@ export class DefectRepair{
     if(defect.issues.some(v=>v.kind==='download')){queued=true;messages.push(original?.coverOnly?'重试原高清图补齐任务':'重试原任务并确认文件完整性');}
     item.downloadOptions={source:original?.source==='nas'?'nas':'douyin',coverOnly:!!original?.coverOnly};item.queueFiles=queued;item.repairFailed=failures.length>0;item.state=failures.length?'failed':queued?'queued':'done';item.message=[...messages,...failures].join('；');
    }catch(error){if(signal.aborted||error.checkFailed){item.state='waiting';item.message=signal.aborted?'已停止，未完成部分可继续':error.message;if(error.checkFailed)this.job.message=error.message;stopped=true;break;}item.state='failed';item.message=error.message;}
-   finally{this.emit();}
+   finally{if(['failed','done','skipped','queued'].includes(item.state)){this.refreshProblemIds([item.id],filesById);if(this.hasProblemContext(item.id,this.store.work(item.id)))this.registry.patchMany([{id:item.id,repair:{state:item.state==='failed'?'failed':'complete',message:item.message,issues:item.state==='failed'?item.issues.filter(i=>!['source','download'].includes(i.kind)):[]}}],{authoritative:true});}this.emit();}
    if(Number(this.store.getSetting('accessHoldUntil')||0)>Date.now()||this.store.getSetting('authNeedsRefresh')){stopped=true;this.job.message='平台需要验证或已限制访问，剩余作品保留，请完成验证后继续';break;}
   }
   this.job.phase=stopped?'paused':'done';if(!stopped||signal.aborted)this.job.message=stopped?'补齐已停止，已完成内容保留':'本次补齐结束；仍失败的作品可以单独重试';

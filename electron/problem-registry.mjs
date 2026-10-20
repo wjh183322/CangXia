@@ -9,14 +9,15 @@ const reason=value=>text(String(value??'').replace(/https?:\/\/\S+/gi,'[资源�
 const time=value=>Date.parse(value)||0;
 const actionable=row=>!['complete','processing','checking','blocked'].includes(row.fileStatus)&&!['unavailable','unknown'].includes(row.sourceStatus)&&row.issues.some(i=>!['source','checking','blocked'].includes(i.kind));
 function project(facts){
- const file=facts.file||{status:'complete',issues:[]},source=facts.source||{state:'unchecked'},task=facts.task;
- let fileStatus=file.status||'complete';if(task?.state==='failed')fileStatus='downloadFailed';else if(['running','waiting'].includes(task?.state))fileStatus='processing';
+ const file=facts.file||{status:'complete',issues:[]},source=facts.source||{state:'unchecked'},task=facts.task,repair=facts.repair;
+ let fileStatus=repair?.state==='failed'?'repairFailed':file.status||'complete';if(task?.state==='failed')fileStatus='downloadFailed';else if(['running','waiting'].includes(task?.state))fileStatus='processing';
  const issues=(file.issues||[]).slice(0,16).map(i=>({kind:kinds.includes(i.kind)?i.kind:'files',...(i.type&&kinds.includes(i.type)?{type:i.type}:{}),label:text(i.label||'文件问题',80),reason:reason(i.reason)}));
  if(task?.state==='failed'&&!issues.some(i=>i.kind==='download'))issues.push({kind:'download',label:'下载失败',reason:reason(task.message||'上次下载未完成')});
+ if(repair?.state==='failed')for(const issue of repair.issues?.length?repair.issues:[{kind:'files',label:'补齐失败',reason:repair.message}])if(!issues.some(i=>i.kind===issue.kind&&i.reason===issue.reason))issues.push(issue);
  if(source.state==='unknown'||source.state==='unavailable')issues.push({kind:'source',label:source.state==='unknown'?'暂无法确认原作品状态':'原作品已失效',reason:reason(source.reason||'此前保存的原作品状态')});
  let status=fileStatus;if(source.state==='unavailable')status='unavailable';else if(source.state==='unknown'&&fileStatus!=='processing')status='sourceUnknown';else if(source.state==='available'&&!['complete','processing'].includes(status))status='sourceAvailable';
  const flags=[...new Set([...(file.kinds||[]),...issues.flatMap(i=>[i.kind,i.type].filter(Boolean))])];
- return {id:facts.id,name:text(facts.name||facts.id),author:text(facts.author||''),source:facts.sourceLabel||'保留的本地作品',rank:facts.rank??Number.MAX_SAFE_INTEGER,fileStatus,sourceStatus:source.state||'unchecked',status,issues,kinds:flags,message:reason(task?.message||''),facts,problem:issues.length>0};
+ return {id:facts.id,name:text(facts.name||facts.id),author:text(facts.author||''),source:facts.sourceLabel||'保留的本地作品',rank:facts.rank??Number.MAX_SAFE_INTEGER,fileStatus,sourceStatus:source.state||'unchecked',status,issues,kinds:flags,message:reason(task&&['failed','running','waiting'].includes(task.state)?task.message:repair?.state==='failed'?repair.message:task?.message||''),facts,problem:issues.length>0};
 }
 function options(input={}){
  const o={page:input.page??1,limit:input.limit??20,status:input.status??'all',fileStatus:input.fileStatus??'all',sourceStatus:input.sourceStatus??'all',kind:input.kind??'all'};
@@ -38,9 +39,9 @@ export class ProblemRegistry{
   this.db.exec('BEGIN IMMEDIATE');try{
    for(const p of patches){if(!safeId(p.id))throw Error('作品 ID 无效');const previous=read.get(p.id)?.body,old=previous?JSON.parse(previous):null,facts={...old?.facts,id:p.id};
     for(const key of ['name','author','sourceLabel'])if(p[key]!==undefined)facts[key]=text(p[key]);if(Number.isFinite(p.rank))facts.rank=p.rank;
-    for(const key of ['file','source','task'])if(p[key]){const incoming={...p[key]},oldFact=facts[key],checkedAt=incoming.checkedAt||p.checkedAt||new Date().toISOString();if(!authoritative&&time(oldFact?.checkedAt)>time(checkedAt))continue;if(key==='source'&&(!sourceStates.includes(incoming.state)||incoming.state==='all'))throw Error('原作品状态无效');if(key==='file'&&(!fileStates.includes(incoming.status)||incoming.status==='all'))throw Error('文件状态无效');
-     if(key==='file'){incoming.kinds=[...new Set((incoming.issues||[]).flatMap(i=>[i.kind,i.type].filter(v=>kinds.includes(v))))];incoming.issues=(incoming.issues||[]).slice(0,16).map(i=>({kind:i.kind,type:i.type,label:text(i.label,80),reason:reason(i.reason)}));}
-     if(key==='source')incoming.reason=reason(incoming.reason);if(key==='task')incoming.message=reason(incoming.message);facts[key]={...incoming,checkedAt};}
+    for(const key of ['file','source','task','repair'])if(p[key]){const incoming={...p[key]},oldFact=facts[key],checkedAt=incoming.checkedAt||p.checkedAt||new Date().toISOString();if(!authoritative&&time(oldFact?.checkedAt)>time(checkedAt))continue;if(key==='source'&&(!sourceStates.includes(incoming.state)||incoming.state==='all'))throw Error('原作品状态无效');if(key==='file'&&(!fileStates.includes(incoming.status)||incoming.status==='all'))throw Error('文件状态无效');
+     if(key==='file'||key==='repair'){incoming.kinds=[...new Set((incoming.issues||[]).flatMap(i=>[i.kind,i.type].filter(v=>kinds.includes(v))))];incoming.issues=(incoming.issues||[]).slice(0,16).map(i=>({kind:kinds.includes(i.kind)?i.kind:'files',type:i.type,label:text(i.label,80),reason:reason(i.reason)}));}
+     if(key==='source')incoming.reason=reason(incoming.reason);if(key==='task'||key==='repair')incoming.message=reason(incoming.message);facts[key]={...incoming,checkedAt};}
     const row=project(facts),body=JSON.stringify(row);if(body===previous)continue;put.run(p.id,row.rank,row.problem?1:0,row.fileStatus,row.sourceStatus,row.status,actionable(row)?1:0,body);clearKinds.run(p.id);if(row.problem)for(const kind of row.kinds)putKind.run(p.id,kind);if(!old||JSON.stringify({...row,facts:undefined})!==JSON.stringify({...old,facts:undefined}))changed=true;
    }
    if(changed)this.db.prepare("UPDATE problem_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'").run();this.db.exec('COMMIT');

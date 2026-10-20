@@ -10,6 +10,12 @@ import {exportRecords,hashes} from '../electron/backup-model.mjs';
 import {sha256} from '../shared/backup-protocol.mjs';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==','base64');
+test('cover repair failure persists in overview after another job and restart and clears on successful retry',async t=>{
+ const f=await setup(t);await f.manager.scan();f.backup.fetchCover=async()=>new Response('',{status:404});f.manager.start(['1']);await f.manager.wait();
+ assert.equal(f.manager.state().failed,1);let page=f.manager.page({fileStatus:'repairFailed'});assert.equal(page.total,1);assert.match(page.items[0].message,/404/);assert.equal(f.manager.page({fileStatus:'downloadFailed'}).total,0);
+ f.manager.start(['2']);await f.manager.wait();f.reopen();page=f.manager.page({fileStatus:'repairFailed'});assert.equal(page.total,1);assert.equal(page.items[0].id,'1');assert.match(page.items[0].message,/404/);
+ f.manager.refreshSourceFacts(['1']);assert.equal(f.manager.page({fileStatus:'repairFailed'}).total,1);f.backup.fetchCover=async()=>new Response(png,{headers:{'content-type':'image/png'}});f.manager.start(['1']);await f.manager.wait();assert.equal(f.manager.page({fileStatus:'repairFailed'}).total,0);
+});
 test('targeted repair uses the indexed browsing cache without refreshing already available work',async t=>{const f=await setup(t);const cache=await f.backup.cache.writeCover(png,'.png',{alias:'1'});f.backup.fetchCover=async()=>{throw Error('no network request expected');};f.manager.start(['1']);await f.manager.wait();assert.equal(f.manager.state().done,1);assert.equal(f.calls.length,0);assert.equal(f.queued.length,0);assert.deepEqual(fs.readFileSync(cache.file),png);assert.equal(f.store.work('1').backupCover,undefined);assert.equal(f.backup.status.pendingCovers,1);});
 
 test('persistent overview retains 204 unrelated unavailable works when 74 failures are verified and the manager restarts',async t=>{
