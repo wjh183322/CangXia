@@ -51,3 +51,5 @@
 | Windows app.asar | 2cf0d32db27c105ed594650927b8a238fa1e48a1f9483dee8ef6b62f4397c945 |
 
 真实遵义/重庆双电脑、真实 NAS 升级和用户回收站仍属安装后实机验收；以上均使用隔离数据库、独立 profile 和自有临时文件。不自动清缓存、不重置资料库、不部署真实容器。
+
+发布完成：[backup-v0.3.36](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.3.36)，不可变 tag 指向 f8ac3d8d75413c64cafa0c1bf7503c6eb56e7fa4。5 个资产已全部上传、非草稿预览发布；远端每项大小及 SHA256 与本机被测产物一致。原 0.3.35 及其 tag/资产保持不变。完整发布资产凭据见 releases/backup-v0.3.36-verification.json。

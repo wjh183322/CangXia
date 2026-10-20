@@ -162,7 +162,7 @@
 - [x] **Step 2: 运行红灯并完成遗漏。** `node --test tests/cross-device-deletion.test.mjs`；必须对真正缺失行为出现失败，修正只落在相应拥有任务，不能通过跳过场景通过。
 - [x] **Step 3: 整体验证。** `node --test --test-concurrency=2 tests/*.test.mjs`、`npm run test:ui`、`npm run test:backup-desktop`、`npm run test:backup-preview`、`npm run build`。构建 NAS 镜像与 Windows 包，执行现有包检查及独立 profile 安装启动；核对打包包含新增 shared/electron 模块及 SHA256。测试数据库升级失败恢复，不把重装/清库当迁移步骤。
 - [x] **Step 4: 完成配套版本说明。** 新 NAS 保留卷/库 ID，旧桌面只能本地用，需配套升级才能写；新桌面连旧 NAS 不展示可执行的新删除功能。上线前 capability 才开启。记录回滚必须使用升级前一致性库副本，不直接让旧服务打开 schema 4。
-- [ ] **Step 5: 提交和交付。** 显式暂存本任务文件，`git commit --quiet -m "release: ship paired scoped deletion and recovery support"`。发布 NAS 镜像/桌面安装包及说明；只发布构建产物，不自动部署真实 NAS，不替用户执行删除。实机两电脑验收与隔离集成测试结果分开报告。
+- [x] **Step 5: 提交和交付。** 显式暂存本任务文件，`git commit --quiet -m "release: ship paired scoped deletion and recovery support"`。发布 NAS 镜像/桌面安装包及说明；只发布构建产物，不自动部署真实 NAS，不替用户执行删除。实机两电脑验收与隔离集成测试结果分开报告。
 
 ## 自审与实施顺序
 

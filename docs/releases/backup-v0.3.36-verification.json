@@ -1,0 +1,40 @@
+{
+  "ok": true,
+  "tag": "backup-v0.3.36",
+  "commit": "f8ac3d8d75413c64cafa0c1bf7503c6eb56e7fa4",
+  "url": "https://github.com/wjh183322/CangXia/releases/tag/backup-v0.3.36",
+  "draft": false,
+  "prerelease": true,
+  "assets": [
+    {
+      "name": "CangXia-Backup-0.3.36-Setup-x64.exe",
+      "size": 144906699,
+      "digest": "sha256:44300ef6d7e2c8d02d6f34d62721a5247501500ba4e7d6943c5d68aa42bc100a"
+    },
+    {
+      "name": "CangXia-Backup-0.3.36-Windows-x64.exe",
+      "size": 144750345,
+      "digest": "sha256:34b9133af7b90b1d435238dd48a069c1b6dd78bb92443a18a406c1086dae6982"
+    },
+    {
+      "name": "CangXia-Backup-Server-0.2.4.tar",
+      "size": 181548544,
+      "digest": "sha256:7cc880ad49a0bd02b7e4f12ff91cd406cca352c676406f2fa8bbe2a022b13572"
+    },
+    {
+      "name": "SHA256-desktop.txt",
+      "size": 206,
+      "digest": "sha256:e3dec8e0ac7f5e4820073a10259e734ee78ce889bc6b580cdd8a8b16cb87a954"
+    },
+    {
+      "name": "SHA256-server.txt",
+      "size": 98,
+      "digest": "sha256:76c3ca382c146bb5d57d5154a76cdb15ac50a2df26ad23f69f16063aba89d5b8"
+    }
+  ],
+  "nodeTests": 598,
+  "ui": 165,
+  "desktop": 76,
+  "preview": 31,
+  "linuxCI": 39511419516
+}
