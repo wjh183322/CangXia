@@ -27,6 +27,12 @@ for(const variant of ['changed-etag','wrong-range','ignored-range','expired-rang
 });
 test('weak ETag does not authorize resume',async t=>{const dir=fixture(t);await interrupted(dir,'W/"v1"');assert.ok(!fs.existsSync(path.join(dir,'视频.mp4.part')));assert.ok(!fs.existsSync(path.join(dir,'视频.resume.json')));});
 test('short transfer never becomes a completed file',async t=>{const dir=fixture(t);await assert.rejects(transfer(dir,async()=>new Response(bytes.subarray(0,10),{headers:headers()})),/未下载完整/);assert.ok(!fs.existsSync(path.join(dir,'视频.mp4')));assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'视频.resume.json'))).offset,10);});
+
+test('protected publication never overwrites a file created during transfer',async t=>{
+ const dir=fixture(t),file=path.join(dir,'视频.mp4');
+ await assert.rejects(transfer(dir,async()=>new Response(bytes,{headers:headers()}),{preserveExisting:true,progress:()=>fs.writeFileSync(file,'concurrent existing file')}),e=>e.code==='EEXIST');
+ assert.equal(fs.readFileSync(file,'utf8'),'concurrent existing file');
+});
 test('changed signed URL is conservatively downloaded whole',async t=>{const dir=fixture(t);await interrupted(dir);let range;const result=await transfer(dir,async(_u,o)=>{range=o.headers.Range;return new Response(bytes,{headers:headers()});},{url:url+'&new=1'});assert.equal(range,undefined);assert.deepEqual(fs.readFileSync(result.file),bytes);});
 test('rate limit is not retried as a whole-file request',async t=>{const dir=fixture(t);await interrupted(dir);let calls=0;await assert.rejects(transfer(dir,async()=>{calls++;return new Response('',{status:429});}),e=>e.httpStatus===429);assert.equal(calls,1);assert.ok(fs.existsSync(path.join(dir,'视频.resume.json')));});
 test('redirect destination change cannot reuse a same-looking ETag from another resource',async t=>{

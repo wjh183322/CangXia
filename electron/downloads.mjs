@@ -8,7 +8,7 @@ import { inspectWorkFiles } from './repair-check.mjs';
 import {setImmediate as yieldToUI} from 'node:timers/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {sourceError} from '../shared/source-state.mjs';
-const storageFailure=e=>['ENOSPC','EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EISDIR','EBUSY','EIO','EMFILE'].includes(e?.code)||String(e?.code||'').startsWith('SQLITE');
+const storageFailure=e=>['ENOSPC','EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EISDIR','EBUSY','EIO','EMFILE','EEXIST'].includes(e?.code)||String(e?.code||'').startsWith('SQLITE');
 const sourceFailure=e=>!storageFailure(e)&&(e?.sourceUnavailable||e?.refreshable||e?.httpStatus>=400||e?.code==='AUTH_REQUIRED'||['ECONNRESET','ETIMEDOUT','ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError');
 const transient=e=>!storageFailure(e)&&([408,425,500,502,503,504].includes(e?.httpStatus)||['ECONNRESET','ETIMEDOUT','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError'||/\bnet::ERR_(CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_TIMED_OUT|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|HTTP2_PROTOCOL_ERROR)\b/.test(String(e?.message)+' '+String(e?.cause?.message)));
 
@@ -21,6 +21,10 @@ function extension(contentType, kind) {
   const ext = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/avif': '.avif' }[t];
   if (!ext) throw Object.assign(new Error('没有取得静态原图，已保留已有文件'),{sourceUnavailable:true});
   return ext;
+}
+function availableName(dir,name,extensions){
+ for(let n=0;n<1000;n++){const candidate=n?name+'-补存'+(n===1?'':'-'+n):name;if(extensions.every(ext=>!fs.lstatSync(requireInside(dir,path.join(dir,candidate+ext)),{throwIfNoEntry:false})))return candidate;}
+ throw Object.assign(Error('同名文件过多，已有文件保留，请检查作品目录'),{code:'EEXIST'});
 }
 export class DownloadQueue {
   constructor(store, collector, fetchMedia, notify) {
@@ -205,13 +209,14 @@ export class DownloadQueue {
   }
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});
+    target={...target,name:availableName(dir,target.name,target.kind==='video'?['.mp4']:['.jpg','.png','.webp','.avif'])};
     let lastError;
     let retries=0;
     for (const url of target.urls.slice(0, 9)) {
       if (!isMediaURL(url)) continue;
       for(;;){
       try {
-        let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,fetchMedia:async(...args)=>{try{return await this.fetchMedia(...args);}catch(e){if(!storageFailure(e))e.sourceUnavailable=true;throw e;}},extension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
+        let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,preserveExisting:true,fetchMedia:async(...args)=>{try{return await this.fetchMedia(...args);}catch(e){if(!storageFailure(e))e.sourceUnavailable=true;throw e;}},extension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
         const dimensions=target.kind==='image'?imageDimensions(fs.readFileSync(file)):{};
         return { key: target.key, kind: target.kind, file: path.basename(file), size,sha256,resumedBytes,...dimensions };
       } catch (e) {
@@ -240,7 +245,7 @@ export class DownloadQueue {
       if(!candidates.length)throw lastError||new Error('没有可用静态单图');
       const sorted=[...candidates].sort((a,b)=>(b.width||0)*(b.height||0)-(a.width||0)*(a.height||0));const best=sorted[0];
       const comparisons=candidates.map(({source,width,height,size,sha256})=>({source,width,height,size,sha256}));
-      const final=path.join(dir,'单图'+path.extname(best.file));fs.renameSync(path.join(dir,best.file),final);
+      const ext=path.extname(best.file),final=path.join(dir,availableName(dir,'单图',[ext])+ext);await fs.promises.copyFile(path.join(dir,best.file),final,fs.constants.COPYFILE_EXCL);
       return {...best,file:path.basename(final),comparisons};
     }finally{for(const c of candidates){const file=requireInside(dir,path.join(dir,c.file));if(fs.existsSync(file))fs.unlinkSync(file);}}
   }

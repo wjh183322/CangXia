@@ -16,7 +16,7 @@ async function readCheckpoint(dir,name,url,signal,checkpoints){
   return {...value,hash,partial};
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{}}){
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
  let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
@@ -61,7 +61,10 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
   signal?.throwIfAborted();if(!offset||(total!==null&&offset!==total))throw new Error('文件未下载完整，已保留可续传进度');
   await handle.sync();await handle.close();handle=null;
   const sha256=hash.copy().digest('hex');if(fs.statSync(partial).size!==offset||(await hashPrefix(partial,offset,signal)).digest('hex')!==sha256)throw new Error('文件校验未通过，未标记为完整');
-  signal?.throwIfAborted();ordinary(file);await fs.promises.rename(partial,file);await clearCheckpoint();finished=true;
+  signal?.throwIfAborted();ordinary(file);
+  if(preserveExisting){try{await fs.promises.link(partial,file);}catch(e){if(!['EPERM','ENOTSUP','EINVAL','EXDEV'].includes(e.code))throw e;await fs.promises.copyFile(partial,file,fs.constants.COPYFILE_EXCL);}await fs.promises.unlink(partial);}
+  else await fs.promises.rename(partial,file);
+  await clearCheckpoint();finished=true;
   return {file,size:offset,sha256,resumedBytes:saved?.offset||0};
  }catch(e){if(handle)try{await checkpoint();}catch{await clearCheckpoint().catch(()=>{});}throw e;}
  finally{

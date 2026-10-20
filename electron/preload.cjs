@@ -11,6 +11,7 @@ methods.push('previewDownloads');
 methods.push('cancelRepairs','repairPage');
 methods.push('audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
 methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');
+methods.push('exportWorkDiagnostic');
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);
