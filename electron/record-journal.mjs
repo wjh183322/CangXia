@@ -10,3 +10,4 @@ export function initializeRecordJournal(store){
   db.run(`CREATE TRIGGER IF NOT EXISTS journal_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}${when} BEGIN ${old}INSERT INTO backup_changes(kind,key,work_id) VALUES('${kind}',${expression},${work?`${prefix}.${work}`:'NULL'}); END;`);
  }
 }
+export function initializeAudioScopeJournal(store){for(const [event,prefix]of [['INSERT','NEW'],['UPDATE','NEW'],['DELETE','OLD']])store.db.run(`CREATE TRIGGER IF NOT EXISTS journal_audio_scope_${event.toLowerCase()} AFTER ${event} ON audio_refs BEGIN ${event==='UPDATE'?"INSERT INTO backup_changes(kind,key,work_id) VALUES('local_audio',OLD.work,OLD.work);":''}INSERT INTO backup_changes(kind,key,work_id) VALUES('local_audio',${prefix}.work,${prefix}.work); END;`);}

@@ -23,7 +23,7 @@ parentPort.on('message',async message=>{
  if(message.ack!==undefined)return;if(message.cancel!==undefined){cancelled.add(message.cancel);return;}
  try{
   if(file!==message.file){db?.close();file=message.file;db=new DatabaseSync(file,{readOnly:true,timeout:5000});}
-  const root=JSON.parse(db.prepare('SELECT value FROM settings WHERE key=?').get('root')?.value||'null');if(!root)throw Error('尚未设置保存目录');if(!watch)watch=new FileWatchIndex(db,ids=>parentPort.postMessage({event:'files-changed',ids}),available=>parentPort.postMessage({event:'watch-state',available}));watch.start(root);
+  const root=JSON.parse(db.prepare('SELECT value FROM settings WHERE key=?').get('root')?.value||'null');if(!root)throw Error('尚未设置保存目录');if(message.watch!==false){if(!watch)watch=new FileWatchIndex(db,ids=>parentPort.postMessage({event:'files-changed',ids}),available=>parentPort.postMessage({event:'watch-state',available}));watch.start(root);}
   let sequence=0;for(let start=0;start<message.ids.length&&!cancelled.has(message.id);start+=50){const parents=new Map(),results=[];for(const id of message.ids.slice(start,start+50)){if(cancelled.has(message.id))break;const result=await inspect(id,root,parents,message.id);if(result)results.push(result);}if(results.length)await packet(message,results,++sequence);}
   parentPort.postMessage({id:message.id,done:true,cancelled:cancelled.delete(message.id)});
  }catch(error){parentPort.postMessage({id:message.id,error:error.message});}

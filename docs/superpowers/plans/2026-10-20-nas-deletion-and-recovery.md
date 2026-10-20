@@ -50,11 +50,11 @@
 
 **Interfaces:** `normalizeScope(input):Scope`、`scopeKey(scope):string`、`validateScopeCommand(input):ScopeCommand`；服务端 scope_state 最新状态表、scope_receipts 幂等回执表、restore_grants 临时授权表。主键 (workId,kind,sourceId)，revision 索引；继续使用库 meta.libraryId。所有有副作用路由统一校验协议 3，能力声明 `scopedDeletion:1`。
 
-- [ ] **Step 1: 写失败测试。** `scopes reject cross-author and malformed ranges` 断言 author ID 校验及 files 空 source；`schema migration preserves library and records` 断言旧库 ID、数量、对象哈希不变且生成一致性备份；`old writer cannot commit or upload` 覆盖 lease、commit、upload、audio 写入，断言统一升级错误；协议 3 正常写入。`failed migration leaves old database usable` 断言未开始新协议写入、未清对象。
-- [ ] **Step 2: 运行红灯。** `node --test tests/backup-scopes.test.mjs tests/backup.test.mjs`；预期新契约/门槛断言失败。
-- [ ] **Step 3: 实现契约及迁移。** 迁移前沿用 VACUUM INTO＋quick_check，一次事务建表；历史缺失记录不产生 tombstone。旧自动补传禁止标记迁移为相应 files 屏障，来源未知则标旧状态，不编造操作者。认证设备信息用于新事件，不接受请求任意姓名。capability 仅在本计划集成完成后开启。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2；已存在高版本库拒绝降级打开，数据与对象均保留。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: add scoped deletion protocol and migration barrier"`。
+- [x] **Step 1: 写失败测试。** `scopes reject cross-author and malformed ranges` 断言 author ID 校验及 files 空 source；`schema migration preserves library and records` 断言旧库 ID、数量、对象哈希不变且生成一致性备份；`old writer cannot commit or upload` 覆盖 lease、commit、upload、audio 写入，断言统一升级错误；协议 3 正常写入。`failed migration leaves old database usable` 断言未开始新协议写入、未清对象。
+- [x] **Step 2: 运行红灯。** `node --test tests/backup-scopes.test.mjs tests/backup.test.mjs`；预期新契约/门槛断言失败。
+- [x] **Step 3: 实现契约及迁移。** 迁移前沿用 VACUUM INTO＋quick_check，一次事务建表；历史缺失记录不产生 tombstone。旧自动补传禁止标记迁移为相应 files 屏障，来源未知则标旧状态，不编造操作者。认证设备信息用于新事件，不接受请求任意姓名。capability 仅在本计划集成完成后开启。
+- [x] **Step 4: 运行绿灯。** 同 Step 2；已存在高版本库拒绝降级打开，数据与对象均保留。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: add scoped deletion protocol and migration barrier"`。
 
 ### Task 2: NAS 范围状态、删除及恢复授权端点
 
@@ -62,11 +62,11 @@
 
 **Interfaces:** `ScopeState(db)`；`statePage({after=0,limit=100}):{items:ScopeVersion[],next:number,head:number,hasMore:boolean}`；`delete(command,device):ScopeReceipt`；`prepareRestore(command,device):{grantId:string,expiresAt:string}`；`finishRestore(grantId,records,device):ScopeReceipt`。HTTP `/v1/scopes/state` GET、`/v1/scopes/delete` POST、`/v1/scopes/restore/prepare` POST、`/v1/scopes/restore/commit` POST、`/v1/scopes/receipt?operationId=...` GET。
 
-- [ ] **Step 1: 写失败测试。** `delete is explicit scoped and idempotent` 断言账号删除不动作者，文件不动来源；相同 operation 回执一致、内容不同拒绝。`restore CAS rejects stale generation` 断言新删除后旧 grant 不能恢复。`state paging survives repeated updates of the same scope` 在分页中更新同 scope，断言最终游标追上 head 且最新状态不遗漏。`missing records do not imply deletion` 断言普通空列表不创建事件。
-- [ ] **Step 2: 运行红灯。** `node --test tests/backup-scope-state.test.mjs`；预期模块或接口缺失。
-- [ ] **Step 3: 实现状态事务。** 每批校验全部 expectedGeneration 后同事务写状态、对应来源/文件引用、commit revision 和回执；不逐项半提交。多批可停，已有回执不回滚。恢复 grant 绑定库、认证设备、范围与 expectedGeneration，30 分钟过期；提交再 CAS，过期可重新准备。状态 feed 按最新 revision 扫描，客户端追到 head 后，写入仍由 CAS 防竞态；删除/恢复均向旧 changes 路径发出必要索引变化。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，并模拟提交成功响应丢失后按 operationId 查询，无第二次删除。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: persist versioned deletion receipts and restore grants"`。
+- [x] **Step 1: 写失败测试。** `delete is explicit scoped and idempotent` 断言账号删除不动作者，文件不动来源；相同 operation 回执一致、内容不同拒绝。`restore CAS rejects stale generation` 断言新删除后旧 grant 不能恢复。`state paging survives repeated updates of the same scope` 在分页中更新同 scope，断言最终游标追上 head 且最新状态不遗漏。`missing records do not imply deletion` 断言普通空列表不创建事件。
+- [x] **Step 2: 运行红灯。** `node --test tests/backup-scope-state.test.mjs`；预期模块或接口缺失。
+- [x] **Step 3: 实现状态事务。** 每批校验全部 expectedGeneration 后同事务写状态、对应来源/文件引用、commit revision 和回执；不逐项半提交。多批可停，已有回执不回滚。恢复 grant 绑定库、认证设备、范围与 expectedGeneration，30 分钟过期；提交再 CAS，过期可重新准备。状态 feed 按最新 revision 扫描，客户端追到 head 后，写入仍由 CAS 防竞态；删除/恢复均向旧 changes 路径发出必要索引变化。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，并模拟提交成功响应丢失后按 operationId 查询，无第二次删除。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: persist versioned deletion receipts and restore grants"`。
 
 ### Task 3: 所有上传通路执行范围屏障和共享对象保护
 
@@ -74,11 +74,11 @@
 
 **Interfaces:** `ScopeState.assertWrite({deviceId,proofs,grantId,changes}):void` 推导每个变化实际触及范围，proof 不能替代明确恢复 grant。普通协议提交增加 `scopeProofs:Array<{scope,generation}>`；媒体上传会话绑定同样 proof，提交时再次检查。下载对象只在最终有效引用提交后进入目录。
 
-- [ ] **Step 1: 写失败测试。** 删除后分别以普通作品更新、members、author_members、downloads、backupCover、共享配乐上传尝试复活，断言均拒绝被删范围，未删范围可继续写。`restore records never restores files`、反向同样测试。`delete racing an in-flight upload stays deleted` 断言旧上传无法 commit。`shared object remains while another work or active restore references it` 断言仅释放目标引用、未删物理共享对象。
-- [ ] **Step 2: 运行红灯。** `node --test tests/backup-scope-barrier.test.mjs tests/backup-scope-state.test.mjs`，预期旧上传绕过屏障。
-- [ ] **Step 3: 实现中央校验。** 不信任客户端声明 touched scopes，按实际 changed rows/媒体关联推导。普通元信息更新不能创建被删 membership/文件引用；files 删除包括永久配乐引用，记录预览可独立保留但不能保留已选删的原媒体。旧上传和 grant 临时对象带保护引用，过期且无其他引用/读取使用才回收；回执事务不得先物理删除对象再写状态。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，另跑 `node --test tests/backup.test.mjs tests/backup-author.test.mjs`；正常上传、预览与作者备份不回归。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "fix: enforce scoped barriers across every backup write path"`。
+- [x] **Step 1: 写失败测试。** 删除后分别以普通作品更新、members、author_members、downloads、backupCover、共享配乐上传尝试复活，断言均拒绝被删范围，未删范围可继续写。`restore records never restores files`、反向同样测试。`delete racing an in-flight upload stays deleted` 断言旧上传无法 commit。`shared object remains while another work or active restore references it` 断言仅释放目标引用、未删物理共享对象。
+- [x] **Step 2: 运行红灯。** `node --test tests/backup-scope-barrier.test.mjs tests/backup-scope-state.test.mjs`，预期旧上传绕过屏障。
+- [x] **Step 3: 实现中央校验。** 不信任客户端声明 touched scopes，按实际 changed rows/媒体关联推导。普通元信息更新不能创建被删 membership/文件引用；files 删除包括永久配乐引用，记录预览可独立保留但不能保留已选删的原媒体。旧上传和 grant 临时对象带保护引用，过期且无其他引用/读取使用才回收；回执事务不得先物理删除对象再写状态。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，另跑 `node --test tests/backup.test.mjs tests/backup-author.test.mjs`；正常上传、预览与作者备份不回归。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "fix: enforce scoped barriers across every backup write path"`。
 
 ### Task 4: 设备私有移除与本机有效记录投影
 
@@ -86,11 +86,11 @@
 
 **Interfaces:** `DeviceScopeState(profile,libraryId)` 私有 SQLite，持有 local_masks、pending_deletions、held_records、local_operations；`hide(scopes):void`、`unhide(scopes):void`、`isHidden(scope):boolean`、`hold(version,localSnapshot):void`、`heldRecords(scope):object[]`。快照只存受影响来源关联及必要作品元信息，不存媒体正文/密钥。
 
-- [ ] **Step 1: 写失败测试。** `local hide leaves NAS export unchanged` 断言本机不可见但 exportRecords/hashes 不生成 NAS 删除；账户/具体作者隔离。`ordinary sync does not unhide` 断言重启同步后 mask 留存；明确恢复/重新读取该来源才清除。`held remote deletion preserves B local records` 断言本机仍可查详情、普通 NAS 导出不回传 held 范围。旧 readHidden 迁移不凭空恢复历史隐藏。
-- [ ] **Step 2: 运行红灯。** `node --test tests/device-scope-state.test.mjs tests/local-removal.test.mjs`，预期旧共享隐藏行为失败。
-- [ ] **Step 3: 实现两层投影。** NAS 基准记录与设备有效列表分开；私有 mask 不进入 TABLES/备份日志。B pending 范围在应用 NAS 删除前捕获必要关联，既能本机展示又从导出中排除；同作品其他来源不受影响。显式重读只清当前来源 mask，不解除 NAS deletion hold。新库 ID 使用独立状态，不沿用旧库游标；没有完整旧语义的项保守保留，不生成新 NAS 删除。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/backup-analysis.test.mjs tests/backup-author.test.mjs`，证明增量导出未携带设备私有字段。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: separate device-only removal from shared backup records"`。
+- [x] **Step 1: 写失败测试。** `local hide leaves NAS export unchanged` 断言本机不可见但 exportRecords/hashes 不生成 NAS 删除；账户/具体作者隔离。`ordinary sync does not unhide` 断言重启同步后 mask 留存；明确恢复/重新读取该来源才清除。`held remote deletion preserves B local records` 断言本机仍可查详情、普通 NAS 导出不回传 held 范围。旧 readHidden 迁移不凭空恢复历史隐藏。
+- [x] **Step 2: 运行红灯。** `node --test tests/device-scope-state.test.mjs tests/local-removal.test.mjs`，预期旧共享隐藏行为失败。
+- [x] **Step 3: 实现两层投影。** NAS 基准记录与设备有效列表分开；私有 mask 不进入 TABLES/备份日志。B pending 范围在应用 NAS 删除前捕获必要关联，既能本机展示又从导出中排除；同作品其他来源不受影响。显式重读只清当前来源 mask，不解除 NAS deletion hold。新库 ID 使用独立状态，不沿用旧库游标；没有完整旧语义的项保守保留，不生成新 NAS 删除。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/backup-analysis.test.mjs tests/backup-author.test.mjs`，证明增量导出未携带设备私有字段。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: separate device-only removal from shared backup records"`。
 
 ### Task 5: A 端删除协调、回执与可恢复本机步骤
 
@@ -98,11 +98,11 @@
 
 **Interfaces:** `DeletionCoordinator({store,backup,deviceScopes,trash})`；`prepare({ids,source,records,files,target:'local'|'local-nas'}):Promise<{token,summary}>`；`confirm(token):Promise<operation>`、`stop():void`、`retry(operationId):Promise<operation>`。summary 明确实际来源、共用文件影响、NAS/本机各步骤及失败数；token 固定 ID 和目录归属快照。
 
-- [ ] **Step 1: 写失败测试。** `NAS failure never degrades to local deletion`、`lost receipt resumes by query without duplicate delete`、`restart never resumes trash automatically`。`path or ownership change aborts local step` 断言越界/链接/新路径保留。`trash failure remains retryable` 断言不报本机成功、不重复 NAS 删除。离线 local 模式仍可完成，local-nas 明确要求联网。
-- [ ] **Step 2: 运行红灯。** `node --test tests/deletion-coordinator.test.mjs tests/nas-removal.test.mjs`，预期双端操作与自动重传规则不符。
-- [ ] **Step 3: 实现持久状态机。** confirmedIntent→NAS receipt→local step→done；本机模式跳过 NAS。确认前暂停目标下载/整理/上传并等待在途任务退出，再复核原绝对路径及所有权。记录移除使用 Task 4，文件使用既有回收站流程；路径变化时重新准备，不自动跟随新路径。批次 100，支持停止；已提交 NAS 批次保持屏障，本机未执行部分需用户重试。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/local-removal.test.mjs`；真实 Windows 回收站只用测试自有文件，验证目标消失及回收站结果，不只看命令退出码。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: coordinate explicit local and NAS deletion receipts"`。
+- [x] **Step 1: 写失败测试。** `NAS failure never degrades to local deletion`、`lost receipt resumes by query without duplicate delete`、`restart never resumes trash automatically`。`path or ownership change aborts local step` 断言越界/链接/新路径保留。`trash failure remains retryable` 断言不报本机成功、不重复 NAS 删除。离线 local 模式仍可完成，local-nas 明确要求联网。
+- [x] **Step 2: 运行红灯。** `node --test tests/deletion-coordinator.test.mjs tests/nas-removal.test.mjs`，预期双端操作与自动重传规则不符。
+- [x] **Step 3: 实现持久状态机。** confirmedIntent→NAS receipt→local step→done；本机模式跳过 NAS。确认前暂停目标下载/整理/上传并等待在途任务退出，再复核原绝对路径及所有权。记录移除使用 Task 4，文件使用既有回收站流程；路径变化时重新准备，不自动跟随新路径。批次 100，支持停止；已提交 NAS 批次保持屏障，本机未执行部分需用户重试。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/local-removal.test.mjs`；真实 Windows 回收站只用测试自有文件，验证目标消失及回收站结果，不只看命令退出码。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: coordinate explicit local and NAS deletion receipts"`。
 
 ### Task 6: B 端同步前核对、待处理与三种决策
 
@@ -110,11 +110,11 @@
 
 **Interfaces:** `DeletionConflicts({store,backup,deviceScopes})`；`refresh():Promise<{pending:number,cursor:number}>`、`page(options):object`、`resolve({selection,action:'restore'|'remove-local'|'later'}):Promise<object>`。先处理范围 feed，再 applyChanges/分析上传；`BackupClient.scopeProofs(scopes):Promise<object[]>` 是所有上传唯一取证入口。
 
-- [ ] **Step 1: 写失败测试。** A 删账号来源，B 仍有账号＋作者：refresh 后只 hold 账号，本机两来源仍可用；稍后处理/重启不上传、不删除。B restore 只恢复所选且实际拥有的范围；remove-local 不再向 NAS 删除，回收失败不清 pending。`offline or changed library is never a deletion`、`latest restored state supersedes stale delete`、`new delete invalidates an old pending decision`。候选 300 个＋库 30000 条时只检查候选，不扫其他文件。
-- [ ] **Step 2: 运行红灯。** `node --test tests/deletion-conflicts.test.mjs tests/backup-analysis.test.mjs`。
-- [ ] **Step 3: 实现核对与恢复。** feed 每页≤100，持久 cursor 与已处理状态；应用远端变更前保存持有快照。索引先筛候选，仅候选状态未知时调用后台文件检查。pending 只阻止涉及范围；其他资料继续。恢复联网取最新 generation/grant，并保护所选现有资产，不从抖音补齐本次恢复；丢失本机文件不得假报上传成功。NAS 已重新恢复的过期事件直接刷新，不跟随旧删；A 的私有 mask 不因此解除。
-- [ ] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/backup-scope-barrier.test.mjs tests/deletion-coordinator.test.mjs`，覆盖客户端与服务端双重限制。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: hold remote deletions for explicit cross-device decisions"`。
+- [x] **Step 1: 写失败测试。** A 删账号来源，B 仍有账号＋作者：refresh 后只 hold 账号，本机两来源仍可用；稍后处理/重启不上传、不删除。B restore 只恢复所选且实际拥有的范围；remove-local 不再向 NAS 删除，回收失败不清 pending。`offline or changed library is never a deletion`、`latest restored state supersedes stale delete`、`new delete invalidates an old pending decision`。候选 300 个＋库 30000 条时只检查候选，不扫其他文件。
+- [x] **Step 2: 运行红灯。** `node --test tests/deletion-conflicts.test.mjs tests/backup-analysis.test.mjs`。
+- [x] **Step 3: 实现核对与恢复。** feed 每页≤100，持久 cursor 与已处理状态；应用远端变更前保存持有快照。索引先筛候选，仅候选状态未知时调用后台文件检查。pending 只阻止涉及范围；其他资料继续。恢复联网取最新 generation/grant，并保护所选现有资产，不从抖音补齐本次恢复；丢失本机文件不得假报上传成功。NAS 已重新恢复的过期事件直接刷新，不跟随旧删；A 的私有 mask 不因此解除。
+- [x] **Step 4: 运行绿灯。** 同 Step 2，加 `node --test tests/backup-scope-barrier.test.mjs tests/deletion-coordinator.test.mjs`，覆盖客户端与服务端双重限制。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: hold remote deletions for explicit cross-device decisions"`。
 
 ### Task 7: 删除确认和跨电脑待处理界面
 

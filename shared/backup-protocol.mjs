@@ -10,7 +10,7 @@ export const contentHash=value=>sha256(stable(value));
 export function validId(id){return typeof id==='string'&&/^\d{1,30}$/.test(id);}
 export function validCollection(id){return id==='__all__'||validId(id);}
 export function validAuthor(id){return typeof id==='string'&&/^MS4wLjAB[A-Za-z0-9_-]{8,240}$/.test(id);}
-const segment=value=>typeof value==='string'&&value.length>0&&value.length<=150&&!/[\\/:\x00-\x1f<>"|?*]/.test(value)&&!/[. ]$/.test(value)&&value!=='.'&&value!=='..'&&!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value);
+const segment=(value,maxLength=150)=>typeof value==='string'&&value.length>0&&value.length<=maxLength&&!/[\\/:\x00-\x1f<>"|?*]/.test(value)&&!/[. ]$/.test(value)&&value!=='.'&&value!=='..'&&!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value);
 export function validHome(home){return !!home&&!Array.isArray(home)&&Object.keys(home).every(k=>['kind','id','folder','workFolder'].includes(k))&&['collection','author'].includes(home.kind)&&segment(home.workFolder)&&(home.kind==='author'?validAuthor(home.id)&&typeof home.folder==='string'&&home.folder.startsWith('作者作品/')&&segment(home.folder.slice(5)):validCollection(home.id)&&segment(home.folder));}
 export function validSource(id){return validCollection(id)||(typeof id==='string'&&id.startsWith('author:')&&validAuthor(id.slice(7)));}
 export function authorPublic(a){const fields=['id','uid','name','uniqueId','avatar','url','folder','reportedCount','updatedAt','archived'];const body={};for(const key of fields)if(a[key]!==undefined)body[key]=a[key];if(a.run)body.readSummary={count:a.run.count||0,pages:a.run.pages||0,complete:a.run.status==='complete',time:a.updatedAt};else if(a.readSummary)body.readSummary=a.readSummary;return body;}
@@ -40,6 +40,6 @@ export function validateEntry(entry){
   if(new Set(body.assets.map(a=>a.key)).size!==body.assets.length)throw Error('备份文件标识重复');
   if(body.requiredKeys!==undefined&&(!Array.isArray(body.requiredKeys)||!body.requiredKeys.length||body.requiredKeys.length>1000||body.requiredKeys.some(k=>typeof k!=='string'||!/^video$|^cover$|^image-\d+$/.test(k))||new Set(body.requiredKeys).size!==body.requiredKeys.length))throw Error('必需媒体清单无效');
   if(body.state==='complete'&&body.requiredKeys?.some(k=>!body.assets.some(a=>a.key===k)))throw Error('媒体缺失，不能声明完整备份');
-  for(const a of body.assets){if(!/^[a-f0-9]{64}$/.test(a.sha256)||!Number.isSafeInteger(a.size)||a.size<=0||typeof a.file!=='string'||!a.file||/[\\/:\x00-\x1f]/.test(a.file)||a.file==='..'||typeof a.key!=='string')throw new Error('备份文件校验信息无效');}
+  for(const a of body.assets){if(!/^[a-f0-9]{64}$/.test(a.sha256)||!Number.isSafeInteger(a.size)||a.size<=0||!segment(a.file,255)||typeof a.key!=='string')throw new Error('备份文件校验信息无效');}
  }
 }

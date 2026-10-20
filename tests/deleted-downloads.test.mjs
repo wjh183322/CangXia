@@ -23,6 +23,6 @@ test('an unavailable storage probe or an unreadable path cannot authorize cleanu
  assert.deepEqual(await findDeletedDownloads(records,{probe:async()=>{},validate:async()=>{throw new Error('access denied');}}),[]);
 });
 
-test('backup export omits hidden records after obsolete file records are cleared',async t=>{
- const s=await fixture(t);await s.pruneDeletedDownloads();s.deleteReadRecords(['1','2']);const entries=exportRecords(s);assert.equal(entries.filter(e=>e.table==='works').length,3);assert.equal(entries.filter(e=>e.table==='downloads').length,0);assert.equal(s.all('downloads').length,0);
+test('local record removal retains NAS export after obsolete local file records are cleared',async t=>{
+ const s=await fixture(t);await s.pruneDeletedDownloads();s.deleteReadRecords(['1','2']);const entries=exportRecords(s);assert.equal(entries.filter(e=>e.table==='works').length,5);assert.equal(entries.filter(e=>e.table==='downloads').length,0);assert.equal(s.all('downloads').length,0);
 });

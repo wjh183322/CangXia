@@ -14,7 +14,7 @@ import {LocalReconcile} from './local-reconcile.mjs';
 import {DownloadTasks} from './download-tasks.mjs';
 import {FileStates} from './file-states.mjs';
 import {WorkViews} from './work-views.mjs';
-import {initializeRecordJournal} from './record-journal.mjs';
+import {initializeRecordJournal,initializeAudioScopeJournal} from './record-journal.mjs';
 import {audioSources} from './work-audio.mjs';
 import {DeviceScopeState} from './device-scope-state.mjs';
 import {scopeKey} from '../shared/backup-scopes.mjs';
@@ -67,6 +67,7 @@ export class Store {
     db.run(`CREATE INDEX IF NOT EXISTS audio_jobs_state_work ON audio_jobs(json_extract(body,'$.state'),work);CREATE INDEX IF NOT EXISTS audio_jobs_ui ON audio_jobs(CASE json_extract(body,'$.state') WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,work);`);
     if(!s.rows('PRAGMA table_info(audio_refs)').some(r=>r.name==='music_id'))db.run('ALTER TABLE audio_refs ADD COLUMN music_id TEXT');
     db.run('CREATE TABLE IF NOT EXISTS audio_part_waiters(source TEXT,work TEXT,PRIMARY KEY(source,work));CREATE INDEX IF NOT EXISTS audio_part_work ON audio_part_waiters(work);');
+    initializeAudioScopeJournal(s);
     db.run('CREATE TABLE IF NOT EXISTS device_unhide_intents(scope_key TEXT PRIMARY KEY,library_id TEXT NOT NULL)');
     s.deviceScopes=new DeviceScopeState(path.dirname(file),undefined,{localIdentity:s.localIdentity,onChange:ids=>{if(!ids.length){s.viewCache.clear();s.lightViews.cache.clear();}else for(const id of ids){s.viewCache.delete(id);s.lightViews.cache.delete(id);}s.revision++;s.backup?.changed();}});
     if(!s.deviceScopes.value('legacyMasksMigrated')){const scopes=s.rows("SELECT id FROM works WHERE json_extract(body,'$.readHidden')=1").map(r=>({workId:r.id,kind:'account',sourceId:'__all__'}));for(const row of s.rows('SELECT author_id,work_id FROM author_members WHERE hidden=1'))scopes.push({workId:row.work_id,kind:'author',sourceId:row.author_id});if(scopes.length)s.deviceScopes.hide(scopes);s.deviceScopes.setValue('legacyMasksMigrated',true);}
