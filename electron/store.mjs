@@ -16,6 +16,8 @@ import {FileStates} from './file-states.mjs';
 import {WorkViews} from './work-views.mjs';
 import {initializeRecordJournal} from './record-journal.mjs';
 import {audioSources} from './work-audio.mjs';
+import {DeviceScopeState} from './device-scope-state.mjs';
+import {scopeKey} from '../shared/backup-scopes.mjs';
 
 export class Store {
   static async open(file, defaultRoot) {
@@ -65,6 +67,10 @@ export class Store {
     db.run(`CREATE INDEX IF NOT EXISTS audio_jobs_state_work ON audio_jobs(json_extract(body,'$.state'),work);CREATE INDEX IF NOT EXISTS audio_jobs_ui ON audio_jobs(CASE json_extract(body,'$.state') WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,work);`);
     if(!s.rows('PRAGMA table_info(audio_refs)').some(r=>r.name==='music_id'))db.run('ALTER TABLE audio_refs ADD COLUMN music_id TEXT');
     db.run('CREATE TABLE IF NOT EXISTS audio_part_waiters(source TEXT,work TEXT,PRIMARY KEY(source,work));CREATE INDEX IF NOT EXISTS audio_part_work ON audio_part_waiters(work);');
+    db.run('CREATE TABLE IF NOT EXISTS device_unhide_intents(scope_key TEXT PRIMARY KEY,library_id TEXT NOT NULL)');
+    s.deviceScopes=new DeviceScopeState(path.dirname(file),undefined,{localIdentity:s.localIdentity,onChange:ids=>{if(!ids.length){s.viewCache.clear();s.lightViews.cache.clear();}else for(const id of ids){s.viewCache.delete(id);s.lightViews.cache.delete(id);}s.revision++;s.backup?.changed();}});
+    if(!s.deviceScopes.value('legacyMasksMigrated')){const scopes=s.rows("SELECT id FROM works WHERE json_extract(body,'$.readHidden')=1").map(r=>({workId:r.id,kind:'account',sourceId:'__all__'}));for(const row of s.rows('SELECT author_id,work_id FROM author_members WHERE hidden=1'))scopes.push({workId:row.work_id,kind:'author',sourceId:row.author_id});if(scopes.length)s.deviceScopes.hide(scopes);s.deviceScopes.setValue('legacyMasksMigrated',true);}
+    db.onCommit=()=>{try{s.flushDeviceUnhides();}catch(error){s.deviceScopeError=error.message;}};s.flushDeviceUnhides();
     s.save(); return s;
   }
   constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this);this.db.onRollback=()=>{this.viewCache.clear();this.lightViews.rollback();this.revision++;}; }
@@ -90,11 +96,17 @@ export class Store {
   get root() { return this.getSetting('root'); }
   collection(id) { return this.authorSources.collection(id)||this.get('collections', id); }
   work(id) { return this.get('works', id); }
-  hasRead(id) { const w=this.work(id);return !!w&&!w.readHidden; }
+  hasRead(id) { const w=this.work(id);return this.deviceScopes?this.deviceScopes.visibleAccount(id,w):!!w&&!w.readHidden; }
+  visibleAuthorRows(id){return this.rows('SELECT author_id,position FROM author_members WHERE work_id=? AND hidden=0 ORDER BY author_id,position',[id]).filter(r=>!this.deviceScopes?.isHidden({workId:id,kind:'author',sourceId:r.author_id}));}
+  queueDeviceUnhide(scopes){if(!this.deviceScopes)return;for(const scope of scopes)if(this.deviceScopes.isHidden(scope))this.db.run('INSERT OR REPLACE INTO device_unhide_intents VALUES(?,?)',[scopeKey(scope),this.deviceScopes.libraryId]);if(!this.db.depth)this.flushDeviceUnhides();}
+  flushDeviceUnhides(){
+    if(!this.deviceScopes||this.closed||this.db.depth||this.flushingDeviceUnhides)return;this.flushingDeviceUnhides=true;let committed=false;
+    try{const rows=this.rows('SELECT scope_key FROM device_unhide_intents WHERE library_id=? LIMIT 100',[this.deviceScopes.libraryId]);if(!rows.length)return;
+      this.deviceScopes.unhide(rows.map(r=>{const [workId,kind,sourceId]=JSON.parse(r.scope_key);return {workId,kind,sourceId};}));this.db.run('BEGIN');try{for(const row of rows)this.db.run('DELETE FROM device_unhide_intents WHERE scope_key=?',[row.scope_key]);this.db.run('COMMIT');committed=true;this.deviceScopeError=null;}catch(e){this.db.run('ROLLBACK');throw e;}
+    }finally{this.flushingDeviceUnhides=false;if(committed&&!this.deviceUnhideTask&&this.rows('SELECT 1 FROM device_unhide_intents WHERE library_id=? LIMIT 1',[this.deviceScopes.libraryId]).length)this.deviceUnhideTask=setImmediate(()=>{this.deviceUnhideTask=null;try{this.flushDeviceUnhides();}catch(error){this.deviceScopeError=error.message;}});}
+  }
   deleteReadRecords(ids) {
-    this.db.run('BEGIN');
-    try { for(const id of new Set(ids)){const w=this.work(id);if(w)this.put('works',id,{...w,readHidden:true});}this.db.run('COMMIT'); }
-    catch(e){this.db.run('ROLLBACK');throw e;}
+    this.deviceScopes.hide([...new Set(ids)].filter(id=>this.work(id)).map(workId=>({workId,kind:'account',sourceId:'__all__'})));
     // Keep the underlying membership and rank for the independent local library.
     this.save();
   }
@@ -121,7 +133,7 @@ export class Store {
     this.backup?.changed();
   }
   invalidateViews(){this.viewCache.clear();this.lightViews?.reset();this.revision++;}
-  close() { void this.fileStates.close();this.save(); this.db.close(); }
+  close() { if(this.closed)return;this.closed=true;clearImmediate(this.deviceUnhideTask);void this.fileStates.close();try{this.save();this.db.close();}finally{this.deviceScopes?.close();} }
   creatorProfiles(){return [...this.all('authors').map(a=>({uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name})),...this.all('creator_profiles')];}
   cachedCreator(person){const key=creatorKey(person);if(!key)return null;let p=this.get('creator_profiles',key);if(!p&&person.secUid)p=this.rows("SELECT body FROM creator_profiles WHERE json_extract(body,'$.secUid')=? LIMIT 1",[person.secUid]).map(r=>JSON.parse(r.body))[0];if(!p&&person.secUid){const a=this.get('authors',person.secUid);if(a)p={uid:a.uid,secUid:a.id,uniqueId:a.uniqueId,nickname:a.name};}return p&&sameCreator(person,p)?p:null;}
   rememberCreator(raw){const p=normalizeCreator(raw),key=creatorKey(p);if(!key||(!p.uid&&!p.secUid))return;const cached={...mergeCreator(this.cachedCreator(p)||{},p),fetchedAt:new Date().toISOString()};delete cached.roleTitle;this.put('creator_profiles',key,cached);const source=p.secUid?this.get('authors',p.secUid):null;if(source&&sameCreator(p,{uid:source.uid,secUid:source.id}))this.put('authors',source.id,{...source,uniqueId:p.uniqueId||source.uniqueId,name:p.nickname==='未知作者'?source.name:p.nickname});}
@@ -193,7 +205,7 @@ export class Store {
       // Each scope owns its order. A partial prefix retains the unvisited suffix without rank collisions.
       const beforeIds=new Set(previous.map(r=>r.work_id)),afterIds=new Set([...ordered,...pending]);
       for(const wid of new Set([...beforeIds,...afterIds]))if(beforeIds.has(wid)!==afterIds.has(wid))this.localReconcile.mark(wid);
-      if(options.unhide!==false)for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}
+      if(options.unhide!==false){for(const wid of ids){const w=this.work(wid);if(w?.readHidden)this.put('works',wid,{...w,readHidden:false});}this.queueDeviceUnhide(ids.map(workId=>({workId,kind:'account',sourceId:'__all__'})));}
       this.db.run('DELETE FROM members WHERE collection_id=?', [id]);
       ordered.forEach((wid, rank) => this.db.run('INSERT INTO members VALUES (?,?,?)', [id, wid, rank]));
       pending.forEach(wid => this.db.run('INSERT INTO members VALUES (?,?,NULL)', [id, wid]));
@@ -357,7 +369,7 @@ export class Store {
       if(this.viewCache.has(id))return this.viewCache.get(id);
       const w=this.work(id);
       const d = downloads.get(w.id);
-      const view={ ...w, videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:!!backups.get(w.id)?.assets?.length&&!backups.get(w.id).backupDeleted,backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
+      const view={ ...w, readHidden:!this.deviceScopes.visibleAccount(w.id,w), videoUrls: undefined, coverUrls: undefined, coverVariants: undefined, images: w.images.map(im => ({ index: im.index, width: im.width, height: im.height })), localTags: localTags.get(w.id) || [], downloaded: this.isDownloaded(w.id), local: !!d && (d.assets || []).some(a => this.assetExists(d, a)), backedUp:!!backups.get(w.id)?.assets?.length&&!backups.get(w.id).backupDeleted,backupRecord:backups.get(w.id)||null, localRecord: d ? { ...d, assets: d.assets?.map(a => ({ ...a, url: `app-media://asset/${w.id}/${encodeURIComponent(a.file)}`, exists: this.assetExists(d, a) })) } : null };
       this.viewCache.set(id,view);return view;
     });
     const collections = this.all('collections').sort((a,b) => a.rank - b.rank);

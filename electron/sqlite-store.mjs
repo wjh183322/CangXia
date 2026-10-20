@@ -23,7 +23,7 @@ export class SqliteStore {
   run(sql,args=[]){
     const command=sql.trim().toUpperCase();
     if(command==='BEGIN'||command==='BEGIN IMMEDIATE'){this.connection.exec(this.depth?'SAVEPOINT cx_'+this.depth:'BEGIN IMMEDIATE');this.depth++;return;}
-    if(command==='COMMIT'){if(!this.depth)throw new Error('No transaction');this.connection.exec(this.depth>1?'RELEASE SAVEPOINT cx_'+(this.depth-1):'COMMIT');this.depth--;return;}
+    if(command==='COMMIT'){if(!this.depth)throw new Error('No transaction');this.connection.exec(this.depth>1?'RELEASE SAVEPOINT cx_'+(this.depth-1):'COMMIT');this.depth--;if(!this.depth)this.onCommit?.();return;}
     if(command==='ROLLBACK'){if(!this.depth)return;if(this.depth>1)this.connection.exec('ROLLBACK TO SAVEPOINT cx_'+(this.depth-1)+'; RELEASE SAVEPOINT cx_'+(this.depth-1));else this.connection.exec('ROLLBACK');this.depth--;this.onRollback?.();return;}
     if(args.length)this.statement(sql).run(...args);else this.connection.exec(sql);
   }

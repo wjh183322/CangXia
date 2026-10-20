@@ -60,7 +60,7 @@ export class AuthorSources{
   ids(id,table='author_members'){if(!['author_members','author_scan'].includes(table))throw new Error('无效作者列表');return this.store.rows(`SELECT work_id FROM ${table} WHERE author_id=? ORDER BY position`,[id]).map(r=>r.work_id);}
   order(id){return mergeReadOrder(this.ids(id),this.ids(id,'author_scan'));}
   publish(id){const hidden=new Map(this.store.rows('SELECT work_id,hidden FROM author_members WHERE author_id=?',[id]).map(r=>[r.work_id,r.hidden]));const ordered=this.order(id);this.store.db.run('DELETE FROM author_members WHERE author_id=?',[id]);ordered.forEach((wid,i)=>this.store.db.run('INSERT INTO author_members VALUES(?,?,?,?)',[id,wid,i,hidden.get(wid)||0]));}
-  hide(id,ids){authorId(id);this.store.db.run('BEGIN');try{for(const wid of ids)this.store.db.run('UPDATE author_members SET hidden=1 WHERE author_id=? AND work_id=?',[id,wid]);this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');throw e;}this.store.save();}
+  hide(id,ids){authorId(id);this.store.deviceScopes.hide(ids.map(workId=>({workId,kind:'author',sourceId:id})));this.store.save();}
   archive(id){const a=this.get(id);if(!a)throw Error('作者不存在');a.archived=true;this.save(a);}
   start(id,{resume=false,readAll=false}={}){
     const a=this.get(id);if(!a)throw new Error('请先添加作者');const accountKey=this.store.getSetting('browserAccountKey');
@@ -82,7 +82,7 @@ export class AuthorSources{
         if(!duplicate&&taken>=limit)break;
         const known=this.store.rows('SELECT hidden FROM author_members WHERE author_id=? AND work_id=?',[a.id,w.id])[0];
         const saved=this.store.upsertWork(raw);
-        this.store.db.run('UPDATE author_members SET hidden=0 WHERE author_id=? AND work_id=?',[a.id,w.id]);
+        this.store.db.run('UPDATE author_members SET hidden=0 WHERE author_id=? AND work_id=?',[a.id,w.id]);this.store.queueDeviceUnhide([{workId:w.id,kind:'author',sourceId:a.id}]);
         if(!duplicate){const position=run.count;this.store.db.run('INSERT INTO author_scan VALUES(?,?,?)',[a.id,w.id,run.count++]);taken++;if(!known)added++;if(known?.hidden)run.restored++;if(run.historyVersion)this.historyItem(a,saved,position);a._history.seen.add(w.id);inserted.push(w.id);}
         consumed++;
       }
@@ -99,7 +99,7 @@ export class AuthorSources{
   collection(id){if(typeof id!=='string'||!id.startsWith('author:'))return null;const a=this.get(id.slice(7));return a?{id,name:a.name,folder:a.folder,source:'author',added:true}:null;}
   snapshot(backups=new Map(this.store.all('backup_downloads').map(d=>[d.id,d]))){
     const accountKey=this.store.getSetting('browserAccountKey'),authorMembers={},allAuthors=this.store.all('authors');
-    const authors=allAuthors.filter(a=>!a.archived).map(a=>{const hidden=new Set(this.store.rows('SELECT work_id FROM author_members WHERE author_id=? AND hidden=1',[a.id]).map(r=>r.work_id));const ids=this.order(a.id).filter(id=>!hidden.has(id));authorMembers[a.id]=ids;return {...a,count:ids.length,run:a.run?{status:a.run.status,count:a.run.count,pages:a.run.pages,resumed:a.run.resumed,reason:a.run.reason,canResume:a.run.status!=='complete'&&a.run.nextCursor!==null&&a.run.accountKey===accountKey}:null};});
+    const authors=allAuthors.filter(a=>!a.archived).map(a=>{const hidden=new Set(this.store.rows('SELECT work_id FROM author_members WHERE author_id=? AND hidden=1',[a.id]).map(r=>r.work_id));const ids=this.order(a.id).filter(id=>!hidden.has(id)&&!this.store.deviceScopes?.isHidden({workId:id,kind:'author',sourceId:a.id}));authorMembers[a.id]=ids;return {...a,count:ids.length,run:a.run?{status:a.run.status,count:a.run.count,pages:a.run.pages,resumed:a.run.resumed,reason:a.run.reason,canResume:a.run.status!=='complete'&&a.run.nextCursor!==null&&a.run.accountKey===accountKey}:null};});
     const backupAuthorMembers={};
     for(const row of this.store.rows('SELECT author_id,work_id FROM author_members ORDER BY author_id,position')){const d=backups.get(row.work_id);if(!(d?.assets?.length||d?.audio)||d.backupDeleted)continue;(backupAuthorMembers[row.author_id]||=[]).push(row.work_id);}
     const backupAuthors=allAuthors.map(a=>({id:a.id,name:a.name,uid:a.uid,uniqueId:a.uniqueId,archived:!!a.archived}));

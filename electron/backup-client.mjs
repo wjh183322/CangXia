@@ -11,6 +11,7 @@ export class BackupClient{
  constructor(store,profile,{vault,onChange=()=>{},onUnavailable=()=>{},onDiagnostic=()=>{},isIdle=()=>true,heartbeatMs=15000}={}){
   this.profile=profile;this.cache=new MediaCache(store,profile,{notify:()=>this.emit()});this.covers=new BackupCovers(this);this.analyzer=new BackupAnalysis(store.file);
   Object.assign(this,{store,profile,vault,onChange,onUnavailable,onDiagnostic,isIdle,heartbeatMs});this.localReadDepth=0;this.deviceId=this.read('device.json')?.id||randomUUID();this.write('device.json',{id:this.deviceId});this.config=this.read('backup-connection.json');this.meta=this.read('backup-state.json')||{baseRevision:null,baseline:{},files:{},dirty:false};if(this.meta.baselineIndexed){if(store.rows("SELECT 1 FROM backup_baseline_meta WHERE key='ready'").length){this.baselineIndexed=true;this.meta.baseline={};for(const r of store.rows('SELECT record,sha FROM backup_baseline'))this.meta.baseline[r.record]=r.sha;}else{this.meta.baseline={};this.meta.baseRevision=null;delete this.meta.baselineIndexed;}}this.status={mode:'backup',phase:'unconfigured',writable:false,connected:false,message:'请先连接 NAS 备份服务',deviceName:this.config?.deviceName||os.hostname(),pending:!!this.meta.dirty};
+  if(this.meta.libraryId)store.deviceScopes?.bind(this.meta.libraryId);
   store.backup={assertWritable:()=>this.assertWritable(),canWrite:()=>this.status.writable||!!this.applying||!!this.localReadDepth,changed:()=>this.scheduleChanged(),localKey:key=>localKeys.has(key),applying:()=>!!this.applying};
  }
  read(name){try{return JSON.parse(fs.readFileSync(path.join(this.profile,name),'utf8'));}catch{return null;}}
@@ -52,7 +53,7 @@ export class BackupClient{
  async mediaPlan(force=false){await this.migrateFileHashes();const result=await this.analyzer.media({force,fileGeneration:this.store.fileStates.generation,watchAvailable:this.store.fileStates.watchAvailable});this.status.unverifiedMedia=result.unknown;return result;}
  async mediaSignature(){return (await this.mediaPlan()).signature;}
  async mediaDirty(){return (await this.mediaPlan()).ids.length>0;}
- libraryRevision(){return this.store.backupRevision?.()??this.store.revision;}
+ libraryRevision(){const shared=this.store.backupRevision?.()??this.store.revision;return this.store.deviceScopes?shared+':'+this.store.deviceScopes.revision:shared;}
  scheduleChanged(){if(this.applying||this.closed)return;clearTimeout(this.changeTimer);this.meta.dirty=true;this.status.pending=true;this.changeTimer=setTimeout(()=>{if(!this.isIdle())return this.scheduleChanged();void this.changed().catch(error=>this.unavailable(error.message));},150);this.changeTimer.unref?.();}
  async analysis(full=false,mediaIds){
   const slot=full?'preparationPromise':'analysisPromise';
@@ -78,7 +79,7 @@ export class BackupClient{
   await this.indexBaseline();
   if(this.checking)return this.checking;if(!this.canSync())throw new Error('请等待读取和下载结束后再比对 NAS');if(this.syncing)throw new Error('正在同步，请等待完成');if(!this.transport)this.transport=this.makeTransport();if(!this.transport)throw new Error('请先填写备份服务连接信息');
   this.checking=(async()=>{this.status={...this.status,phase:'checking',writable:false,message:'正在与 NAS 比对同步状态…'};this.emit();try{
-   const remote=await this.transport.json('GET','/v1/status');if(remote.protocol!==PROTOCOL)throw Object.assign(new Error('请先升级 NAS 备份服务至 0.2.0（协议 2），现有数据和连接配置可保留'),{code:'PROTOCOL_MISMATCH'});if(this.meta.libraryId&&this.meta.libraryId!==remote.libraryId)throw new Error('这是另一份 NAS 备份库，未覆盖本机资料');
+   const remote=await this.transport.json('GET','/v1/status');if(remote.protocol!==PROTOCOL)throw Object.assign(new Error(`请配套升级藏匣与 NAS 服务（需要协议 ${PROTOCOL}），现有数据和连接配置可保留`),{code:'PROTOCOL_MISMATCH'});if(this.meta.libraryId&&this.meta.libraryId!==remote.libraryId)throw new Error('这是另一份 NAS 备份库，未覆盖本机资料');this.store.deviceScopes?.bind(remote.libraryId);
    this.status.backupDeletion=!!remote.capabilities?.backupDeletion;this.status.automaticRebackup=!!remote.capabilities?.automaticRebackup;this.status.sharedAudio=remote.capabilities?.sharedAudio===1;
    if(this.meta.pendingBackupAction){try{const receipt=await this.transport.json('GET','/v1/backup-actions/'+this.meta.pendingBackupAction.data.requestId);await this.acceptBackupAction(receipt);}catch(e){if(e.status!==404)throw e;delete this.meta.pendingBackupAction;this.persist();}}
    if(this.meta.pendingCommit){try{const ack=await this.transport.json('GET','/v1/commits/'+this.meta.pendingCommit.request.requestId);if(ack.requestHash!==await this.analyzer.content(this.commitContent(this.meta.pendingCommit.request)))throw new Error('提交确认与本机待确认内容不同');await this.acceptCommit(this.meta.pendingCommit,ack.revision);}catch(e){if(e.status!==404)throw e;}}

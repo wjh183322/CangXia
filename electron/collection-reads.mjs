@@ -76,8 +76,8 @@ export class CollectionReads{
     this.store.db.run('BEGIN');try{
       for(const raw of result.items){
         signal?.throwIfAborted();const id=String(raw.aweme_id||raw.awemeId||'');if(!/^\d{1,32}$/.test(id))throw Error('作品标识无效，本页未写入');
-        const old=this.store.work(id),duplicate=ids.has(id),work=this.store.upsertWork(raw);if(old?.readHidden)this.store.put('works',id,{...this.store.work(id),readHidden:false});
-        if(!duplicate){const position=run.count;this.store.db.run('INSERT INTO collection_read_items VALUES(?,?,?)',[run.key,id,run.count++]);ids.add(id);inserted.push(id);unique++;if(!reference.has(id))run.added++;else if(old?.readHidden)run.restored++;if(run.historyVersion)this.classify(run,id,work,position);}
+        const old=this.store.work(id),wasHidden=old?.readHidden||this.store.deviceScopes?.isHidden({workId:id,kind:'account',sourceId:'__all__'}),duplicate=ids.has(id),work=this.store.upsertWork(raw);if(old?.readHidden)this.store.put('works',id,{...this.store.work(id),readHidden:false});
+        this.store.queueDeviceUnhide([{workId:id,kind:'account',sourceId:'__all__'}]);if(!duplicate){const position=run.count;this.store.db.run('INSERT INTO collection_read_items VALUES(?,?,?)',[run.key,id,run.count++]);ids.add(id);inserted.push(id);unique++;if(!reference.has(id))run.added++;else if(wasHidden)run.restored++;if(run.historyVersion)this.classify(run,id,work,position);}
         const position=anchors.get(id);
         if(duplicate||position===undefined){run.streak=0;run.streakPages=0;run.lastAnchor=null;run.lastStreakCursor=null;}
         else{if(run.lastAnchor!==null&&position===run.lastAnchor+1){run.streak++;if(run.lastStreakCursor!==cursor)run.streakPages++;}else{run.streak=1;run.streakPages=1;}run.lastAnchor=position;run.lastStreakCursor=cursor;}
