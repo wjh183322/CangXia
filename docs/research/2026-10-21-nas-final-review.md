@@ -55,3 +55,5 @@ Spec impact: sections 4 and 9 require explicit restoration to restore the select
 ## Parent fix verification
 
 All three findings retained as Important. Focused regressions reproduce all three failures before correction. The single fix pass adds an independent pending-audio identity check, fresh per-step NAS generation checks for initiating clients as well as follow-delete clients, and account-only normalization of the legacy hidden flag. Author-only recovery preserves account hiding. Legitimate partial audio retry remains covered. Full release validation follows on the corrected tree.
+
+Final parent verification: 598/598 Node, 165 UI, 76 source and packaged desktop, 31 actual previews, five layout scripts, both extracted installer payload starts. NAS Linux service image tests and protocol-3 health succeeded; downloaded image sources and SHA verified. No remaining Critical/Important/Minor. Actual user machines remain outside these isolated checks.
