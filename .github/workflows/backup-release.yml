@@ -1,5 +1,6 @@
 name: Release backup desktop and server
 on:
+  workflow_dispatch:
   push:
     tags: ['backup-v*']
 permissions:
@@ -96,14 +97,14 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./backup-server/package.json').version")
           docker build -f backup-server/Dockerfile -t "cangxia-backup-server:$version" .
-          docker run --rm -v "$PWD:/workspace:ro" -w /workspace --entrypoint node "cangxia-backup-server:$version" --test tests/nas-removal.test.mjs tests/backup-author.test.mjs tests/backup.test.mjs tests/work-audio.test.mjs
+          docker run --rm -v "$PWD:/workspace:ro" -w /workspace --entrypoint node "cangxia-backup-server:$version" --test --test-concurrency=2 tests/nas-removal.test.mjs tests/backup-author.test.mjs tests/backup.test.mjs tests/work-audio.test.mjs tests/backup-scopes.test.mjs tests/backup-scope-state.test.mjs tests/backup-scope-barrier.test.mjs tests/deletion-retention.test.mjs tests/deletion-coordinator.test.mjs tests/deletion-conflicts.test.mjs tests/nas-catalogue.test.mjs tests/cross-device-deletion.test.mjs
           docker run -d --name nas-smoke -p 127.0.0.1:18443:8443 "cangxia-backup-server:$version"
           trap 'docker rm -fv nas-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
-            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2' >/dev/null; then break; fi
+            if curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 3' >/dev/null; then break; fi
             sleep 1
           done
-          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 2'
+          curl -ksf https://127.0.0.1:18443/healthz | jq -e '.ok == true and .protocol == 3'
           mkdir server-release
           docker save "cangxia-backup-server:$version" > "server-release/CangXia-Backup-Server-$version.tar"
           sha256sum server-release/*.tar > server-release/SHA256-server.txt
@@ -113,6 +114,7 @@ jobs:
           path: server-release/
           retention-days: 14
   publish:
+    if: startsWith(github.ref, 'refs/tags/backup-v')
     needs: [desktop, server]
     runs-on: ubuntu-24.04
     permissions:
