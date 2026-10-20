@@ -17,3 +17,15 @@
 @keyframes read-wait{0%{left:-35%}100%{left:105%}}@media(prefers-reduced-motion:reduce){.read-progress-track.indeterminate>i{animation:none;left:33%}.read-progress-track>i{transition:none}}
 
 .queue-actions select{margin-left:8px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;font-size:12px}.queue-actions{flex-wrap:wrap}
+/* Explicit deletion controls remain in page flow and keep long lists bounded. */
+.deletion-notice,.deletion-toolbar,.deletion-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0}
+.deletion-notice{padding:12px 16px;background:#fff5ed;border:1px solid #f1d7c4;border-radius:10px}
+.deletion-list{max-height:40vh;overflow:auto;border:1px solid #e4e8ef;border-radius:10px}
+.deletion-list article{padding:14px 16px;border-bottom:1px solid #e4e8ef}
+.deletion-list article small{display:block;margin:6px 0;color:#8793a6}
+.deletion-list article p{font-size:12px;margin:4px 0}
+.scoped-delete-dialog fieldset{border:1px solid #e4e8ef;border-radius:10px;margin:14px 0;padding:12px;display:grid;gap:10px}
+.scoped-delete-dialog label,.deletion-list label{display:flex;gap:10px;align-items:center}
+.deletion-filters input,.deletion-filters select{min-width:130px;max-width:260px;padding:8px;border:1px solid #e4e8ef;border-radius:6px}
+.deletion-action-confirm{padding:14px;background:#fff5ed;border:1px solid #f1d7c4;border-radius:8px;margin-top:12px}
+.deletion-action-confirm button{margin-right:10px}

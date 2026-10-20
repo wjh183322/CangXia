@@ -122,11 +122,11 @@
 
 **Interfaces:** IPC `prepareScopedDeletion(input)`、`confirmScopedDeletion(token)`、`stopScopedDeletion()` 连接 Task 5；`deletionPendingPage(options)`、`resolveDeletionPending(input)` 连接 Task 6。分页20；选择 `{token,all,ids,exclude}` 绑定库/筛选/版本，过期拒绝执行并保留未变项选择。
 
-- [ ] **Step 1: 写失败 UI 测试。** 记录入口默认当前来源、文件入口默认文件；确认显示账号收藏含自建关联且其他来源不删、文件共用影响清楚。B 启动集中提示一次，随后顶部与 NAS 页保留入口，能看电脑/时间/内容范围、单选/跨页全选。三种按钮不预选执行，分别显示两端结果；离线 NAS 删除不可操作但本机删除可用。
-- [ ] **Step 2: 运行红灯。** `npm run test:ui`，预期入口缺失或旧删除范围不能表达。
-- [ ] **Step 3: 实现界面和 IPC。** 后端重新验证 token 与实际范围，不信任 UI 数量；已有删除入口统一接线，不保留旧危险捷径。进行中的选中范围互斥，详情/分页/停止允许；重启只提示未完成操作，不自动点击重试。不逐条弹窗、不把“稍后”当同意删除。
-- [ ] **Step 4: 运行绿灯。** `npm run test:ui`、`npm run test:backup-desktop`；用自有 fixture 验证两端部分失败与停止后的结果。
-- [ ] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: expose scoped deletion and cross-device decisions"`。
+- [x] **Step 1: 写失败 UI 测试。** 记录入口默认当前来源、文件入口默认文件；确认显示账号收藏含自建关联且其他来源不删、文件共用影响清楚。B 启动集中提示一次，随后顶部与 NAS 页保留入口，能看电脑/时间/内容范围、单选/跨页全选。三种按钮不预选执行，分别显示两端结果；离线 NAS 删除不可操作但本机删除可用。
+- [x] **Step 2: 运行红灯。** `npm run test:ui`，预期入口缺失或旧删除范围不能表达。
+- [x] **Step 3: 实现界面和 IPC。** 后端重新验证 token 与实际范围，不信任 UI 数量；已有删除入口统一接线，不保留旧危险捷径。进行中的选中范围互斥，详情/分页/停止允许；重启只提示未完成操作，不自动点击重试。不逐条弹窗、不把“稍后”当同意删除。
+- [x] **Step 4: 运行绿灯。** `npm run test:ui`、`npm run test:backup-desktop`；用自有 fixture 验证两端部分失败与停止后的结果。
+- [x] **Step 5: 提交。** 显式暂存本任务文件，`git commit --quiet -m "feat: expose scoped deletion and cross-device decisions"`。
 
 ### Task 8: 独立 NAS 目录、记录/文件分开恢复
 

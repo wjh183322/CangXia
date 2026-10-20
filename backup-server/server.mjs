@@ -10,7 +10,7 @@ async function body(req,max=MAX_JSON){const chunks=[];let size=0;for await(const
 async function json(req){let bytes=await body(req);if(req.headers['content-encoding']==='gzip')bytes=gunzipSync(bytes,{maxOutputLength:MAX_JSON});try{return JSON.parse(bytes);}catch{throw error(400,'JSON 请求无效');}}
 function send(req,res,status,data){let bytes=Buffer.from(JSON.stringify(data));const headers={'content-type':'application/json; charset=utf-8','cache-control':'no-store'};if(bytes.length>1024&&req.headers['accept-encoding']?.includes('gzip')){bytes=gzipSync(bytes);headers['content-encoding']='gzip';}res.writeHead(status,{...headers,'content-length':bytes.length});res.end(bytes);}
 export async function hashFile(file){const hash=createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);return hash.digest('hex');}
-export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date.now(),allowInsecureLoopback=false}={}){
+export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date.now(),allowInsecureLoopback=false,scopedDeletion=false}={}){
  if(!dataDir||typeof token!=='string'||token.length<24)throw new Error('服务数据目录或访问密钥无效');
  if(!tls&&!allowInsecureLoopback)throw new Error('备份服务必须配置 HTTPS');
  fs.mkdirSync(dataDir,{recursive:true});for(const name of ['objects','uploads'])fs.mkdirSync(path.join(dataDir,name),{recursive:true});
@@ -27,7 +27,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
  let lease=null;const busyUploads=new Set(),activeReads=new Map(),gcBusy=new Set();
  const audioWriter=req=>{if(get('audioEnabled')&&req.headers['x-cangxia-audio-aware']!=='1')throw error(423,'此库已保存共享配乐；旧客户端只读，请升级藏匣至 0.3.28 或更新版本');};
  const validLease=req=>{audioWriter(req);const device=String(req.headers['x-device-id']||''),proof=String(req.headers['x-lease-token']||'');if(!lease||lease.expires<=now()||lease.device!==device||lease.token!==proof)throw error(423,'当前电脑没有有效写入权，请重新检查同步状态');lease.expires=now()+leaseMs;return device;};
- const status=()=>({protocol:PROTOCOL,capabilities:{backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
+ const status=()=>({protocol:PROTOCOL,capabilities:{...(scopedDeletion?{scopedDeletion:1}:{}),backupDeletion:true,automaticRebackup:true,sharedAudio:1},audioEnabled:!!get('audioEnabled'),libraryId:get('libraryId'),revision:get('revision'),lastSync:db.prepare('SELECT revision,device,name,time,count FROM commits ORDER BY revision DESC LIMIT 1').get()||null,writer:lease&&lease.expires>now()?{device:lease.device,name:lease.name,expires:lease.expires}:null});
  const scopes=new ScopeState(db,{now});
  const actions=createBackupActions({db,dataDir,now,status,setMeta:set,busyUploads,activeReads,gcBusy,protectedObjects:()=>scopes.protectedHashes()});
  const garbageTimer=setInterval(()=>{void actions.collect().catch(()=>{});},10000);garbageTimer.unref();
