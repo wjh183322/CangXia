@@ -36,7 +36,7 @@ export function createBackupServer({dataDir,token,tls,leaseMs=90000,now=()=>Date
    if(route==='/healthz'&&req.method==='GET'){send(req,res,200,{ok:true,service:'cangxia-backup',protocol:PROTOCOL});return;}
    const supplied=Buffer.from(String(req.headers.authorization||'').replace(/^Bearer /,'')),expected=Buffer.from(token);if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))throw error(401,'访问密钥不正确');
    if(route==='/v1/status'&&req.method==='GET'){send(req,res,200,status());return;}
-   if(String(req.headers['x-cangxia-protocol']||'')!==String(PROTOCOL))throw error(426,'请升级藏匣备份客户端，旧协议不能读写作者备份库');
+   if(String(req.headers['x-cangxia-protocol']||'')!==String(PROTOCOL))throw error(426,'请配套升级藏匣桌面端和 NAS 服务，旧写入协议不能操作删除版本库');
    if(route==='/v1/lease'&&req.method==='POST'){
     audioWriter(req);
     const input=await json(req);if(!/^[a-f0-9-]{36}$/.test(input.deviceId)||typeof input.name!=='string'||!input.name.trim()||input.name.length>80)throw error(400,'设备信息无效');

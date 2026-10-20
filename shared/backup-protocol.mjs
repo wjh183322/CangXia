@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {validateAudioBackup} from './music.mjs';
-export const PROTOCOL=2;
-export const BACKUP_SCHEMA=3;
+export const PROTOCOL=3;
+export const BACKUP_SCHEMA=4;
 export const TABLES=new Set(['works','collections','members','authors','author_members','local_tags','settings','downloads']);
 export const SHARED_SETTINGS=new Set(['account','browserAccountKey','readLimit']);
 export const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
