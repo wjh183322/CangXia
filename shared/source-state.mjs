@@ -10,7 +10,10 @@ export function filteredSourceState(data,id){
  if(!filter||typeof filter.aweme_id!=='string'||filter.aweme_id!==id)return null;
  const message=String(filter.detail_msg||'').trim(),notice=String(filter.notice||'').trim();
  const accessWarning=String(data?.status_msg||data?.message||data?.data?.status_msg||data?.data?.message||'');
- if(/登录|验证码|安全验证|访问受限|频繁|稍后|可能/.test(accessWarning+' '+message))return null;
+ if(/登录|验证码|安全验证|访问受限|频繁|稍后|可能|login|captcha|challenge|rate.?limit|too many/i.test(accessWarning+' '+message+' '+notice))return null;
+ // This empty-text audit tuple is another supplied, work-bound real response.
+ // It proves current inaccessibility, not deletion or a particular audit result.
+ if(filter.filter_reason==='status_audit_self_see'&&envelope.aweme_detail===null&&!message&&!notice)return {state:'unavailable',reason:'原作品当前不可访问，平台未提供具体原因'};
  // This tuple is grounded in the supplied real response. Do not infer deletion
  // from an undocumented filter code or a permission hint on its own.
  if(filter.filter_reason!=='status_self_see'||notice!=='抱歉，作品不见了'||!/^因作品权限或已被删除[，,]\s*无法观看(?:[，,。]|$)/.test(message))return null;
