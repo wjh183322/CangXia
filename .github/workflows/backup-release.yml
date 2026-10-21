@@ -6,6 +6,25 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-tests:
+    name: Windows full tests ${{ matrix.shard }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --ignore-scripts
+      - run: node node_modules/electron/install.js
+      - name: Run complete suite partition
+        run: node scripts/test-shard.mjs ${{ matrix.shard }} 4
   desktop:
     runs-on: windows-2025
     steps:
@@ -20,7 +39,6 @@ jobs:
       - run: node node_modules/electron/install.js
       - name: Verify state-save failures and Windows file sharing
         run: node --test --test-concurrency=1 tests/atomic-json-file.test.mjs tests/backup-state-flow.test.mjs tests/backup-idle.test.mjs
-      - run: npm test
       - run: npm run test:ui
       - name: Check NAS layout at desktop and small window sizes
         run: |
@@ -117,7 +135,7 @@ jobs:
           retention-days: 14
   publish:
     if: startsWith(github.ref, 'refs/tags/backup-v')
-    needs: [desktop, server]
+    needs: [desktop, server, windows-tests]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
