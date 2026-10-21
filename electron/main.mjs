@@ -335,7 +335,7 @@ try {
   handler('sync', async(options = {}) => {
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
     const epoch=collector.cancelEpoch;
-    return foregroundRead(async()=>{if(epoch!==collector.cancelEpoch)throw Error('已停止，未开始读取');await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:!!(collector.busy||collector.batchReading)},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),readSummary:options.discoverOnly||options.allAdded?null:collector.status.readSummary,...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
+    return foregroundRead(async()=>{if(epoch!==collector.cancelEpoch)throw Error('已停止，未开始读取');await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:!!(collector.busy||collector.batchReading)},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),readSummary:options.discoverOnly||options.allAdded||options.syncCollections?null:collector.status.readSummary,...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
   });
   handler('confirmCollectionRead',options=>foregroundRead(async()=>{if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=await store.reconcilePending();notify();if(errors.length)throw Error(errors.join('；'));return true;}));
   handler('resumeReconcile',()=>foregroundRead(async()=>{

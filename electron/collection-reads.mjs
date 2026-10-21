@@ -100,6 +100,9 @@ export class CollectionReads{
     if(run.status!=='running'&&terminal.has(run.outcome))return;
     const before={...run};this.store.db.run('BEGIN');try{
       if(run.publishedRevision!==this.revision())run.conflicted=true;
+      // An unchanged paused folder may resume after total changed the revision.
+      // Previously unseen IDs can still belong to a newer folder publication.
+      if(run.rebasedFolderResume&&run.scope!==TOTAL&&this.ids(run).some(id=>!run.reference.has(id)&&this.store.rows('SELECT 1 FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>? LIMIT 1',[id,TOTAL,run.scope]).length))run.conflicted=true;
       if(outcome==='end'&&run.conflicted)outcome='end-stale';
       let ids=this.ids(run);const full=outcome==='end';
       if(run.conflicted){const current=this.membership(run.scope).map(r=>r.work_id),known=new Set(current);ids=[...current,...ids.filter(id=>!known.has(id)&&!run.reference.has(id)&&(run.scope===TOTAL||!this.store.rows('SELECT 1 FROM members WHERE work_id=? AND collection_id<>? AND collection_id<>?',[id,TOTAL,run.scope]).length))];}

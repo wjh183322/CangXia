@@ -5,6 +5,24 @@ export async function checkCollectionBatchUI({notify,data,act,settle,click,aria,
  try{
   await act(async()=>{notify(frame());[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('账号收藏')).click();await settle();});
   check('account custom-folder heading exposes sync-all without altering single-folder sync',!!document.querySelector('[aria-label="同步全部自建收藏夹"]')&&[...document.querySelectorAll('.heading-actions button')].some(b=>b.textContent.trim()==='同步收藏'));
+  await act(async()=>{[...document.querySelectorAll('.collection-nav')].find(b=>b.querySelector('span')?.textContent==='收藏').click();await settle();});
+  await click('同步收藏');
+  check('total read offers an unchecked follow-up option',document.querySelector('[aria-label="同步自建收藏夹"]')?.checked===false);
+  await aria('同步自建收藏夹');await click('检查新增');
+  check('linked quick preflight names every unanchored scope before starting',document.querySelector('.collection-read-confirm')?.textContent.includes('同名收藏夹')&&document.querySelector('.collection-read-confirm').textContent.includes('收藏'));
+  window.cangxia.sync=async options=>{input=options;return {collector:{connected:true,busy:false,collectionBatch:{includeTotal:true,running:false,total:3,succeeded:3,items:[]}},readSummary:null};};
+  await click('继续检查');
+  check('linked quick request carries checkbox and acknowledgement to the backend',input?.collectionId==='__all__'&&input.syncCollections===true&&input.mode==='quick'&&input.allowFullScan===true);
+  check('linked completion presents combined results',document.querySelector('.collection-batch-results')?.textContent.includes('总收藏'));
+  await click('关闭');await click('同步收藏');await aria('同步自建收藏夹');
+  await click('从头完整核对');
+  check('full reconciliation also passes the follow-up checkbox',input.syncCollections===true&&input.mode==='full'&&!input.resume);await click('关闭');
+  await act(async()=>{notify(frame({collectionReadInfo:{...info,__all__:{baselineKnown:true,full:{canResume:true,checked:4}}}}));await settle();});
+  await click('同步收藏');await aria('同步自建收藏夹');await click('继续完整核对');
+  check('continue reconciliation preserves resume for the linked operation',input.syncCollections===true&&input.mode==='full'&&input.resume===true);await click('关闭');
+  await act(async()=>{[...document.querySelectorAll('.collection-nav')].find(b=>b.querySelector('span')?.textContent==='同名收藏夹').click();await settle();});await click('同步收藏');
+  check('individual custom folder never offers total follow-up',!document.querySelector('[aria-label="同步自建收藏夹"]'));await aria('关闭弹窗');
+  await act(async()=>{notify(frame());await settle();});
   await aria('同步全部自建收藏夹');
   check('batch setup defaults to quick, counts added folders and names missing baselines',document.querySelector('.collection-batch-setup')?.textContent.includes('2 个自建收藏夹')&&document.querySelector('[aria-label="批量检查新增"]').checked&&document.querySelector('[aria-label="确认可能读到列表末尾"]'));
   check('batch cannot silently turn an unanchored quick read into a full scan',document.querySelector('[aria-label="开始批量同步"]').disabled);

@@ -1,6 +1,65 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {Store} from '../electron/store.mjs';import {Collector} from '../electron/account-collector.mjs';
 const raw=id=>({aweme_id:id,desc:'批量作品 '+id,author:{uid:'7',nickname:'作者'}});
+
+test('total follow-up reads total then only added folders, preserving separate summaries',async t=>{
+ const seen=[];const {c,store}=await fixture(t,async opts=>{const scope=opts.params?.collects_id||'__all__';seen.push(scope);return {aweme_list:[raw(scope==='__all__'?'500':'600')],has_more:0,cursor:'0'};});
+ await c.sync({collectionId:'__all__',mode:'full',syncCollections:true});
+ assert.deepEqual(seen,['__all__','10','20']);assert.equal(c.status.collectionBatch.includeTotal,true);assert.equal(c.status.collectionBatch.succeeded,3);
+ assert.deepEqual(c.status.collectionBatch.items.map(i=>i.summary.scope),['__all__','10','20']);assert.equal(store.all('works').filter(w=>w.id==='600').length,1);
+});
+
+test('follow-up quick reads require acknowledgement before total if any folder has no baseline',async t=>{
+ const {c,calls}=await fixture(t);await assert.rejects(c.sync({mode:'quick',syncCollections:true}),/历史对照|确认/);assert.equal(calls.length,0);
+ await c.sync({mode:'quick',syncCollections:true,allowFullScan:true});assert.equal(c.status.collectionBatch.succeeded,3);
+});
+
+test('follow-up resume uses each scope own cursor and starts folders without a checkpoint',async t=>{
+ const seen=[];const {c,store}=await fixture(t,async opts=>{seen.push([opts.params?.collects_id||'__all__',opts.params?.cursor||opts.form.cursor]);return {aweme_list:[raw('900')],has_more:0,cursor:'0'};});
+ for(const scope of ['10','__all__']){const run=store.collectionReads.start(scope,'full');store.collectionReads.apply(run,{items:[raw(scope==='10'?'100':'200')],next:scope==='10'?'60':'30',complete:false});store.collectionReads.finish(run,'paused');}
+ await c.sync({mode:'full',resume:true,syncCollections:true});assert.deepEqual(seen,[['__all__','30'],['10','60'],['20','0']]);assert.equal(store.collectionReads.get('10','full').resumed,true);assert.equal(store.collectionReads.get('20','full').resumed,false);assert.equal(store.collectionReads.get('10','full').outcome,'end');assert.equal(store.collectionReads.info('10').baselineKnown,true);
+});
+
+test('linked resume never rebases a folder checkpoint whose saved membership changed',async t=>{
+ const {c,store}=await fixture(t,async()=>({aweme_list:[raw('900')],has_more:0,cursor:'0'}));const r=store.collectionReads;
+ const folder=r.start('10','full');r.apply(folder,{items:[raw('100')],next:'30',complete:false});r.finish(folder,'paused');store.ingestMembers('20',['100'],true);
+ const total=r.start('__all__','full');r.apply(total,{items:[raw('200')],next:'30',complete:false});r.finish(total,'paused');
+ await c.sync({mode:'full',resume:true,syncCollections:true});assert.equal(r.membership('10').some(row=>row.work_id==='100'),false);assert.equal(r.get('10','full').outcome,'end-stale');
+});
+
+test('rebased folder resume cannot claim a newly encountered work from a newer folder',async t=>{
+ const {c,store}=await fixture(t,async opts=>{if(opts.params?.collects_id==='20')throw Error('folder20 unavailable');return {aweme_list:[raw(opts.params?.collects_id==='10'?'300':'900')],has_more:0,cursor:'0'};});const r=store.collectionReads;
+ const folder=r.start('10','full');r.apply(folder,{items:[raw('100')],next:'30',complete:false});r.finish(folder,'paused');store.upsertWork(raw('300'));store.ingestMembers('20',['300'],true);
+ const total=r.start('__all__','full');r.apply(total,{items:[raw('200')],next:'30',complete:false});r.finish(total,'paused');
+ await c.sync({mode:'full',resume:true,syncCollections:true});assert.equal(r.membership('20').some(row=>row.work_id==='300'),true);assert.equal(r.membership('10').some(row=>row.work_id==='300'),false);assert.equal(r.get('10','full').outcome,'end-stale');
+});
+
+for(const stage of ['start','apply'])test('linked '+stage+' persistence failure stops remaining folders',async t=>{
+ const {c,calls,store}=await fixture(t,async opts=>({aweme_list:[raw(opts.params?.collects_id?'600':'500')],has_more:0,cursor:'0'}));
+ if(stage==='start'){const start=store.collectionReads.start.bind(store.collectionReads);store.collectionReads.start=(scope,...args)=>{if(scope==='10')throw Object.assign(Error('checkpoint disk full'),{code:'SQLITE_FULL'});return start(scope,...args);};}
+ else {const put=store.put.bind(store);store.put=(table,id,...args)=>{if(table==='works'&&id==='600')throw Object.assign(Error('page disk full'),{code:'SQLITE_FULL'});return put(table,id,...args);};}
+ await c.sync({mode:'full',syncCollections:true});assert.equal(c.status.collectionBatch.items.find(i=>i.id==='20').state,'waiting');assert.equal(c.status.collectionBatch.phase,'stopped');assert.equal(calls.length,stage==='start'?1:2);
+});
+
+test('total failure leaves all follow-up folders untouched and pending',async t=>{
+ let requests=0;const {c}=await fixture(t,async()=>{requests++;throw Error('total request failed');});await c.sync({mode:'full',syncCollections:true});
+ assert.equal(requests,1);assert.equal(c.status.collectionBatch.failed,1);assert.equal(c.status.collectionBatch.pending,2);assert.match(c.status.collectionBatch.items[0].message,/total request failed/);
+});
+
+test('stop after total completion prevents follow-up folders and retains the total log',async t=>{
+ const {c,calls,onChange,store}=await fixture(t);let stopped=false;onChange(()=>{if(!stopped&&c.status.collectionBatch?.items[0]?.state==='complete'){stopped=true;c.stop();}});await c.sync({mode:'full',syncCollections:true});
+ assert.equal(calls.length,1);assert.equal(c.status.collectionBatch.pending,2);assert.equal(store.collectionReads.info('__all__').full.status,'complete');
+});
+
+test('without the checkbox total remains a single read, and the option rejects non-total scopes',async t=>{
+ const {c,calls}=await fixture(t);await c.sync({mode:'full'});assert.equal(calls.length,1);assert.equal(c.status.collectionBatch,undefined);
+ for(const options of [{collectionId:'10'},{allAdded:true},{discoverOnly:true},{syncCollections:'yes'}])await assert.rejects(c.sync({mode:'full',syncCollections:true,...options}),/选项|总收藏/);
+ assert.equal(calls.length,1);
+});
+
+test('checked total with no added folders still completes the total read',async t=>{
+ const {c,calls,store}=await fixture(t);for(const id of ['10','20'])store.put('collections',id,{...store.collection(id),added:false});await c.sync({mode:'full',syncCollections:true});assert.equal(calls.length,1);assert.equal(c.status.collectionBatch.succeeded,1);
+});
 async function fixture(t,request){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cx-collection-batch-')),store=await Store.open(path.join(root,'library.sqlite'),path.join(root,'media'));store.setSetting('browserAccountKey','uid:1');
  store.discoverCollections([{collects_id:'10',collects_name:'同名夹'},{collects_id:'20',collects_name:'同名夹'},{collects_id:'30',collects_name:'未添加夹'}]);store.setAdded(['10','20']);

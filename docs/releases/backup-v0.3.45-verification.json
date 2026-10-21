@@ -1,0 +1,50 @@
+{
+  "version": "0.3.45",
+  "verifiedAt": "2026-10-21T16:59:51.622Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "fullSuite": {
+    "files": 71,
+    "total": 719,
+    "passed": 719,
+    "failed": 0,
+    "skipped": 0
+  },
+  "collectionReadFocused": {
+    "total": 61,
+    "newLinkedCases": 11,
+    "failed": 0
+  },
+  "interfaceChecks": 193,
+  "desktopIntegration": {
+    "source": 95,
+    "packaged": 95,
+    "smallWindow": "1100x640 setup scrollable and footer visible"
+  },
+  "countRulesUnchanged": true,
+  "packagedRuntimeFiles": 96,
+  "asarSha256": "66fbf395c41c7d64575938fea0fed4811cbd15d13efed37ba5621cec4d959c5e",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.45-Setup-x64.exe",
+      "bytes": 144914409,
+      "sha256": "90bef817d9d916d6156449d95e3a77b384b87c67504984ed37adf1a0b3fc2ddb"
+    },
+    {
+      "file": "CangXia-Backup-0.3.45-Windows-x64.exe",
+      "bytes": 144758088,
+      "sha256": "195bced34dbbc6c1b46d66c7010f7fed2ab1707798e8f44e1b0e837a3ecc9ae3"
+    }
+  ],
+  "independentReview": "Checkpoint creation/page persistence errors and resume ownership guards were fixed using failing regressions and independently re-reviewed with no important remaining findings.",
+  "cloudCI": "not-run",
+  "notes": [
+    "Checkbox is default unchecked and available for total collection only.",
+    "Each scope retains its original count formulas, membership baseline, cursor and read history.",
+    "Total failure and stop prevent custom-folder requests; login, rate limiting and persistence failure stop remaining scopes.",
+    "Only unchanged paused folder checkpoints can rebase a total-induced global revision; newly encountered ownership conflicts retain original conflict protection.",
+    "Full Node suite verifies final backend code; the final UI-only header clarification was separately rebuilt and verified in UI/native packaged flows.",
+    "Tests use isolated profiles, temporary NAS and synthetic platform responses; real user account and real NAS were not accessed."
+  ]
+}

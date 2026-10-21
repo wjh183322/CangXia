@@ -16,10 +16,11 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
   if(mode==='quick'&&!hasAnchor&&allowFullScan!==true)throw Error('没有可靠的历史对照，可能读取到列表末尾，请先确认继续');
   c.busy=true;c.cancelled=false;c.stopRequested=false;c.syncController=new AbortController();
   const signal=c.syncController.signal;
-  c.status.readSummary=null;c.status.readProgress={mode,name:collection.name,goal:null,checked:0,added:0,restored:0,startedAt:Date.now(),stage:'preparing'};c.notify();
-  let run,failure='',saveFailed=false;
+  c.status.readSummary=null;c.status.readSaveFailed=false;c.status.readProgress={mode,name:collection.name,goal:null,checked:0,added:0,restored:0,startedAt:Date.now(),stage:'preparing'};c.notify();
+  let run,failure='',saveFailed=false,creating=true;
   try{
     run=reads.start(collectionId,mode,{resume});
+    creating=false;
     for(let page=0;mode==='quick'||page<10000;page++){
       signal.throwIfAborted();if(c.cancelled)break;
       c.update('syncing',`${mode==='quick'?'正在检查新增':'正在完整核对'}「${collection.name}」`,run.count);
@@ -37,7 +38,7 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
       await c.delay();signal.throwIfAborted();
     }
     if(run.status==='running')reads.finish(run,c.cancelled?'paused':'limit',c.cancelled?'':'本次请求已达上限，进度保留，请手动继续');
-  }catch(e){failure=c.cancelled?(c.stopRequested?'':c.status.message):e.message;if(!c.cancelled)c.update('attention',failure);}
+  }catch(e){failure=c.cancelled?(c.stopRequested?'':c.status.message):e.message;if(!c.cancelled){saveFailed=creating||/SQLITE|^(ENOSPC|EIO|EROFS|EPERM|EACCES|EBUSY)$/.test(e.code||'');if(saveFailed)c.onDiagnostic({event:'read-save-failed',name:e.name,code:e.code,reason:e.message,count:run?.count});c.update('attention',failure);}}
   finally{
     c.readProgress({stage:'saving'});
     try{
@@ -46,6 +47,6 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
       if(run)c.update(!failure&&['matched','end'].includes(run.outcome)?'done':c.stopRequested?'idle':'attention',failure||`${run.reason} · 本轮读取 ${run.count} 条${run.historyVersion?run.oldCount?`，前面新增 ${run.frontAdded} 条，本轮补齐 ${reads.summary(run).filled} 条，本轮新增 ${run.added} 条`:`，首次读入 ${run.initialAdded} 条`:`，新增记录 ${run.added} 条`}${run.restored?`，恢复记录 ${run.restored} 条`:''}`,run.count);
     }catch(error){saveFailed=true;c.onDiagnostic({event:'read-save-failed',name:error.name,code:error.code,reason:error.message,count:run?.count});c.update('attention',`读取已停止，收尾进度保存失败：${error.message}；已提交的页面仍保留`);}
     if(run)try{c.status.readSummary={...reads.summary(run),message:c.status.message,saveFailed};try{store.readHistory.write(c.status.readSummary);}catch(error){c.onDiagnostic({event:'read-history-failed',reason:error.message});}}catch(error){c.status.readSummary=null;c.onDiagnostic({event:'read-history-failed',reason:error.message});}
-    c.busy=false;c.syncController=null;c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled,saveFailed});c.scheduleBrowserIdle();c.notify();
+    c.status.readSaveFailed=saveFailed;c.busy=false;c.syncController=null;c.readProgress({stage:'finished',finishedAt:Date.now(),stopped:c.cancelled,saveFailed});c.scheduleBrowserIdle();c.notify();
   }
 }

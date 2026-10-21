@@ -158,9 +158,11 @@ export class Collector{
   readProgress(change){this.status.readProgress={...this.status.readProgress,...change};this.notify();}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
   async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.cancelAuthentication();await this.browser.close();}
-  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode,allowFullScan=false,allAdded=false}={}){
+  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode,allowFullScan=false,allAdded=false,syncCollections=false}={}){
     if(typeof allAdded!=='boolean'||(allAdded&&discoverOnly))throw Error('批量读取选项无效');
+    if(typeof syncCollections!=='boolean'||syncCollections&&(collectionId!==TOTAL||allAdded||discoverOnly))throw Error('同步自建收藏夹选项仅适用于总收藏');
     if(this.batchReading)throw Error('已有批量读取任务正在进行');
+    if(syncCollections)return readAddedCollections(this,{mode:mode||(readAll?'full':'quick'),allowFullScan,includeTotal:true,resume});
     if(allAdded)return readAddedCollections(this,{mode:mode||(readAll?'full':'quick'),allowFullScan});
     if(mode&&!discoverOnly)return readCollection(this,{collectionId,mode,resume,allowFullScan});
     const epoch=this.cancelEpoch;
