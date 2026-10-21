@@ -1,0 +1,82 @@
+{
+  "version": "0.3.44",
+  "verifiedAt": "2026-10-21T15:44:16.767Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "sourceVerification": "json-only",
+  "fullSuite": {
+    "files": 71,
+    "total": 708,
+    "passed": 708,
+    "failed": 0,
+    "skipped": 0
+  },
+  "directoryAndOrderFocused": {
+    "total": 19,
+    "directoryCases": 10,
+    "failed": 0
+  },
+  "interfaceChecks": 186,
+  "isolatedBrowser": {
+    "source": 26,
+    "packaged": 26,
+    "backgroundReading": 16,
+    "realUserAccount": false
+  },
+  "windowsPreviewHandles": {
+    "packaged": 11,
+    "realNetFetch": true,
+    "realUserDirectory": false,
+    "changedPermissions": false
+  },
+  "desktopIntegration": {
+    "source": 91,
+    "packaged": 91,
+    "smallWindow": "1000x640 filters, storage refresh and reading logs visible"
+  },
+  "independentNASCatalogueDesktop": 31,
+  "queryMeasurement": {
+    "records": 30000,
+    "results": [
+      {
+        "offset": 20,
+        "ms": 44.9966
+      },
+      {
+        "offset": 29800,
+        "ms": 52.1071
+      }
+    ]
+  },
+  "packagedRuntimeFiles": 96,
+  "removedWebpageModulesAbsent": true,
+  "asarSha256": "334ec39150d5ff13a0b503d92e22f0514a88299fdc2f033a9ea05aee0ee69cfe",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.44-Setup-x64.exe",
+      "bytes": 144913341,
+      "sha256": "02184808dd91b0b7c97751ae7ca899cd78b4f3feed12c2993c7096a05e7dd77e"
+    },
+    {
+      "file": "CangXia-Backup-0.3.44-Windows-x64.exe",
+      "bytes": 144757013,
+      "sha256": "41a4fbdff400f880b22fb7691789dea82a2a2a4e7590e42d611e50e9070cf7a1"
+    }
+  ],
+  "independentReview": "Offline private-setting permission and child-directory junction replacement findings fixed and reviewed. Final native regression also verifies a directory refresh cannot mark a clean NAS as pending.",
+  "cloudCI": "not-run",
+  "previousCI": {
+    "version": "0.3.43",
+    "url": "https://github.com/wjh183322/CangXia/actions/runs/39621445514",
+    "status": "success"
+  },
+  "notes": [
+    "NAS display and selection use existing saved source positions; unavailable originals retain collection order.",
+    "Directory totals are logical sizes of all regular files under the saved root, including unregistered and temporary files; links are skipped.",
+    "Partial, cancelled and failed scans retain previous complete measurements; changed directory identities cannot publish a new measurement.",
+    "Directory size is local-only and excluded from NAS data exports and pending changes.",
+    "The full Node suite completed before removal of the redundant main-process Store.save notification; this final IPC-only correction was verified again by source and packaged native desktop flows, and focused cases were rerun.",
+    "No actual user media directories or real NAS were scanned or modified during tests."
+  ]
+}

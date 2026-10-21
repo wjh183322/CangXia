@@ -12,7 +12,7 @@ import {DeletionConflicts} from './deletion-conflicts.mjs';
 import {scopeEntry} from './device-scope-state.mjs';
 import {normalizeScope,scopeKey} from '../shared/backup-scopes.mjs';
 
-const localKeys=new Set(['authNeedsRefresh','loggedOut','root','sessionConnected','accessHoldUntil','downloadJobs','downloadConcurrency','localRemoval','nasRemovalJob','mediaCacheLimits']);
+const localKeys=new Set(['authNeedsRefresh','loggedOut','root','sessionConnected','accessHoldUntil','downloadJobs','downloadConcurrency','localRemoval','nasRemovalJob','mediaCacheLimits','directorySizeScan']);
 export class BackupClient{
  constructor(store,profile,{vault,onChange=()=>{},onUnavailable=()=>{},onDiagnostic=()=>{},isIdle=()=>true,heartbeatMs=15000}={}){
   this.profile=profile;this.stateFile=new AtomicJsonFile(path.join(profile,'backup-state.json'));this.cache=new MediaCache(store,profile,{notify:()=>this.emit()});this.covers=new BackupCovers(this);this.analyzer=new BackupAnalysis(store.file);

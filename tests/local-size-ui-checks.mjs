@@ -9,12 +9,13 @@ export async function checkLocalSizeUI({store,notify,data,act,settle,check}){
  try{
   await act(async()=>{notify(snapshot());[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('本地媒体库')).click();await settle();});await waitOrder(ids);
   const sort=document.querySelector('[aria-label="本地媒体库排序"]');assert.ok(sort,'local library exposes size sorting');assert.equal(sort.value,'original');
+  check('local filter row matches the account filters and size ordering lives beside pagination',document.querySelectorAll('.source-filters .filter-tile').length===5&&!document.querySelector('.source-filters').contains(sort)&&document.querySelector('.selection-toolbar').contains(sort)&&!document.querySelector('.local-size-filters'));
   await act(async()=>{sort.value='size-desc';sort.dispatchEvent(new Event('change',{bubbles:true}));await settle();});await waitOrder(['980003','980001','980002']);check('local size order uses backend ID order even with no other filters',calls.at(-1).sort==='size-desc');
   check('unknown indexed sizes are labelled rather than shown as zero',document.querySelector('[data-work-id="980002"] .local-size-label')?.textContent.includes('大小待确认'));
   store.fileStates.cache.set('980003',{...store.fileStates.get('980003'),status:'unknown'});store.lightViews.invalidateFiles('980003');store.revision++;await act(async()=>{notify(snapshot());await settle();});await waitOrder(['980001','980002','980003']);check('a changed file-size index refreshes the active ordering',document.querySelector('[data-work-id="980003"] .local-size-label').textContent.includes('大小待确认'));
   store.fileStates.cache.set('980003',{...store.fileStates.get('980003'),status:'complete'});store.lightViews.invalidateFiles('980003');store.revision++;await act(async()=>{notify(snapshot());await settle();});await waitOrder(['980003','980001','980002']);
   await act(async()=>{sort.value='size-asc';sort.dispatchEvent(new Event('change',{bubbles:true}));await settle();});await waitOrder(['980001','980003','980002']);
-  check('local ordering explains that shared audio and cache are separate',document.querySelector('.workspace').textContent.includes('共享配乐')&&document.querySelector('.workspace').textContent.includes('缓存'));
+  check('local ordering explains its size scope without adding a row to the filter panel',document.querySelector('.local-size-sort').title.includes('共享配乐')&&document.querySelector('.local-size-sort').title.includes('缓存')&&!document.querySelector('.filter-panel .local-size-note'));
   await act(async()=>{[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('账号收藏')).click();await settle();});await waitOrder(ids);check('size sorting never rewrites collection order and remains local-only',!document.querySelector('[aria-label="本地媒体库排序"]'));
  }finally{window.cangxia.filterWorks=previousFilter;window.cangxia.state=previousState;}
 }

@@ -3,6 +3,10 @@ import {nasLibrary,nasWorks} from '../src/nas-library.mjs';
 import {Store} from '../electron/store.mjs';import {SnapshotFeed} from '../electron/snapshot-feed.mjs';import {mergeState} from '../electron/state-patch.mjs';
 const asset={key:'image-0',file:'image.png',kind:'image',size:10,sha256:'a'.repeat(64)};
 const work=(id,collectionId='__all__')=>({id,author:{nickname:'同名作者'},backedUp:true,backupRecord:{id,collectionId,assets:[asset]}});
+
+test('legacy NAS collection pages use the selected folder order instead of total collection order',()=>{
+ const data={works:[work('1','9'),work('2','9'),work('3','9')],collections:[{id:'9',name:'夹'}],members:{__all__:['1','2','3'],9:['3','1','2']}};assert.deepEqual(nasWorks(nasLibrary(data),'collection',{collection:'9'}).map(w=>w.id),['3','1','2']);
+});
 test('NAS source facets overlap by relation, deduplicate totals and bytes, and retain removed scopes',()=>{
  const data={works:[work('1'),work('2','author:A'),work('3','author:B'),work('4','8'),{...work('5'),backedUp:false,backupRecord:{assets:[],backupRemoved:true}}],collections:[{id:'__all__',name:'收藏'},{id:'9',name:'摄影',rank:0}],localMembers:{__all__:['1'],9:['1']},authors:[{id:'A',name:'同名作者'}],authorMembers:{A:['1','2','5']},backupAuthors:[{id:'B',name:'已移除作者乙',archived:true}],backupAuthorMembers:{B:['3']}};
  const n=nasLibrary(data);assert.deepEqual(n.counts,{all:4,collection:2,author:3});assert.equal(n.bytes,10);assert.deepEqual(nasWorks(n,'all').map(w=>w.id),['1','2','3','4']);assert.deepEqual(nasWorks(n,'collection').map(w=>w.id),['1','4']);assert.deepEqual(nasWorks(n,'author',{author:'A'}).map(w=>w.id),['1','2']);assert.deepEqual(nasWorks(n,'collection',{collection:'9'}).map(w=>w.id),['1']);assert.ok(n.collections.find(c=>c.id==='8').removed);assert.ok(n.authors.find(a=>a.id==='B').removed);

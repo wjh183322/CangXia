@@ -1,5 +1,6 @@
 import {checkSourceStatusDesktop} from './source-status-desktop-checks.mjs';
 import {checkCollectionBatchDesktop} from './collection-batch-desktop-checks.mjs';
+import {checkStorageSizeDesktop,checkLocalFilterLayout} from './storage-size-desktop-checks.mjs';
 import {checkReadHistoryDesktop} from './read-history-desktop-checks.mjs';
 import {checkAuthorDesktop} from './author-desktop-checks.mjs';
 import {app,session,shell} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
@@ -13,10 +14,12 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   const title=await win.webContents.executeJavaScript('document.title');check('backup title and settings identify the correct edition',title.includes('藏匣备份版 v'+data.version)&&win.getTitle()===title);
   await call('setDownloadConcurrency',6);check('native concurrency setting works without NAS and rejects invalid limits',(await call('state')).queue.concurrency===6);await assert.rejects(call('setDownloadConcurrency',7));await call('setDownloadConcurrency',3);
   await assert.rejects(call('setTags','123',['blocked']));check('mutations rejected before NAS comparison',true);
+  await checkStorageSizeDesktop({win,call,check});
   await call('configureBackup',settings);data=await call('state');check('pinned HTTPS service permits local use after comparison',data.storage.writable===true);
   const preview=await call('previewExistingLibrary','local');check('import preview reports fixture records and preserves the empty destination',preview.works===1&&preview.files===3&&(await call('state')).works.length===0);
   await call('importExistingLibrary',preview.token);data=await call('state');check('copy import retains local media and marks pending changes',data.works[0].local&&data.storage.pending&&fs.existsSync(path.join(process.env.CANGXIA_BACKUP_TEST_ORIGINAL,'library.sqlite')));
   await call('syncBackup');data=await call('state');check('background sync confirms NAS state without removing local media',data.storage.phase==='synced'&&data.works[0].local&&data.works[0].backedUp);
+  assert.equal(data.storage.pending,false);await call('refreshStorageSize');check('refreshing a clean local directory never creates pending NAS changes',(await call('state')).storage.pending===false);
   const searched=await call('filterWorks',data.works.map(w=>w.id),{query:'备份版桌面'});check('native indexed search returns matching IDs without restoring heavy list descriptions',searched.ids.join(',')==='123'&&data.works[0].description===undefined);
   const intent=await call('prepareScopedDeletion',{ids:['123'],files:true,records:false,target:'local'});assert.equal(intent.summary.files,true);await call('cancelPreparedDeletion',intent.token);check('list state omits local paths and full file manifests',data.works[0].localRecord.path===undefined);const local=(await call('workDetail','123')).localRecord;assert.ok(local.path.startsWith(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE)+path.sep));for(const a of local.assets)fs.unlinkSync(path.join(local.path,a.file));data=await call('refreshFiles');check('clearing local files retains NAS backup',!data.works[0].local&&data.works[0].backedUp);
   const image=await win.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve({width:img.naturalWidth,height:img.naturalHeight});img.onerror=()=>reject(new Error('NAS cover failed to decode'));img.src='app-media://cover/123?fresh-profile-test';})`);
@@ -79,6 +82,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
       if(sizeMatches)break;await new Promise(r=>setTimeout(r,40));
     }
     assert.ok(sizeMatches,'local size order did not settle: '+JSON.stringify(sizeSample));
+    await checkLocalFilterLayout({win,check});
     check('native local size sorting displays backend order without rewriting memberships',memberOrderBefore===JSON.stringify((await call('state')).members));
     const unknownSuffix="(()=>{let unknown=false;const labels=[...document.querySelectorAll('.work-card .local-size-label')];if(!labels.length)return false;for(const label of labels){const missing=label.textContent.includes('大小待确认')||label.textContent.includes('仅配乐');if(unknown&&!missing)return false;unknown||=missing;}return true;})()",sizeRefreshDeadline=Date.now()+6000;
     while(!await win.webContents.executeJavaScript(unknownSuffix)&&Date.now()<sizeRefreshDeadline)await new Promise(r=>setTimeout(r,50));check('native changing file-size data settles with unknown sizes after known sizes',await win.webContents.executeJavaScript(unknownSuffix));

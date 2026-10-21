@@ -24,6 +24,6 @@ export function nasLibrary(data){
 export function nasWorks(library,tab,{collection='',author=''}={}){
  let ids;if(tab==='author')ids=author?new Set(library.authors.find(a=>a.id===author)?.ids||[]):library.authorAll;
  else if(tab==='collection'||collection)ids=collection&&collection!==TOTAL?new Set(library.collections.find(c=>c.id===collection)?.ids||[]):library.collectionAll;
- if(tab==='author'&&author)return [...ids].map(id=>library.byId.get(id)).filter(Boolean);
+ if(tab==='author'&&author||collection&&collection!==TOTAL)return [...ids].map(id=>library.byId.get(id)).filter(Boolean);
  return ids?library.all.filter(w=>ids.has(w.id)):library.all;
 }

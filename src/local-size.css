@@ -1,6 +1,6 @@
-.filter-grid.source-filters.local-size-filters{grid-template-columns:repeat(6,minmax(0,1fr))}
-.local-size-sort{display:flex;flex-direction:column;justify-content:center;gap:4px;padding:6px 10px;border:1px solid #e5eaf2;border-radius:7px;color:#8190a7;font-size:11px}
-.local-size-sort select{width:100%;border:0;background:transparent;color:#52647e;font-size:12px}
+.local-size-sort{display:flex;align-items:center;gap:7px;color:#8190a7;font-size:11px;white-space:nowrap}
+.local-size-sort select{max-width:130px;border:1px solid #e5eaf2;border-radius:6px;padding:6px;background:#fff;color:#52647e;font-size:11px}
 .local-size-label{display:block;margin:6px 0;color:#8190a7;font-size:11px}
-.local-size-note{font-size:11px;color:#8190a7;margin:8px 0 0;line-height:1.6}
-@media(max-width:1150px){.filter-grid.source-filters.local-size-filters{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.selection-toolbar{flex-wrap:wrap;gap:10px}.selection-toolbar>.list-view-actions{margin-left:auto;gap:12px;flex-wrap:wrap;justify-content:flex-end}
+.storage-size-row{display:flex;align-items:flex-start;gap:7px;margin-top:12px}.storage-size-row strong{font-size:18px;line-height:1.5;min-width:0}.storage-size-row strong small{display:block;font-size:9px;font-weight:400;color:#98a3b5}.storage-size-row>.text-button{flex-shrink:0;align-self:center;margin-left:auto;font-size:10px;gap:3px;padding:2px 0}.storage-size-time,.storage-size-message{font-size:9px;color:#98a3b5;line-height:1.6;margin-top:7px;overflow-wrap:anywhere}.storage-size-message[role=alert]{color:#bd675a}.storage-size-message .text-button{font-size:9px;gap:3px;margin-left:6px}
+@media(max-height:760px){.app-shell .sidebar{padding-top:14px;padding-bottom:8px}.sidebar .brand{margin-bottom:12px}.sidebar .main-nav button{padding-top:8px;padding-bottom:8px}.sidebar .sidebar-divider{margin-top:10px;margin-bottom:9px}.sidebar .collection-heading{padding-top:12px;padding-bottom:6px}.sidebar .collection-list{min-height:0}.sidebar .downloads-nav{padding-top:8px;padding-bottom:8px;margin-top:8px}.sidebar .storage-card{margin-top:6px;padding-top:9px;padding-bottom:6px}.sidebar .storage-size-row{margin-top:6px}.sidebar .storage-size-row strong{margin-top:0;font-size:16px}.sidebar .storage-settings{margin-top:7px;padding-top:6px}.sidebar .sidebar-footer{margin-top:6px}}
