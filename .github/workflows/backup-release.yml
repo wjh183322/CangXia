@@ -19,7 +19,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node node_modules/electron/install.js
       - name: Verify state-save failures and Windows file sharing
-        run: node --test --test-concurrency=1 tests/atomic-json-file.test.mjs tests/backup-state-flow.test.mjs
+        run: node --test --test-concurrency=1 tests/atomic-json-file.test.mjs tests/backup-state-flow.test.mjs tests/backup-idle.test.mjs
       - run: npm test
       - run: npm run test:ui
       - name: Check NAS layout at desktop and small window sizes
@@ -136,3 +136,4 @@ jobs:
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           gh release create "$tag" --verify-tag --prerelease --title "藏匣备份版 ${tag#backup-v} 预览" --notes-file "docs/releases/$tag.md" release-files/*
+

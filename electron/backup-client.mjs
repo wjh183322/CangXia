@@ -89,7 +89,22 @@ export class BackupClient{
   if(!this[slot]){const revision=this.libraryRevision(),base=this.meta.baseRevision;this[slot]=this.analyzer.inspect(this.meta.baseline||{},{summary:!full,prepare:full,mediaIds}).then(result=>({...result,analyzedRevision:revision,analyzedBase:base})).finally(()=>{this[slot]=null;});}
   const result=await this[slot];if(result.analyzedRevision!==this.libraryRevision()||result.analyzedBase!==this.meta.baseRevision)return this.analysis(full,mediaIds);return result;
  }
- async changed(){clearTimeout(this.changeTimer);if(this.applying)return;const revision=this.libraryRevision(),base=this.meta.baseRevision,result=await this.analysis(),stale=revision!==this.libraryRevision()||base!==this.meta.baseRevision;this.meta.dirty=stale||(result.changeCount??result.changes?.length??0)>0||await this.mediaDirty();this.status.pendingCovers=result.pendingCovers;this.status.pendingAudio=this.audio?.pendingCount()||0;this.status.pending=this.meta.dirty||this.status.pendingCovers>0||this.status.pendingAudio>0;this.status.pendingRecords=result.pendingRecords;await this.persist();if(this.status.writable&&!this.syncing){this.status.phase=this.meta.dirty?'pending':this.status.pendingCovers?'coversPending':'synced';this.status.message=this.meta.dirty?'本机资料待同步，空闲后备份到 NAS':this.status.pendingCovers?`记录已同步，${this.status.pendingCovers} 张封面暂未备份；已有封面可正常显示，可稍后重试`:this.status.unverifiedMedia?'记录已同步，部分本地文件状态待确认':'本机记录与 NAS 已同步';if(!this.meta.dirty&&!this.status.pendingCovers&&this.status.pendingAudio){this.status.phase='audioPending';this.status.message=this.status.sharedAudio?'配乐待备份，空闲后同步':'配乐已保存在本机，请升级 NAS 服务至 0.2.3 后备份音频';}}this.emit();if(stale&&!this.closed)this.scheduleChanged();}
+ async changed(){
+  clearTimeout(this.changeTimer);
+  for(;;){
+   if(this.applying)return;
+   const revision=this.libraryRevision(),base=this.meta.baseRevision,result=await this.analysis(),mediaDirty=await this.mediaDirty();
+   if(this.applying)return;
+   if(revision!==this.libraryRevision()||base!==this.meta.baseRevision){await new Promise(r=>setImmediate(r));continue;}
+   this.meta.dirty=(result.changeCount??result.changes?.length??0)>0||mediaDirty;
+   this.status.pendingCovers=result.pendingCovers;this.status.pendingAudio=this.audio?.pendingCount()||0;
+   this.status.pending=this.meta.dirty||this.status.pendingCovers>0||this.status.pendingAudio>0;this.status.pendingRecords=result.pendingRecords;
+   await this.persist();
+   if(revision!==this.libraryRevision()||base!==this.meta.baseRevision){await new Promise(r=>setImmediate(r));continue;}
+   if(this.status.writable&&!this.syncing){this.status.phase=this.meta.dirty?'pending':this.status.pendingCovers?'coversPending':'synced';this.status.message=this.meta.dirty?'本机资料待同步，空闲后备份到 NAS':this.status.pendingCovers?`记录已同步，${this.status.pendingCovers} 张封面暂未备份；已有封面可正常显示，可稍后重试`:this.status.unverifiedMedia?'记录已同步，部分本地文件状态待确认':'本机记录与 NAS 已同步';if(!this.meta.dirty&&!this.status.pendingCovers&&this.status.pendingAudio){this.status.phase='audioPending';this.status.message=this.status.sharedAudio?'配乐待备份，空闲后同步':'配乐已保存在本机，请升级 NAS 服务至 0.2.3 后备份音频';}}
+   this.emit();return;
+  }
+ }
  makeTransport(){if(!this.config)return null;const token=this.vault.open(this.config.sealedToken);return new BackupTransport({...this.config,token,deviceId:this.deviceId,onDiagnostic:this.onDiagnostic});}
  async configure(input){
   if(this.syncing)throw new Error('请先结束正在进行的备份同步');const url=normalizeEndpoint(String(input.url||'').trim()),fingerprint=normalizeFingerprint(String(input.fingerprint||'')),name=String(input.deviceName||os.hostname()).trim();if(!name||name.length>80)throw new Error('设备名称无效');const interval=Number(input.intervalMinutes||5);if(!Number.isInteger(interval)||interval<1||interval>1440)throw new Error('同步间隔应为 1 至 1440 分钟');

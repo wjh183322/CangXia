@@ -39,3 +39,10 @@ test('cover, media and shared audio keep exact bytes through transient state-sav
  let attempts=0;const release=fault(t,a,()=>{if(++attempts<=2)denied();});a.fetchCover=async()=>new Response(png,{headers:{'content-type':'image/png'}});
  try{await a.sync();assert.equal(a.status.writable,true);assert.ok(a.store.work('1').backupCover);const remote=a.store.get('backup_downloads','1');assert.equal(remote.audio.object.sha256,sha256);assert.ok(remote.assets.some(v=>v.key==='video'));assert.deepEqual(await fsp.readFile(path.join(f.root,'server','objects',sha256)),bytes);assert.equal(audio.pendingCount(),0);assert.equal(a.meta.pendingCommit,undefined);assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile,'backup-state.json'))).baseRevision,f.server.status().revision);}finally{release();}
 });
+for(const recompute of [false,true])test('an earlier status analysis cannot overwrite a completed sync ('+(recompute?'worker refreshed during wait':'old snapshot')+')',async t=>{
+ const f=await fixture(t),a=f.a;tag(a,'committed');const analysis=a.analysis.bind(a);let blocked=true,enter,release;const entered=new Promise(r=>enter=r),gate=new Promise(r=>release=r);
+ a.analysis=async(...args)=>{const result=await analysis(...args);if(blocked&&!args[0]){blocked=false;enter();await gate;if(recompute)return analysis(...args);}return result;};
+ const older=a.changed();await entered;try{await a.sync();assert.equal(a.status.phase,'synced');}finally{release();}await older;
+ assert.equal(a.meta.dirty,false);assert.equal(a.status.pending,false);assert.equal(a.status.phase,'synced');assert.equal(a.status.pendingRecords,0);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(a.profile,'backup-state.json'))).dirty,false);
+});
