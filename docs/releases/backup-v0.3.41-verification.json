@@ -1,0 +1,47 @@
+{
+  "version": "0.3.41",
+  "verifiedAt": "2026-10-21T13:13:46.032Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "sourceVerification": "json-only",
+  "fullSuite": {
+    "files": 67,
+    "total": 652,
+    "passed": 652,
+    "failed": 0,
+    "skipped": 0
+  },
+  "focused": {
+    "total": 67,
+    "failed": 0
+  },
+  "isolatedBrowser": {
+    "source": 23,
+    "packaged": 23,
+    "backgroundReading": 16,
+    "realUserAccount": false
+  },
+  "desktopIntegration": 76,
+  "packagedRuntimeFiles": 93,
+  "removedWebpageModulesAbsent": true,
+  "asarSha256": "3b9a1138313593cd1c908ab1a2e4e033442754aa4f84ae898a230ab0c0a1823f",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.41-Setup-x64.exe",
+      "bytes": 144907820,
+      "sha256": "76e4351b9e11a2a75748b4c8a0d8e85cda2ca32159aa87644da161245077d8d2"
+    },
+    {
+      "file": "CangXia-Backup-0.3.41-Windows-x64.exe",
+      "bytes": 144751487,
+      "sha256": "d680f5eb96214ccb5887ba721df8ab169d8480db6fa36c33f0a3aaaa119b2768"
+    }
+  ],
+  "independentReview": "Two supplied access-filter cases reproduced and fixed; independent review found no important issues",
+  "cloudCI": "not-run",
+  "notes": [
+    "Data, reading records, cached files and NAS copies are retained.",
+    "Exact supplied status_friend_see and status_deleted JSON responses are covered; no webpage fallback."
+  ]
+}

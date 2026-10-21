@@ -72,7 +72,7 @@ jobs:
           retention-days: 14
       - name: Verify JSON-only work availability
         run: |
-          node --test --test-concurrency=1 tests/source-json.test.mjs tests/source-filter.test.mjs tests/source-audit.test.mjs tests/source-status.test.mjs
+          node --test --test-concurrency=1 tests/source-json.test.mjs tests/source-access-filter.test.mjs tests/source-filter.test.mjs tests/source-audit.test.mjs tests/source-status.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/source-json-browser-test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

@@ -39,7 +39,40 @@
     }
   ],
   "independentReview": "Two P2 response-conflict issues fixed and re-reviewed; no remaining important findings",
-  "cloudCI": "not-run",
+  "cloudCI": {
+    "id": 39602169897,
+    "url": "https://github.com/wjh183322/CangXia/actions/runs/39602169897",
+    "head": "7bbc6cb6c87ce267ea2b3568362bceb93a5baa6a",
+    "status": "completed",
+    "conclusion": "success",
+    "counts": [
+      {
+        "name": "Windows full tests 0",
+        "tests": 170,
+        "passed": 170
+      },
+      {
+        "name": "Windows full tests 2",
+        "tests": 89,
+        "passed": 89
+      },
+      {
+        "name": "Windows full tests 1",
+        "tests": 150,
+        "passed": 150
+      },
+      {
+        "name": "Windows full tests 3",
+        "tests": 237,
+        "passed": 237
+      }
+    ],
+    "total": 646,
+    "failed": 0,
+    "skipped": 0,
+    "desktop": "success",
+    "server": "success"
+  },
   "notes": [
     "Data, reading records, cached files and NAS copies are retained.",
     "One archive extraction returned code 2 before low-level output was captured; original cause unconfirmed. Final complete extraction, hash and startup checks passed for both listed EXEs."

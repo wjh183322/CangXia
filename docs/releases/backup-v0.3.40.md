@@ -12,4 +12,6 @@
 
 本机完整测试 646 项、状态专项 61 项、源码与打包后的 JSON 浏览器检查各 21 项、后台账号读取 16 项、打包桌面集成 76 项通过。两种实际 EXE 已独立解包并启动验证；尚未将本机结果作为云端 CI 或真实用户账号验收。
 
+后续[云端完整复核](https://github.com/wjh183322/CangXia/actions/runs/39602169897)已完成：同一源码提交的四组 Windows 测试共 646 项通过、零失败、零跳过，desktop 与 server 作业均成功。具体分组及源码提交记录在本版验收数据中。
+
 本次依据与真实样本见[进一步核实](../research/2026-10-21-empty-detail-and-note-route-verification.md)。自动与隔离浏览器测试结果见[本轮验证](../research/2026-10-21-json-only-source-verification.md)。

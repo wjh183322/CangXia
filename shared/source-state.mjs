@@ -15,8 +15,8 @@ export function filteredSourceState(data,id){
  const message=String(filter.detail_msg||'').trim(),notice=String(filter.notice||'').trim();
  const statusMessages=[data?.status_msg,data?.message,data?.data?.status_msg,data?.data?.message].map(value=>String(value??'').trim()).filter(Boolean);
  if(/登录|验证|访问受限|频繁|稍后|可能|重试|异常|错误|失败|login|captcha|challenge|rate.?limit|too many|timeout|network|error|retry|try again/i.test([...statusMessages,message,notice].join(' ')))return null;
- // Supplied privacy response proves inaccessibility for this account, not deletion.
- if(filter.filter_reason==='author_secret'&&envelope.aweme_detail===null&&notice==='作品暂时无法查看'&&/^由于对方隐私设置[，,]\s*无法查看(?:[，,。]|$)/.test(message))return {state:'unavailable',reason:'隐私限制，当前账号无法查看此作品。平台提示：'+message};
+ // Supplied privacy responses prove inaccessibility for this account, not deletion.
+ if(['author_secret','status_friend_see'].includes(filter.filter_reason)&&envelope.aweme_detail===null&&notice==='作品暂时无法查看'&&/^由于对方隐私设置[，,]\s*无法查看(?:[，,。]|$)/.test(message))return {state:'unavailable',reason:'隐私限制，当前账号无法查看此作品。平台提示：'+message};
  // This empty-text audit tuple is another supplied, work-bound real response.
  // It proves current inaccessibility, not deletion or a particular audit result.
  if(filter.filter_reason==='status_audit_self_see'&&envelope.aweme_detail===null&&!message&&!notice)return {state:'unavailable',reason:'原作品当前不可访问，平台未提供具体原因'};
@@ -24,9 +24,9 @@ export function filteredSourceState(data,id){
  // internal 404. Require the matching empty filter tuple observed in research;
  // a bare null, malformed response or access warning is not this evidence.
  if(filter.filter_reason===''&&envelope.aweme_detail===null&&!message&&!notice&&statusMessages.every(value=>/^(?:ok|success|成功|请求成功)$/i.test(value)))return {state:'unavailable',reason:'原作品当前不可访问，平台未提供作品详情'};
- // This tuple is grounded in the supplied real response. Do not infer deletion
+ // These tuples are grounded in supplied real responses. Do not infer deletion
  // from an undocumented filter code or a permission hint on its own.
- if(filter.filter_reason!=='status_self_see'||notice!=='抱歉，作品不见了'||!/^因作品权限或已被删除[，,]\s*无法观看(?:[，,。]|$)/.test(message))return null;
+ if(!['status_self_see','status_deleted'].includes(filter.filter_reason)||envelope.aweme_detail!==null||notice!=='抱歉，作品不见了'||!/^因作品权限或已被删除[，,]\s*无法观看(?:[，,。]|$)/.test(message))return null;
  return {state:'unavailable',reason:'权限限制或已删除，当前无法观看。平台提示：'+message};
 }
 export function detailSourceState(raw,id,parsed){
