@@ -6,6 +6,7 @@ import { validateAuth, parseReferenceConfig } from './auth-data.mjs';
 import {validAccountIdentity} from './account-identity.mjs';
 import { pageResult, normalizeCollections, paginate } from './api-pagination.mjs';
 import {readCollection} from './collection-reader.mjs';
+import {readAddedCollections} from './collection-batch.mjs';
 import {parseMusicInfo} from '../shared/music.mjs';
 import {audioSources} from './work-audio.mjs';
 
@@ -157,7 +158,10 @@ export class Collector{
   readProgress(change){this.status.readProgress={...this.status.readProgress,...change};this.notify();}
   cancelResolve(message='操作已停止'){for(const p of this.waiters.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.waiters.clear();}
   async dispose(){this.closed=true;clearTimeout(this.browserIdle);this.stop();this.cancelResolve();await this.cancelAuthentication();await this.browser.close();}
-  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode,allowFullScan=false}={}){
+  async sync({discoverOnly=false,collectionId=TOTAL,readAll=false,maxNew=20,resume=false,mode,allowFullScan=false,allAdded=false}={}){
+    if(typeof allAdded!=='boolean'||(allAdded&&discoverOnly))throw Error('批量读取选项无效');
+    if(this.batchReading)throw Error('已有批量读取任务正在进行');
+    if(allAdded)return readAddedCollections(this,{mode:mode||(readAll?'full':'quick'),allowFullScan});
     if(mode&&!discoverOnly)return readCollection(this,{collectionId,mode,resume,allowFullScan});
     const epoch=this.cancelEpoch;
     if(this.busy||this.waiters.size)throw new Error('已有读取任务正在进行');

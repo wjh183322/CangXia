@@ -1,0 +1,67 @@
+{
+  "version": "0.3.43",
+  "verifiedAt": "2026-10-21T14:56:58.847Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "sourceVerification": "json-only",
+  "fullSuite": {
+    "files": 69,
+    "total": 691,
+    "passed": 691,
+    "failed": 0,
+    "skipped": 0
+  },
+  "collectionReadFocused": {
+    "total": 39,
+    "newBatchCases": 18,
+    "failed": 0
+  },
+  "interfaceChecks": 179,
+  "isolatedBrowser": {
+    "source": 26,
+    "packaged": 26,
+    "backgroundReading": 16,
+    "realUserAccount": false
+  },
+  "windowsPreviewHandles": {
+    "packaged": 11,
+    "realNetFetch": true,
+    "realUserDirectory": false,
+    "changedPermissions": false
+  },
+  "desktopIntegration": {
+    "source": 85,
+    "packaged": 85,
+    "smallWindow": "1100x640 stop button visible"
+  },
+  "packagedRuntimeFiles": 95,
+  "removedWebpageModulesAbsent": true,
+  "asarSha256": "8229ff368dcc491947c44312470585727d825e923acc919f46c4dffc5db476ca",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.43-Setup-x64.exe",
+      "bytes": 144911392,
+      "sha256": "4e64b1afbefb6daf7ed3ff60ea9fc4554335d430605698a95626215542bae52a"
+    },
+    {
+      "file": "CangXia-Backup-0.3.43-Windows-x64.exe",
+      "bytes": 144755062,
+      "sha256": "f3f67f2cf2cbaaf4c7568bf3ddb3b5007b7f99623aecb5c7b27737f65eba1a6e"
+    }
+  ],
+  "independentReview": "Preparation-stage cancellation and expired-cookie early return fixed with failing regressions; reviewed again with no important remaining findings.",
+  "cloudCI": "not-run",
+  "previousCI": {
+    "version": "0.3.42",
+    "url": "https://github.com/wjh183322/CangXia/actions/runs/39615814588",
+    "status": "failure",
+    "detail": "Node shards and server passed; desktop source-JSON browser could not initialize its dedicated SystemBrowser. Not treated as a proven environment flake."
+  },
+  "notes": [
+    "Batch reads added custom collections only; it never reads total favourites or starts media downloads.",
+    "Per-folder checkpoints and read histories survive stopping; account changes and rate limits stop the remaining folders.",
+    "Preparation-stage cancellation rejects before any collection request; late responses after stop cannot write a page.",
+    "Known inaccessible folders are skipped without deleting retained works or files."
+  ]
+}

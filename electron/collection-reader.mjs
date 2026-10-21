@@ -9,7 +9,7 @@ export async function readCollection(collector,{collectionId=TOTAL,mode='quick',
   const collection=store.collection(collectionId);
   if(!collection?.added||collection.remoteMissing)throw Error('请先添加有效的收藏夹');
   await c.ready;
-  try{c.assertNotCoolingDown();if(!(await c.isAuthenticated())){c.update('attention','请先连接原抖音账号，再读取收藏');return;}}catch(e){c.update('attention',e.message);return;}
+  try{c.assertNotCoolingDown();if(!(await c.isAuthenticated())){c.needsLogin('请先连接原抖音账号，再读取收藏');return;}}catch(e){c.update('attention',e.message);return;}
   if(epoch!==c.cancelEpoch){c.update('idle','已取消读取，原资料保留');return;}
   reads.importLegacy(collectionId);
   const hasAnchor=resume?reads.get(collectionId,'quick')?.baselineKnown:!!reads.baseline(collectionId);

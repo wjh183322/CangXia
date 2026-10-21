@@ -59,12 +59,12 @@ const writes=new Set(['addAuthor','readAuthor','archiveAuthor','confirmCollectio
 let rendererReady=false,firstState=true,startupLoading=true,startupClosing=false;
 const startupStage=name=>diagnostics?.record({event:"startup-stage",name,elapsedMs:Math.round(process.uptime()*1000)});
 let window, store, collector, queue, flatQueue, qrLogin, timer, quitting=false,feed,diagnostics,readStarting=false,loggingOut=false,exitConfirmed=false,exitPrompt=false;
-const readLocked=()=>readStarting||!!collector?.busy;
+const readLocked=()=>readStarting||!!collector?.busy||!!collector?.batchReading;
 const lockedNotice=()=>{if(window&&!window.isDestroyed())window.webContents.send('cangxia:notice',creatorDetails?.running?'请先点击“停止更新”，再关闭软件':'请先点击“停止读取”，保存进度后再关闭软件');};
 const deleteIntents=new Map();
 const stateTransfers=new Map();
 const inFlightActions=new Set(),actionDrains=new Map();
-function runtimeState(){return {scopedDeletion:scopedDeletion?.state(),deletionResolution:backup?.deletions?.state(),deletionRevision:store.deviceScopes.revision,nasCatalogue:nasCatalogue?.state(),nasCatalogueOverview:backup.meta.libraryId?nasCatalogue?.overview():null,audioQueue:audio?.state(),repairCheck:repairChecks?.state(),contentRevision:store.backupRevision(),nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:collector.busy},queue:queue.state({summary:true}),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,cache:backup.cache.summary(),config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing,reconcile:store.localReconcile.state(),fileCheck:store.fileStates.state()},syncProgress:store.syncProgress?.()||[]};}
+function runtimeState(){return {scopedDeletion:scopedDeletion?.state(),deletionResolution:backup?.deletions?.state(),deletionRevision:store.deviceScopes.revision,nasCatalogue:nasCatalogue?.state(),nasCatalogueOverview:backup.meta.libraryId?nasCatalogue?.overview():null,audioQueue:audio?.state(),repairCheck:repairChecks?.state(),contentRevision:store.backupRevision(),nasRemoval:nasRemoval?.state(),localRemoval:localRemoval?.state(),version:appVersion,collector:{...collector.status,busy:!!(collector.busy||collector.batchReading)},queue:queue.state({summary:true}),flatQueue:flatQueue?.state(),qr:qrLogin?.state(),defectRepair:defectRepair?.state(),storage:{...backup.status,cache:backup.cache.summary(),config:backup.publicConfig(),busy:backupBusy,syncing:!!backup.syncing,reconcile:store.localReconcile.state(),fileCheck:store.fileStates.state()},syncProgress:store.syncProgress?.()||[]};}
 function snapshot() { return backup?.applying&&feed.previous?{...feed.previous,libraryRevision:feed.revision,...runtimeState()}:feed.frame(runtimeState(),{full:true}); }
 function notify() {
   if (quitting) return;
@@ -330,7 +330,8 @@ try {
   });
   handler('sync', async(options = {}) => {
     if(!options||typeof options!=='object')throw new Error('读取选项无效');
-    return foregroundRead(async()=>{await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:collector.busy},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),readSummary:options.discoverOnly?null:collector.status.readSummary,...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
+    const epoch=collector.cancelEpoch;
+    return foregroundRead(async()=>{if(epoch!==collector.cancelEpoch)throw Error('已停止，未开始读取');await collector.sync({...options,mode:options.mode||(options.readAll?'full':'quick')});return {collector:{...collector.status,busy:!!(collector.busy||collector.batchReading)},syncProgress:store.syncProgress(),collectionReadInfo:store.collectionReads.snapshot(),readSummary:options.discoverOnly||options.allAdded?null:collector.status.readSummary,...(options.discoverOnly?{collections:store.all('collections').sort((a,b)=>a.rank-b.rank)}:{})};});
   });
   handler('confirmCollectionRead',options=>foregroundRead(async()=>{if(!options||typeof options!=='object')throw new Error('确认选项无效');store.collectionReads.confirm(options.collectionId,options.mode,options.token);const errors=await store.reconcilePending();notify();if(errors.length)throw Error(errors.join('；'));return true;}));
   handler('resumeReconcile',()=>foregroundRead(async()=>{
