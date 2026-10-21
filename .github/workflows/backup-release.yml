@@ -18,6 +18,8 @@ jobs:
           python-version: '3.12'
       - run: npm ci --ignore-scripts
       - run: node node_modules/electron/install.js
+      - name: Verify state-save failures and Windows file sharing
+        run: node --test --test-concurrency=1 tests/atomic-json-file.test.mjs tests/backup-state-flow.test.mjs
       - run: npm test
       - run: npm run test:ui
       - name: Check NAS layout at desktop and small window sizes
