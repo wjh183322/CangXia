@@ -21,7 +21,21 @@ test('late source evidence cannot overwrite a newer source result',async t=>{
  const {registry:r}=await fixture(t);r.patchMany([{id:'1',source:{state:'unavailable',checkedAt:'2026-10-20T12:00:01.000Z'},checkedAt:at}]);r.patchMany([{id:'1',source:{state:'available',checkedAt:'2026-10-20T12:00:00.000Z'},checkedAt:at}]);assert.equal(r.page({sourceStatus:'unavailable'}).total,1);
 });
 test('source uncertainty survives a complete-file patch and task-history pruning',async t=>{
- const {db,registry:r}=await fixture(t);r.patchMany([{id:'1',file:{status:'downloadFailed',issues:[{kind:'files'}]},source:{state:'unknown'},checkedAt:at}]);r.patchMany([{id:'1',file:{status:'complete',issues:[]},task:{state:'complete'},checkedAt:at}]);db.exec('CREATE TABLE job(body TEXT);DELETE FROM job');assert.equal(r.page({sourceStatus:'unknown'}).total,1);
+ const {db,registry:r}=await fixture(t);r.patchMany([{id:'1',file:{status:'downloadFailed',issues:[{kind:'files'}]},source:{state:'unknown'},checkedAt:at}]);r.patchMany([{id:'1',file:{status:'complete',issues:[]},task:{state:'complete'},checkedAt:at}]);db.exec('CREATE TABLE job(body TEXT);DELETE FROM job');assert.equal(r.page({sourceStatus:'unknown'}).total,0);assert.equal(r.get('1').sourceStatus,'unknown');
+});
+
+test('complete saved files with only source warnings leave problem totals and every problem filter',async t=>{
+ const {db,registry:r}=await fixture(t);
+ r.patchMany([{id:'1',file:{status:'complete',issues:[]},source:{state:'unavailable',reason:'source gone'},task:{state:'complete'},checkedAt:at},{id:'2',file:{status:'complete',issues:[]},source:{state:'unknown'},checkedAt:at}]);
+ assert.equal(r.page().total,0);assert.equal(r.page({fileStatus:'complete'}).total,0);assert.equal(r.page({sourceStatus:'unavailable'}).total,0);assert.equal(r.page().counts.fileStatus.complete||0,0);assert.equal(r.page().counts.sourceStatus.unavailable||0,0);
+ assert.equal(r.get('1').sourceStatus,'unavailable');assert.equal(r.get('1').status,'complete');assert.equal(r.get('1').problem,false);
+ const {ProblemRegistry}=await import('../electron/problem-registry.mjs'),reopened=new ProblemRegistry(db);assert.equal(reopened.page().total,0);assert.equal(reopened.get('1').sourceStatus,'unavailable');
+});
+
+test('missing or unverified files and real task or cover failures stay problems despite source warnings',async t=>{
+ const {registry:r}=await fixture(t);
+ r.patchMany([{id:'1',source:{state:'unavailable'},checkedAt:at},{id:'2',file:{status:'pending',issues:[{kind:'files',type:'video'}]},source:{state:'unavailable'},checkedAt:at},{id:'3',file:{status:'complete',issues:[]},task:{state:'failed',message:'failed confirmation'},source:{state:'unavailable'},checkedAt:at},{id:'4',file:{status:'pending',issues:[{kind:'cover',reason:'NAS cover missing'}]},source:{state:'unavailable'},checkedAt:at}]);
+ assert.equal(r.page().total,4);assert.equal(r.page({fileStatus:'downloadFailed'}).total,1);assert.equal(r.page({kind:'cover'}).total,1);
 });
 test('paged cross-page selections cannot expand or silently use a changed problem snapshot',async t=>{
  const {registry:r}=await fixture(t);r.patchMany(Array.from({length:55},(_,n)=>({id:String(n+1),rank:n,file:{status:n<30?'pending':'downloadFailed',issues:[{kind:'files',type:'video'}]},checkedAt:at})));

@@ -58,11 +58,26 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     const completedPage=await call('downloadPage',{tab:'complete',page:1,pageSize:50});
     check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&completedPage.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).length===6);
     await win.webContents.executeJavaScript("[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('本地媒体库')).click()");
-    const sizeControlDeadline=Date.now()+6000;while(!await win.webContents.executeJavaScript("!!document.querySelector('[aria-label=\"本地媒体库排序\"]')&&!!document.querySelector('.work-card')")&&Date.now()<sizeControlDeadline)await new Promise(r=>setTimeout(r,40));
-    const originalLocalOrder=await win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId)"),expectedSizeOrder=(await call('filterWorks',originalLocalOrder,{sort:'size-desc'})).ids,memberOrderBefore=JSON.stringify((await call('state')).members);
+    const visibleLocalIds=()=>win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId)");
+    const sameSet=(a,b)=>a.length===b.length&&a.every(id=>b.includes(id));let originalLocalOrder=[],sizeReady=false;
+    const sizeControlDeadline=Date.now()+6000;
+    while(Date.now()<sizeControlDeadline){
+      const current=await call('state'),visible=await visibleLocalIds(),localIds=current.works.filter(w=>w.local).map(w=>w.id);
+      sizeReady=await win.webContents.executeJavaScript("!!document.querySelector('[aria-label=\"本地媒体库排序\"]')")&&sameSet(visible,localIds)&&['100002','100003','100004','100005','100006','100007'].every(id=>visible.includes(id));
+      if(sizeReady){originalLocalOrder=visible;break;}await new Promise(r=>setTimeout(r,40));
+    }
+    assert.ok(sizeReady,'local size test must start with the complete current local card set');
+    const memberOrderBefore=JSON.stringify((await call('state')).members);
     await win.webContents.executeJavaScript("(()=>{const select=document.querySelector('[aria-label=\"本地媒体库排序\"]');select.value='size-desc';select.dispatchEvent(new Event('change',{bubbles:true}));})()");
-    const sizeOrderDeadline=Date.now()+6000;while(await win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId).join(',')")!==expectedSizeOrder.join(',')&&Date.now()<sizeOrderDeadline)await new Promise(r=>setTimeout(r,40));
-    check('native local size sorting displays backend order without rewriting memberships',await win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId).join(',')")===expectedSizeOrder.join(',')&&memberOrderBefore===JSON.stringify((await call('state')).members));
+    let sizeMatches=false,sizeSample;const sizeOrderDeadline=Date.now()+6000;
+    while(Date.now()<sizeOrderDeadline){
+      const before=await call('state'),expected=(await call('filterWorks',originalLocalOrder,{sort:'size-desc'})).ids,actual=await visibleLocalIds(),after=await call('state');
+      sizeSample={actual,expected,sourceIds:originalLocalOrder,revisions:[before.libraryRevision,after.libraryRevision]};
+      sizeMatches=before.libraryRevision===after.libraryRevision&&sameSet(originalLocalOrder,after.works.filter(w=>w.local).map(w=>w.id))&&actual.join(',')===expected.join(',');
+      if(sizeMatches)break;await new Promise(r=>setTimeout(r,40));
+    }
+    assert.ok(sizeMatches,'local size order did not settle: '+JSON.stringify(sizeSample));
+    check('native local size sorting displays backend order without rewriting memberships',memberOrderBefore===JSON.stringify((await call('state')).members));
     const unknownSuffix="(()=>{let unknown=false;const labels=[...document.querySelectorAll('.work-card .local-size-label')];if(!labels.length)return false;for(const label of labels){const missing=label.textContent.includes('大小待确认')||label.textContent.includes('仅配乐');if(unknown&&!missing)return false;unknown||=missing;}return true;})()",sizeRefreshDeadline=Date.now()+6000;
     while(!await win.webContents.executeJavaScript(unknownSuffix)&&Date.now()<sizeRefreshDeadline)await new Promise(r=>setTimeout(r,50));check('native changing file-size data settles with unknown sizes after known sizes',await win.webContents.executeJavaScript(unknownSuffix));
     await win.webContents.executeJavaScript('Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,300))])');try{fs.writeFileSync('.test-output/local-size-desktop.png',(await win.webContents.capturePage()).toPNG());}catch(error){fs.writeFileSync('.test-output/local-size-capture-note.txt',String(error));}

@@ -71,6 +71,8 @@ function App() {
   const [importPreview,setImportPreview]=useState(null);
   const storage=data.storage||{mode:'backup',writable:false},readOnly=!storage.writable;
   const [coverRefresh,setCoverRefresh]=useState(0);
+  const deletionCoverRevision=useRef('');
+  useEffect(()=>{const op=data.scopedDeletion;if(!op?.confirmed||op.running)return;const key=[op.operationId,op.phase,op.processed,op.failed].join(':');if(deletionCoverRevision.current!==key){deletionCoverRevision.current=key;setCoverRefresh(value=>value+1);}},[data.scopedDeletion?.operationId,data.scopedDeletion?.phase,data.scopedDeletion?.running,data.scopedDeletion?.processed,data.scopedDeletion?.failed]);
   useEffect(()=>{if(storage.connected)setCoverRefresh(v=>v+1);},[storage.connected]);
   const coverURL=w=>preview?w.thumbnail:`app-media://cover/${w.id}?revision=${encodeURIComponent(w.localRecord?.hdCover?.key||w.backupRecord?.hdCover?.key||w.backupCover?.sha256||w.backupRecord?.assets?.map(a=>a.sha256).join('-')||'local')}&local=${w.local?1:0}&refresh=${coverRefresh}`;
   async function storageAction(fn){await fn();setData(await api.state());setSelected(new Set());setDetailId(null);setCollection(TOTAL);setModal('settings');}

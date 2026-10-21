@@ -1,0 +1,59 @@
+{
+  "version": "0.3.42",
+  "verifiedAt": "2026-10-21T14:17:49.205Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "sourceVerification": "json-only",
+  "fullSuite": {
+    "files": 68,
+    "total": 673,
+    "passed": 673,
+    "failed": 0,
+    "skipped": 0
+  },
+  "sourceFocused": {
+    "total": 73,
+    "failed": 0
+  },
+  "interfaceChecks": 169,
+  "isolatedBrowser": {
+    "source": 26,
+    "packaged": 26,
+    "backgroundReading": 16,
+    "realUserAccount": false
+  },
+  "windowsPreviewHandles": {
+    "source": 11,
+    "packaged": 11,
+    "realNetFetch": true,
+    "realUserDirectory": false,
+    "changedPermissions": false
+  },
+  "desktopIntegration": 77,
+  "smallWindowLayout": 3,
+  "packagedRuntimeFiles": 94,
+  "removedWebpageModulesAbsent": true,
+  "asarSha256": "20a5521822120ccb3c9a423bb7a1fb7a198436b78c7e7f7e07ee2174d85b541f",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.42-Setup-x64.exe",
+      "bytes": 144909175,
+      "sha256": "efd96907a3bd3861c576a08a9fa8b05519761ef4d2b1fdbb02cca8b8004f54ba"
+    },
+    {
+      "file": "CangXia-Backup-0.3.42-Windows-x64.exe",
+      "bytes": 144752850,
+      "sha256": "1ba0ca8b8e777778f8f6faaba729ec1b5983be11388a739175b667a7ec0a9909"
+    }
+  ],
+  "independentReview": "Audio-only removal entry gap fixed and reviewed again; no important remaining findings.",
+  "cloudCI": "not-run",
+  "notes": [
+    "Complete saved source-only records leave the problem overview; source evidence and round history remain.",
+    "NAS receipts survive local deletion failure and prevent duplicate NAS removal on retry.",
+    "Current inaccessibility uses validated JSON messages, exact ID and success status; no webpage fallback.",
+    "The 30000-work fixture now uses actual cover problems instead of treating saved unavailable sources as defects.",
+    "The previous release CI sorting assertion had stale card-set and size snapshots; current native check samples consistent library revisions and preserves source tie order."
+  ]
+}

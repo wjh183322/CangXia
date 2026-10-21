@@ -70,11 +70,13 @@ jobs:
             .test-output/downloads-failed-*.png
             .test-output/media-redirect-result.json
           retention-days: 14
-      - name: Verify JSON-only work availability
+      - name: Verify JSON availability and local preview handles
         run: |
           node --test --test-concurrency=1 tests/source-json.test.mjs tests/source-access-filter.test.mjs tests/source-filter.test.mjs tests/source-audit.test.mjs tests/source-status.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/source-json-browser-test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/preview-files-desktop-test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/browser-reading-desktop-test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -91,6 +93,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/source-json-browser-test.mjs --packaged
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/preview-files-desktop-test.mjs --packaged
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/check-backup-package.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/backup-package-smoke.mjs
@@ -105,6 +109,9 @@ jobs:
           path: |
             .test-output/source-status-*.png
             .test-output/backup-desktop-result.json
+            .test-output/source-json-browser-result.json
+            .test-output/preview-files-desktop-result.json
+            .test-output/browser-reading-desktop-result.json
           retention-days: 14
       - uses: actions/upload-artifact@v4
         with:

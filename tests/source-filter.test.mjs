@@ -39,7 +39,7 @@ const uncertain=[
  ['empty detail without filter',()=>({status_code:0,aweme_detail:null})],
  ['another work ID',()=>filtered('2')],
  ['missing work ID',()=>{const d=filtered();delete d.filter_detail.aweme_id;return d;}],
- ['unrecognized filter reason',()=>{const d=filtered();d.filter_detail.filter_reason='unverified_reason';return d;}],
+ ['unrecognized filter reason and message',()=>{const d=filtered();d.filter_detail.filter_reason='unverified_reason';d.filter_detail.detail_msg='平台未提供可判断的作品状态';return d;}],
  ['login challenge',()=>{const d=filtered();d.filter_detail.detail_msg='请登录后观看作品';return d;}],
  ['captcha',()=>{const d=filtered();d.filter_detail.detail_msg='请完成验证码后观看';return d;}],
  ['ambiguous permission hint',()=>{const d=filtered();d.filter_detail.detail_msg='可能是作品权限问题，请稍后重试';return d;}],

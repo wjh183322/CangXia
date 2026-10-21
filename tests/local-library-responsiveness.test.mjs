@@ -6,6 +6,8 @@ test('overview and sort remain bounded for 30000 works and cancellation keeps un
  let manager=new DefectRepair({store,backup,queue,collector:{cancelResolve(){}},profile:dir,runForeground:action=>action()});
  t.after(async()=>{manager.close();await store.fileStates.close();store.close();assert.equal(path.dirname(dir),os.tmpdir());fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});});
  store.db.run('BEGIN');for(const [rank,id]of ids.entries()){const bytes=(rank%97+1)*1024+2,source=rank<1000?{remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture saved result',checkedAt:'2026-10-20T00:00:00Z'}}:{};
+  // A saved source state alone is no longer a file problem; keep 1000 real cover issues.
+  if(rank<1000)backup.covers.problems.set(id,{kind:'display',reason:'fixture cover cannot display'});
   store.db.run('INSERT INTO works VALUES(?,?)',[id,JSON.stringify({id,name:'large fixture '+id,type:'images',images:[{index:0}],tags:[],author:{nickname:'fixture'},thumbnail:'https://p3.douyinpic.com/fixture.jpg',...source})]);store.db.run('INSERT INTO members VALUES(?,?,?)',['__all__',id,rank]);store.db.run('INSERT INTO downloads VALUES(?,?)',[id,JSON.stringify({id,path:path.join(store.root,id),state:'complete',assets:[{key:'image-0',file:'image.jpg',kind:'image',size:bytes-2},{key:'metadata',file:'info.json',kind:'metadata',size:2}]})]);store.fileStates.cache.set(id,{id,root:store.root,status:'complete',local:true,bytes,assets:{'image-0':{exists:true,state:'available'},metadata:{exists:true,state:'available'}}});
  }store.db.run('COMMIT');
  let turns=0,heartbeat=true;const pulse=()=>{if(heartbeat){turns++;setImmediate(pulse);}};t.after(()=>{heartbeat=false;});setImmediate(pulse);

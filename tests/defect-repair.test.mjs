@@ -61,6 +61,24 @@ test('removing account records preserves author problems until the author record
  const f=await setup(t),author='MS4wLjABAAAA_PROBLEM_AUTHOR';f.store.authorSources.add(author,{user:{uid:'7',sec_uid:author,nickname:'fixture author'}});for(const id of ['1','8']){if(id==='8')f.store.upsertWork(raw(id));f.store.put('works',id,{...f.store.work(id),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'fixture'}});f.store.db.run('INSERT INTO author_members VALUES(?,?,?,0)',[author,id,Number(id)]);}f.store.deleteReadRecords(['1']);await f.manager.scan();const page=f.manager.page({sourceStatus:'unavailable'});assert.equal(page.total,2);assert.ok(page.items.every(i=>i.source==='作者作品'));f.store.authorSources.hide(author,['1','8']);assert.equal(f.manager.page({sourceStatus:'unavailable'}).total,0);
 });
 const raw=id=>({aweme_id:id,desc:'fixture '+id,author:{nickname:'fixture'},video:{cover:{url_list:['https://p3.douyinpic.com/'+id+'.png']},play_addr:{url_list:[]}}});
+test('complete saved works leave the problem overview while their unavailable source state remains',async t=>{
+ const f=await setup(t);missingFile(f);const d=f.store.download('3');fs.writeFileSync(path.join(d.path,'视频.mp4'),'video');f.store.put('downloads','3',{...d,state:'complete',assets:[...d.assets,{key:'video',file:'视频.mp4',kind:'video',size:5}]});
+ f.store.put('works','3',{...f.store.work('3'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'source unavailable'}});
+ await f.manager.scan();assert.equal(f.manager.page().items.some(i=>i.id==='3'),false);assert.equal(f.manager.page({fileStatus:'complete'}).total,0);assert.equal(f.store.work('3').remoteState,'unavailable');assert.ok(fs.existsSync(path.join(d.path,'视频.mp4')));
+ f.reopen();await f.manager.overview();assert.equal(f.manager.page().items.some(i=>i.id==='3'),false);
+});
+
+test('opening an old saved overview reprojects complete source-only issues without scanning files',async t=>{
+ const f=await setup(t);missingFile(f);const d=f.store.download('3');fs.writeFileSync(path.join(d.path,'视频.mp4'),'video');f.store.put('downloads','3',{...d,state:'complete',assets:[...d.assets,{key:'video',file:'视频.mp4',kind:'video',size:5}]});await f.store.fileStates.check(['3'],{watch:false});f.store.put('works','3',{...f.store.work('3'),remoteState:'unavailable',sourceStatus:{state:'unavailable',reason:'saved source status'}});
+ f.manager.registry.patchMany([{id:'3',file:{status:'complete',issues:[]},source:{state:'unavailable'},task:{state:'complete'}}]);
+ // Recreate the pre-upgrade projection bit; facts still record a complete saved work.
+ f.manager.db.prepare("UPDATE problems SET problem=1,legacy_status='unavailable' WHERE id='3'").run();f.manager.db.prepare("INSERT OR REPLACE INTO problem_meta VALUES('seeded','1')").run();f.manager.db.prepare("DELETE FROM problem_meta WHERE key='completeFilesPolicy'").run();
+ f.reopen();f.manager.checks.check=async()=>{throw Error('must not scan files on open');};const overview=await f.manager.overview();assert.equal(overview.items.some(i=>i.id==='3'),false);assert.equal(f.manager.registry.get('3').sourceStatus,'unavailable');
+});
+
+test('unavailable works without a saved download remain problems and are never described as complete files',async t=>{
+ const f=await setup(t);f.store.put('works','2',{...f.store.work('2'),remoteState:'unavailable',sourceStatus:{state:'unavailable'}});await f.manager.overview();const row=f.manager.page({sourceStatus:'unavailable'}).items.find(i=>i.id==='2');assert.ok(row);assert.notEqual(row.fileStatus,'complete');
+});
 async function setup(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-defect-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));store.setSetting('browserAccountKey','uid:1');
  for(const id of ['1','2','3'])store.upsertWork(raw(id));store.ingestMembers('__all__',['3','1','2'],true);

@@ -15,9 +15,10 @@ function project(facts){
  if(task?.state==='failed'&&!issues.some(i=>i.kind==='download'))issues.push({kind:'download',label:'下载失败',reason:reason(task.message||'上次下载未完成')});
  if(repair?.state==='failed')for(const issue of repair.issues?.length?repair.issues:[{kind:'files',label:'补齐失败',reason:repair.message}])if(!issues.some(i=>i.kind===issue.kind&&i.reason===issue.reason))issues.push(issue);
  if(source.state==='unknown'||source.state==='unavailable')issues.push({kind:'source',label:source.state==='unknown'?'暂无法确认原作品状态':'原作品已失效',reason:reason(source.reason||'此前保存的原作品状态')});
- let status=fileStatus;if(source.state==='unavailable')status='unavailable';else if(source.state==='unknown'&&fileStatus!=='processing')status='sourceUnknown';else if(source.state==='available'&&!['complete','processing'].includes(status))status='sourceAvailable';
+ const savedComplete=facts.file?.status==='complete'&&fileStatus==='complete'&&issues.every(issue=>issue.kind==='source');
+ let status=fileStatus;if(!savedComplete){if(source.state==='unavailable')status='unavailable';else if(source.state==='unknown'&&fileStatus!=='processing')status='sourceUnknown';else if(source.state==='available'&&!['complete','processing'].includes(status))status='sourceAvailable';}
  const flags=[...new Set([...(file.kinds||[]),...issues.flatMap(i=>[i.kind,i.type].filter(Boolean))])];
- return {id:facts.id,name:text(facts.name||facts.id),author:text(facts.author||''),source:facts.sourceLabel||'保留的本地作品',rank:facts.rank??Number.MAX_SAFE_INTEGER,fileStatus,sourceStatus:source.state||'unchecked',status,issues,kinds:flags,message:reason(task&&['failed','running','waiting'].includes(task.state)?task.message:repair?.state==='failed'?repair.message:task?.message||''),facts,problem:issues.length>0};
+ return {id:facts.id,name:text(facts.name||facts.id),author:text(facts.author||''),source:facts.sourceLabel||'保留的本地作品',rank:facts.rank??Number.MAX_SAFE_INTEGER,fileStatus,sourceStatus:source.state||'unchecked',status,issues,kinds:flags,message:reason(task&&['failed','running','waiting'].includes(task.state)?task.message:repair?.state==='failed'?repair.message:task?.message||''),facts,problem:!savedComplete&&issues.length>0};
 }
 function options(input={}){
  const o={page:input.page??1,limit:input.limit??20,status:input.status??'all',fileStatus:input.fileStatus??'all',sourceStatus:input.sourceStatus??'all',kind:input.kind??'all'};

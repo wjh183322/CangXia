@@ -1,6 +1,7 @@
 import {NasCatalogue} from './nas-catalogue.mjs';
 import {DeletionCoordinator} from './deletion-coordinator.mjs';
-import {quiesceSelectedDeletion,waitDeletionWriter} from './deletion-session.mjs';
+import {quiesceSelectedDeletion,waitDeletionWriter,withReleasedPreviews} from './deletion-session.mjs';
+import {PreviewFiles} from './preview-files.mjs';
 import {WorkAudio} from './work-audio.mjs';
 import {CreatorDetails} from './creator-details.mjs';
 import {LocalRemoval} from './local-removal.mjs';
@@ -50,6 +51,7 @@ fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData'
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let retentionTimer,nasCatalogue,scopedDeletion,scopedTask,scopedPreparing,scopedExit=false,scopedFileIds=new Set();
+const previewFiles=new PreviewFiles((file,options)=>net.fetch(pathToFileURL(file).href,options));
 const prunePrivateHistory=()=>{if(quitting||!store||store.deviceScopes.closed)return;void store.deviceScopes.pruneSummaries().catch(error=>diagnostics?.record({event:'operation-summary-prune-failed',code:error.code}));void nasCatalogue?.pruneIntents().catch(error=>diagnostics?.record({event:'recovery-intent-prune-failed',code:error.code}));};
 const scopedActive=()=>!!(scopedDeletion?.running||scopedDeletion?.preparing||backup?.deletions?.state().running||nasCatalogue?.restoring||nasCatalogue?.preparingPromise);
 let audio,backup,defectRepair,localRemoval,nasRemoval,creatorDetails,repairChecks,removalExit=false,nasExit=false,backupBusy=false,exitApproved=false;
@@ -155,7 +157,7 @@ try {
   handler('cancelLocalRemoval',()=>localRemoval.cancel());
   scopedDeletion=new DeletionCoordinator({store,backup,trash:dir=>shell.trashItem(dir),onChange:notify});
   backup.deletions.localCoordinator=scopedDeletion;backup.deletions.trash=dir=>shell.trashItem(dir);
-  backup.beforeScopedDeletion=async input=>{scopedFileIds=new Set(input.files?input.ids:[]);try{if(input.files){const pending=['download','audioSave','repairVideoCover','retryDownloads','flatStart','startRepairs'].map(name=>actionDrains.get(name)?.promise).filter(Boolean);await waitDeletionWriter(Promise.all(pending),{signal:input.signal});input.signal?.throwIfAborted();}await quiesceSelectedDeletion(input,{queue,audio,flatQueue,reconcile:store.localReconcile,signal:input.signal});}catch(error){scopedFileIds.clear();throw error;}return()=>{scopedFileIds.clear();notify();};};
+  backup.beforeScopedDeletion=async input=>{scopedFileIds=new Set(input.files?input.ids:[]);const unblock=previewFiles.block(scopedFileIds);try{if(input.files){const pending=['download','audioSave','repairVideoCover','retryDownloads','flatStart','startRepairs'].map(name=>actionDrains.get(name)?.promise).filter(Boolean);await waitDeletionWriter(Promise.all(pending),{signal:input.signal});input.signal?.throwIfAborted();}await quiesceSelectedDeletion(input,{queue,audio,flatQueue,reconcile:store.localReconcile,previews:previewFiles,signal:input.signal});}catch(error){unblock();scopedFileIds.clear();throw error;}return()=>{unblock();scopedFileIds.clear();notify();};};
   const prepareScoped=async input=>{if(readLocked()||loggingOut||repairChecks.running||defectRepair?.running||backupBusy||backup.deletions.state().running)throw Error('请先停止读取或检查再准备删除');ids(input?.ids);if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['ids','source','records','files','target'].includes(k)))throw Error('删除范围参数无效');scopedPreparing=scopedDeletion.prepare(input);try{return await scopedPreparing;}finally{scopedPreparing=null;notify();}};
   const beginScoped=promise=>{scopedTask=Promise.resolve(promise).catch(error=>{window?.webContents.send('cangxia:notice',error.message);}).finally(()=>{scopedTask=null;store.invalidateViews();notify();prunePrivateHistory();});notify();return scopedDeletion.state();};
   handler('prepareScopedDeletion',prepareScoped);
@@ -180,7 +182,7 @@ try {
   handler('startDefectRepair',selected=>{ensureIdle();backup.assertWritable();return defectRepair.start(Array.isArray(selected)?ids(selected):selected);});
   handler('resumeDefectRepair',()=>{ensureIdle();backup.assertWritable();return defectRepair.start(null,{resume:true});});
   handler('stopDefectRepair',()=>{defectRepair.stop();return true;});
-  handler('reportCoverStatus',(id,failed)=>{ids([id]);if(!store.work(id)||typeof failed!=='boolean')return false;const previous=backup.covers.problems.get(id);if(failed&&!previous)backup.covers.reportProblem(id,'界面无法显示封面，可定向检查并补齐','display');else if(!failed&&previous?.kind==='display')backup.covers.clearProblem(id);return true;});
+  handler('reportCoverStatus',(id,failed)=>{ids([id]);if(scopedFileIds.has(id)||!store.work(id)||typeof failed!=='boolean')return false;const previous=backup.covers.problems.get(id);if(failed&&!previous)backup.covers.reportProblem(id,'界面无法显示封面，可定向检查并补齐','display');else if(!failed&&previous?.kind==='display')backup.covers.clearProblem(id);return true;});
   async function restoreBackupAuth(){await collector.ready;if(collector.verifyingIdentity)return;await collector.profile.clearStorageData({storages:['cookies']});collector.status.connected=false;await collector.restore();}
   backup.onRemoteApplied=restoreBackupAuth;
   handler('configureBackup',async input=>{ensureIdle();await backup.configure(input);await restoreBackupAuth();return snapshot();});
@@ -236,7 +238,7 @@ try {
       const [id, filename] = parts;
       if(u.hostname==='nas-asset')return await nasCatalogue.media(id,filename,{signal:request.signal,range:request.headers.get('range'),method:request.method,libraryId:u.searchParams.get('library'),revision:Number(u.searchParams.get('revision'))}); if (!/^\d+$/.test(id || '')) return new Response('', { status: 404 });
       let file;
-      if(scopedFileIds.has(id)&&['audio','asset'].includes(u.hostname))return new Response('',{status:423});
+      if(scopedFileIds.has(id)&&['audio','asset','cover'].includes(u.hostname))return new Response('',{status:423,headers:{'cache-control':'no-store'}});
       if(u.hostname==='audio'){file=audio.playbackFile(id,filename);} else if (u.hostname === 'stream') {
         if(!backup.status.writable)return new Response('',{status:503});
         const work=store.work(id);if(work?.remoteState==='unavailable')return new Response('',{status:410});const source=work?.videoUrls?.[0];if(!source)return new Response('',{status:404});
@@ -254,8 +256,8 @@ try {
           if(!file)return new Response('',{status:404,headers:{'cache-control':'no-store'}});
         }
       } else return new Response('', { status: 404 });
-      const row=store.rows('SELECT key FROM media_cache_objects WHERE file=?',[file])[0],release=row?backup.cache.pin(row.key):()=>{};try{const response=await net.fetch(pathToFileURL(file).href,{headers:request.headers,signal:request.signal});const headers=new Headers(response.headers);headers.set('cache-control','no-store');const reader=response.body?.getReader();if(!reader){release();return new Response(null,{status:response.status,headers});}let closed=false;const done=()=>{if(!closed){closed=true;release();}};const body=new ReadableStream({async pull(controller){try{const v=await reader.read();if(v.done){done();controller.close();}else controller.enqueue(v.value);}catch(e){done();controller.error(e);}},async cancel(reason){try{await reader.cancel(reason);}finally{done();}}});return new Response(body,{status:response.status,headers});}catch(e){release();throw e;}
-    } catch(error) {try{const u=new URL(request.url),id=u.pathname.split('/').filter(Boolean)[0];if(u.hostname==='cover'&&/^\d+$/.test(id)&&!backup.covers.problems.has(id))backup.covers.reportProblem(id,'封面显示失败：'+error.message,'display');}catch{}return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
+      const row=store.rows('SELECT key FROM media_cache_objects WHERE file=?',[file])[0],release=row?backup.cache.pin(row.key):()=>{};return await previewFiles.open(id,file,request,{release});
+    } catch(error) {try{const u=new URL(request.url),id=u.pathname.split('/').filter(Boolean)[0];if(!request.signal.aborted&&!scopedFileIds.has(id)&&u.hostname==='cover'&&/^\d+$/.test(id)&&!backup.covers.problems.has(id))backup.covers.reportProblem(id,'封面显示失败：'+error.message,'display');}catch{}return new Response('', { status: 404, headers:{'cache-control':'no-store'} }); }
   });
   handler('startupReady',()=>{if(!rendererReady){rendererReady=true;startupStage('library-visible');store.fileStates.monitor();notify();void store.fileStates.scan().catch(error=>diagnostics.record({event:'file-check-failed',reason:error.message}));}return true;});
   handler('cancelFileCheck',()=>store.fileStates.cancelScan());
@@ -267,7 +269,7 @@ try {
   handler('audioRefresh',id=>{ids([id]);return audio.refresh(id);});
   handler('audioSave',async(selected,mode,context)=>{if(!['local','nas','info','restore'].includes(mode))throw Error('配乐保存方式无效');if(mode==='nas'&&!backup.status.sharedAudio)throw Error('NAS 尚不支持共享配乐，请配套升级');const requested=ids(selected);if(context)return nasCatalogue.saveAudio(requested,mode,context);const nasOnly=[];for(const id of requested)if(!store.work(id)&&nasCatalogue.cachedWork(id)){await nasCatalogue.ensureLocalMetadata(id);if(mode==='local'&&store.get('backup_downloads',id)?.audio?.state==='saved')nasOnly.push(id);}if(nasOnly.length)await audio.enqueue(nasOnly,'restore');const rest=requested.filter(id=>!nasOnly.includes(id));return rest.length?audio.enqueue(rest,mode):audio.state();});
   handler('audioPause',()=>{audio.pause();return audio.state();});handler('audioResume',()=>{audio.resume();return audio.state();});handler('audioCancel',selected=>audio.cancel(selected===undefined?null:ids(selected)));
-  handler('audioRemove',async selected=>{for(const id of ids(selected))await audio.removeLocal(id,{trash:file=>shell.trashItem(file)});return true;});
+  handler('audioRemove',async selected=>{const requested=ids(selected);return withReleasedPreviews(requested,previewFiles,async()=>{for(const id of requested)await audio.removeLocal(id,{trash:file=>shell.trashItem(file)});return true;},'audio');});
   handler('cacheSettings',value=>backup.cache.setLimits(value));handler('cacheClear',kinds=>backup.cache.clear(kinds));handler('cacheStop',()=>{backup.cache.stopClear();return true;});
   handler('workDetail',async id=>{ids([id]);return store.lightViews.detail(id);});
   handler('filterWorks',async(selected,options)=>({ids:await store.lightViews.search.query(ids(selected),options)}));
