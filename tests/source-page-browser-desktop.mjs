@@ -12,7 +12,7 @@ void app.whenReady().then(async()=>{let browser,collector,store;const checks=[],
     if(probeSessions.has(sid)){documents++;if(mode==='stall'){stall?.();return;}}
     type='text/html; charset=utf-8';let content='<main>owned synthetic account</main>';
     if(probeSessions.has(sid)){
-     const missing='<section><p>你要观看的视频不存在</p><a href="/">去精选页查看更多视频</a></section>';
+     const missing='<section><p data-e2e="error-page">你要观看的视频不存在</p><p style="cursor:pointer">去精选页查看更多视频</p></section>';
      content='<main>'+((mode==='comment')?'<section data-e2e="comment-list">'+missing+'</section>':missing)+(mode==='login'?'<div role="dialog">请扫码登录后观看</div>':'')+'</main>';
      content+='<img src="https://p3.douyinpic.com/owned-probe.jpg"><video src="https://v3-web.douyinvod.com/owned-probe.mp4" muted autoplay></video>';
      content+='<script>fetch("/aweme/v1/web/aweme/detail/?aweme_id='+id+'")</script>';

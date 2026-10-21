@@ -240,7 +240,7 @@ export class Collector{
     const binding=this.browserBinding,key=this.store.getSetting('browserAccountKey'),page=binding.page;
     if(key!=='uid:'+binding.uid)throw Error('核验账号与资料库不一致');
     const before=await this.browser.api.credentials(page,signal),fingerprint=this.browserFingerprint(before);if(fingerprint!==binding.fingerprint)throw Error('浏览器登录会话已经变化，请重新连接');
-    const result=await this.browser.verifyWorkPage(id,{signal});signal?.throwIfAborted();
+    const result=await this.browser.verifyWorkPage(id,{signal,onDiagnostic:this.onDiagnostic});signal?.throwIfAborted();
     const after=await this.browser.api.credentials(page,signal);
     if(this.browserBinding!==binding||key!==this.store.getSetting('browserAccountKey')||this.browserFingerprint(after)!==fingerprint||!this.status.connected)throw Error('网页核验期间登录会话发生变化，未更新作品状态');
     if(result?.workId!==id)return null;

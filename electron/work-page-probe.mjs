@@ -5,22 +5,28 @@ import {filteredSourceState,detailSourceState,needsPageVerification} from '../sh
 import {workPageSnapshot} from './work-page-state.mjs';
 const unknown=(reason,kind='unknown')=>({state:'unknown',kind,reason});
 const messages={login:'网页要求登录，暂无法确认原作品状态',challenge:'网页要求安全验证，暂无法确认原作品状态',frequency:'网页提示访问频繁，已停止自动复核',network:'网页网络异常，暂无法确认原作品状态',redirect:'网页已跳转，未将其他作品当作核验结果'};
-export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=200}={}){
+export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=200,onDiagnostic=()=>{},useCache=true}={}){
  if(!/^\d{1,30}$/.test(id))throw Error('作品标识无效');
- const timeout=AbortSignal.timeout(Math.min(12000,Math.max(1,timeoutMs))),combined=signal?AbortSignal.any([signal,timeout]):timeout;
- let connection,targetId,sid,listener,missing=false,positive=null,negative=null,blocked=null;const requests=new Map(),bodies=new Set();
+ const budget=Math.min(12000,Math.max(1,timeoutMs)),timeout=AbortSignal.timeout(budget),combined=signal?AbortSignal.any([signal,timeout]):timeout;
+ const started=performance.now();let stage='browser-start',outcome,lastPage;
+ const done=result=>(outcome=result,result);
+ let connection,targetId,sid,listener,missing=false,positive=null,negative=null,blocked=null,cachedEvidence=false;const requests=new Map(),bodies=new Set(),knownRequests=new Set();
  const close=key=>connection.send('Target.closeTarget',{targetId:key}).catch(()=>{});
  try{
   combined.throwIfAborted();await abortable(browser.launch('about:blank'),combined);connection=browser.connection;if(!connection)throw Error('浏览器已关闭');
-  const creating=connection.send('Target.createTarget',{url:'about:blank',hidden:true,background:true});
+  stage='target-create';const creating=connection.send('Target.createTarget',{url:'about:blank',hidden:true,background:true});
   void creating.then(value=>{if(combined.aborted&&value.targetId&&!targetId)void close(value.targetId);}).catch(()=>{});
   targetId=(await abortable(creating,combined)).targetId;combined.throwIfAborted();
-  sid=(await abortable(connection.send('Target.attachToTarget',{targetId,flatten:true}),combined)).sessionId;
+  stage='target-attach';sid=(await abortable(connection.send('Target.attachToTarget',{targetId,flatten:true}),combined)).sessionId;
   listener=(method,p,sessionId)=>{
    if(sessionId!==sid||combined.aborted)return;
    if(method==='Fetch.requestPaused'){let media=['Media','Image'].includes(p.resourceType);try{const u=new URL(p.request.url);media||=/(^|\.)douyinvod\.com$/.test(u.hostname)||/\.(mp4|m3u8|mpd)(?:$|[?#])/i.test(u.pathname);}catch{}if(media)void connection.send('Fetch.failRequest',{requestId:p.requestId,errorReason:'BlockedByClient'},sid).catch(()=>{});return;}
    const matches=url=>{try{const u=new URL(url);return ['https://www.douyin.com','https://douyin.com'].includes(u.origin)&&u.pathname==='/aweme/v1/web/aweme/detail/'&&u.searchParams.get('aweme_id')===id;}catch{return false;}};
+   const workDocument=url=>{try{const u=new URL(url);return ['https://www.douyin.com','https://douyin.com'].includes(u.origin)&&new RegExp('^/(?:video|note)/'+id+'/?$').test(u.pathname);}catch{return false;}};
    const fail=kind=>{blocked=unknown(messages[kind]||'网页详情响应未能确认原作品状态',kind);};
+   if(method==='Network.requestWillBeSent'&&(matches(p.request?.url)||p.type==='Document'&&workDocument(p.request?.url))){if(knownRequests.size<32)knownRequests.add(p.requestId);else fail('unknown');}
+   if(method==='Network.requestServedFromCache'&&knownRequests.has(p.requestId)){cachedEvidence=true;requests.delete(p.requestId);return;}
+   if(method==='Network.responseReceived'&&(matches(p.response?.url)||p.type==='Document'&&workDocument(p.response?.url))&&(p.response.fromDiskCache||p.response.fromPrefetchCache||p.response.fromServiceWorker)){cachedEvidence=true;requests.delete(p.requestId);return;}
    if(method==='Network.requestWillBeSent'&&matches(p.request?.url)){
     if(requests.size>=16)fail('unknown');else requests.set(p.requestId,{readable:false});
    }
@@ -49,24 +55,32 @@ export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=20
     }catch{fail('unknown');}})();bodies.add(task);void task.finally(()=>bodies.delete(task));
    }
   };
-  browser.on('event',listener);
+  browser.on('event',listener);stage='page-setup';
   await abortable(connection.send('Emulation.setDeviceMetricsOverride',{width:1000,height:760,deviceScaleFactor:1,mobile:false},sid),combined);
   await abortable(connection.send('Network.enable',{},sid),combined);
-  await abortable(connection.send('Network.setCacheDisabled',{cacheDisabled:true},sid),combined);
+  await abortable(connection.send('Network.setCacheDisabled',{cacheDisabled:!useCache},sid),combined);
   await abortable(connection.send('Network.setBypassServiceWorker',{bypass:true},sid),combined);
   await abortable(connection.send('Fetch.enable',{patterns:[{resourceType:'Media'},{resourceType:'Image'},{urlPattern:'*://*.douyinvod.com/*'},{urlPattern:'*.mp4*'},{urlPattern:'*.m3u8*'},{urlPattern:'*.mpd*'}]},sid),combined);
 await abortable(connection.send('Page.enable',{},sid),combined);
-  await abortable(connection.send('Page.navigate',{url:'https://www.douyin.com/video/'+id},sid),combined);
+  stage='navigation';await abortable(connection.send('Page.navigate',{url:'https://www.douyin.com/video/'+id},sid),combined);
   for(;;){
    combined.throwIfAborted();if(browser.connection!==connection)throw Error('浏览器连接已变化');
-   const result=await abortable(connection.send('Runtime.evaluate',{expression:'('+workPageSnapshot.toString()+')('+JSON.stringify(id)+')',returnByValue:true},sid),combined),page=result.result?.value;
+   if(cachedEvidence){
+    if(!useCache)return done({...unknown('网页仍返回缓存中的作品状态，暂无法完成实时核验','cache'),workId:id});
+    stage='fresh-retry';browser.removeListener('event',listener);listener=null;
+    const closed=await abortable(connection.send('Target.closeTarget',{targetId}),combined);if(closed.success===false)throw Error('临时复核页未能关闭');targetId=null;
+    return done(await probeWorkPage(browser,id,{signal:combined,timeoutMs:Math.max(1,Math.floor(budget-(performance.now()-started))),pollMs,useCache:false}));
+   }
+   stage='page-evaluate';const result=await abortable(connection.send('Runtime.evaluate',{expression:'('+workPageSnapshot.toString()+')('+JSON.stringify(id)+')',returnByValue:true},sid),combined),page=result.result?.value;
+   lastPage=page;stage=page?.stage||page?.kind||'page-empty';
    if(result.exceptionDetails)throw Error('页面状态不可读取');
-   if(Object.hasOwn(messages,page?.kind))return {...unknown(messages[page.kind],page.kind),workId:id};
-   if(page?.workId===id){if(positive)return positive;if(blocked)return {...blocked,workId:id};if(negative&&requests.size===0&&bodies.size===0)return negative;
-    if(page.kind==='missing'&&requests.size===0&&bodies.size===0){if(missing)return {state:'unavailable',kind:'missing',workId:id,reason:'对应作品网页明确提示：你要观看的视频不存在'};missing=true;}else missing=false;
+   if(cachedEvidence)continue;
+   if(Object.hasOwn(messages,page?.kind))return done({...unknown(messages[page.kind],page.kind),workId:id});
+   if(page?.workId===id){if(positive)return done(positive);if(blocked)return done({...blocked,workId:id});if(negative&&requests.size===0&&bodies.size===0)return done(negative);
+    if(page.kind==='missing'&&requests.size===0&&bodies.size===0){if(missing)return done({state:'unavailable',kind:'missing',workId:id,reason:'对应作品网页明确提示：你要观看的视频不存在'});missing=true;}else missing=false;
    }
    await delay(Math.max(1,pollMs),undefined,{signal:combined});
   }
- }catch(error){signal?.throwIfAborted();return {...unknown(timeout.aborted?'网页复核超时，暂无法确认原作品状态':'后台网页未能完成复核，暂无法确认原作品状态',timeout.aborted?'timeout':'browser'),workId:id};}
- finally{if(listener)browser.removeListener('event',listener);if(connection&&targetId)await Promise.race([close(targetId),delay(1000,undefined,{ref:false})]);}
+ }catch(error){signal?.throwIfAborted();const reason=timeout.aborted?(requests.size||bodies.size?'对应作品详情尚未返回完成，网页复核超时，暂无法确认原作品状态':lastPage?.stage==='document-loading'?'作品网页加载超时，尚未取得可核验的页面状态':lastPage?.stage==='error-not-found'?'网页未出现可确认的作品状态提示，复核超时':stage==='navigation'?'作品网页导航超时，暂无法确认原作品状态':'网页复核超时，暂无法确认原作品状态'):'后台网页未能完成复核，暂无法确认原作品状态';return done({...unknown(reason,timeout.aborted?'timeout':'browser'),workId:id});}
+ finally{if(listener)browser.removeListener('event',listener);if(connection&&targetId)await Promise.race([close(targetId),delay(1000,undefined,{ref:false})]);try{onDiagnostic({event:'source-page-verification',method:'page',name:id,elapsedMs:Math.round(performance.now()-started),code:signal?.aborted?'cancelled':outcome?.kind==='timeout'?(requests.size||bodies.size?'detail-pending':lastPage?.stage||stage):outcome?.kind||stage,count:requests.size+bodies.size,reason:String(outcome?.reason||'网页核验已停止').slice(0,180)});}catch{}}
 }
