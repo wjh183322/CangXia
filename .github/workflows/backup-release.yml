@@ -136,4 +136,3 @@ jobs:
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           gh release create "$tag" --verify-tag --prerelease --title "藏匣备份版 ${tag#backup-v} 预览" --notes-file "docs/releases/$tag.md" release-files/*
-
