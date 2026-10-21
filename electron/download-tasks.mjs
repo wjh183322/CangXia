@@ -1,4 +1,5 @@
-const durable=j=>Object.fromEntries(['id','title','state','progress','message','coverOnly','source'].filter(k=>j[k]!==undefined).map(k=>[k,j[k]]));
+const durable=j=>Object.fromEntries(['id','title','state','progress','message','coverOnly','source','catalogueLibrary','cancelOwnership'].filter(k=>j[k]!==undefined).map(k=>[k,j[k]]));
+const publicJob=j=>Object.fromEntries(['id','title','state','progress','message','phase','coverOnly','source','activeSource'].filter(k=>j[k]!==undefined).map(k=>[k,j[k]]));
 const dedupe=jobs=>{const map=new Map(),priority={running:4,waiting:3,unavailable:3,failed:2,complete:1};for(const job of jobs){const old=map.get(job.id);if(!old||(priority[job.state]||0)>=(priority[old.state]||0))map.set(job.id,job);}return [...map.values()];};
 export class DownloadTasks{
  constructor(store){this.store=store;this.byId=new Map();this.buckets=new Map();this.dirty=new Set();this.removed=new Set();this.ranks=new Map();this.serialized=new Map();this.jobs=[];this.revision=0;this.maxRank=0;}
@@ -38,6 +39,6 @@ export class DownloadTasks{
   if(!['active','failed','complete','unavailable'].includes(tab)||!Number.isInteger(page)||page<1||pageSize!==50)throw Error('下载任务分页参数无效');
   const order=ids=>[...ids].sort((a,b)=>this.ranks.get(a)-this.ranks.get(b));
   const ids=tab==='active'?[...order(this.bucket('running')),...order(this.bucket('waiting'))]:order(this.bucket(tab==='unavailable'?'unavailable':tab==='failed'?'failed':'complete'));
-  const current=Math.min(page,Math.max(1,Math.ceil(ids.length/pageSize)));return {revision:this.revision,total:ids.length,page:current,pageSize,jobs:ids.slice((current-1)*pageSize,current*pageSize).map(id=>({...this.byId.get(id)}))};
+  const current=Math.min(page,Math.max(1,Math.ceil(ids.length/pageSize)));return {revision:this.revision,total:ids.length,page:current,pageSize,jobs:ids.slice((current-1)*pageSize,current*pageSize).map(id=>publicJob(this.byId.get(id)))};
  }
 }

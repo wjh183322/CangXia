@@ -12,6 +12,7 @@ import {validHome} from '../shared/backup-protocol.mjs';
 import {findDeletedDownloads} from './deleted-downloads.mjs';
 import {LocalReconcile} from './local-reconcile.mjs';
 import {DownloadTasks} from './download-tasks.mjs';
+import {prepareCancellationRelocation,trackCancellationFile,recordCancellationIdentity} from './download-cancel-cleanup.mjs';
 import {FileStates} from './file-states.mjs';
 import {WorkViews} from './work-views.mjs';
 import {initializeRecordJournal,initializeAudioScopeJournal} from './record-journal.mjs';
@@ -268,6 +269,7 @@ export class Store {
     const target = this.destination(id,context);
     if (path.resolve(d.path) === target.dir) { this.refreshMetadata(id); return; }
     this.assertDirectory(d.path); this.assertDirectory(target.dir);
+    const job=this.downloadTasks?.byId.get(id);if(prepareCancellationRelocation(this,job,{targetDir:target.dir}))this.downloadTasks.flush();
     if (fs.existsSync(d.path)) {
       fs.mkdirSync(path.dirname(target.dir), { recursive: true });
       if (fs.existsSync(target.dir)) throw new Error('目标作品目录已存在，已保留原文件，请检查同名目录');
@@ -287,7 +289,13 @@ export class Store {
       const info=JSON.parse(fs.readFileSync(infoPath,'utf8'));const w=this.work(id);
       Object.assign(info,{collection:this.collection(moved.collectionId)?.name,collectionId:moved.collectionId,author:w.author,workName:w.name,title:w.title,caption:w.caption,description:w.description,tags:w.tags,rawTags:w.rawTags,localTags:this.get('local_tags',id)?.tags||[],remoteState:w.remoteState,sourceStatus:w.sourceStatus,sourceAttempt:w.sourceAttempt,checkedAt:w.checkedAt});
       const text=JSON.stringify(info,null,2);
-      if(fs.readFileSync(infoPath,'utf8')!==text){fs.writeFileSync(infoPath+'.part',text);fs.renameSync(infoPath+'.part',infoPath);}
+      if(fs.readFileSync(infoPath,'utf8')!==text){
+        const job=this.downloadTasks?.byId.get(id),temporary=fs.existsSync(infoPath+'.part')?infoPath+'.'+randomUUID()+'.part':infoPath+'.part';
+        if(trackCancellationFile(this,job,temporary))this.downloadTasks.flush();let descriptor,identity;
+        const report=(file,stat,options)=>{if(recordCancellationIdentity(this,job,file,stat,options))this.downloadTasks.flush();};
+        try{descriptor=fs.openSync(temporary,'wx');report(temporary,fs.fstatSync(descriptor));fs.writeFileSync(descriptor,text);fs.fsyncSync(descriptor);identity=fs.fstatSync(descriptor);report(temporary,identity,{settled:true});fs.closeSync(descriptor);descriptor=undefined;fs.renameSync(temporary,infoPath);report(infoPath,identity,{settled:true});}
+        finally{if(descriptor!==undefined)try{report(temporary,fs.fstatSync(descriptor),{settled:true});}finally{fs.closeSync(descriptor);}}
+      }
       const asset=moved.assets.find(a=>a.key==='metadata');if(asset)asset.size=fs.statSync(infoPath).size;
       this.put('downloads',id,moved);
     }

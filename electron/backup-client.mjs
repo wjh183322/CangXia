@@ -197,7 +197,7 @@ export class BackupClient{
  }
  async restoreWork(job,signal,metadata,{missingOnly=false}={}){
   const remote=this.store.get('backup_downloads',job.id);if(!remote?.assets?.length)return false;
-  this.assertWritable();if(this.store.download(job.id))this.store.relocate(job.id);
+  this.assertWritable();if(this.store.download(job.id)){job.trackDownloadRelocation?.();this.store.relocate(job.id);}
   const target=this.store.destination(job.id),old=this.store.download(job.id);this.store.assertDirectory(target.dir);fs.mkdirSync(target.dir,{recursive:true});
   const local=(old?.path===target.dir?old?.assets||[]:[]).filter(a=>this.store.assetExists(old,a));
   const assets=missingOnly?[...local]:local.filter(a=>a.key==='metadata');
@@ -211,13 +211,17 @@ export class BackupClient{
    if(existing&&await this.verifiedFile(requireInside(target.dir,path.join(target.dir,existing.file)),a,signal)){assets.push({...existing,...a,file:existing.file});remember();continue;}
    let name=a.file,file=requireInside(target.dir,path.join(target.dir,name));
    if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name='backup-'+a.sha256.slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));if(fs.existsSync(file)&&!(await this.verifiedFile(file,a,signal))){name=randomUUID().slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));}}
-   if(!(await this.verifiedFile(file,a,signal)))await this.transport.download(a,file,{signal,onProgress:(n,total)=>{job.phase='transferring';job.activeSource='nas';job.message=`从 NAS 下载 ${a.file} · ${(n/1048576).toFixed(1)} / ${(total/1048576).toFixed(1)} MB`;job.progress=Math.round(n/total*95);this.emit();}});
+   if(!fs.existsSync(file)&&job.isPreTaskDownloadFile?.(file+'.backup-part')){name=randomUUID().slice(0,8)+'-'+name;file=requireInside(target.dir,path.join(target.dir,name));}
+   if(!(await this.verifiedFile(file,a,signal))){job.trackDownloadFile?.(file);await this.transport.download(a,file,{signal,onFileWrite:(file,stat,options)=>job.downloadFileIdentity?.(file,stat,options),onProgress:(n,total)=>{job.phase='transferring';job.activeSource='nas';job.message=`从 NAS 下载 ${a.file} · ${(n/1048576).toFixed(1)} / ${(total/1048576).toFixed(1)} MB`;job.progress=Math.round(n/total*95);this.emit();}});}
    assets.push({...a,file:name});remember();
   }
   signal.throwIfAborted();
   const ownedMetadata=local.find(a=>a.key==='metadata');let metadataName=ownedMetadata?.file||'作品信息.json';
   if(!ownedMetadata&&fs.existsSync(path.join(target.dir,metadataName)))metadataName='backup-'+job.id+'-'+randomUUID().slice(0,8)+'-作品信息.json';
-  const info=requireInside(target.dir,path.join(target.dir,metadataName)),temporary=info+'.tmp';fs.writeFileSync(temporary,JSON.stringify(metadata(this.store.work(job.id),d),null,2));fs.renameSync(temporary,info);
+  const info=requireInside(target.dir,path.join(target.dir,metadataName)),temporary=fs.existsSync(info+'.tmp')?info+'.'+randomUUID()+'.tmp':info+'.tmp';job.trackDownloadFile?.(info);job.trackDownloadFile?.(temporary);
+  let descriptor,identity;
+  try{descriptor=fs.openSync(temporary,'wx');job.downloadFileIdentity?.(temporary,fs.fstatSync(descriptor));fs.writeFileSync(descriptor,JSON.stringify(metadata(this.store.work(job.id),d),null,2));fs.fsyncSync(descriptor);identity=fs.fstatSync(descriptor);job.downloadFileIdentity?.(temporary,identity,{settled:true});fs.closeSync(descriptor);descriptor=undefined;fs.renameSync(temporary,info);job.downloadFileIdentity?.(info,identity,{settled:true});}
+  finally{if(descriptor!==undefined)try{job.downloadFileIdentity?.(temporary,fs.fstatSync(descriptor),{settled:true});}finally{fs.closeSync(descriptor);}}
   d.assets=[...assets.filter(a=>a.key!=='metadata'),{key:'metadata',file:metadataName,kind:'metadata',size:fs.statSync(info).size}];d.state=remote.state;remember();
   if(missingOnly){const check=inspectWorkFiles(this.store,job.id);d.state=check.status==='complete'?'complete':'partial';if(d.state==='complete')d.lastError='';d.coverSource=d.assets.find(a=>a.key==='cover')?.source||d.coverSource;remember();}
   return d.state==='complete';

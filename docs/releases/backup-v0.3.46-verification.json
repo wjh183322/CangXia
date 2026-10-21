@@ -1,0 +1,64 @@
+{
+  "version": "0.3.46",
+  "verifiedAt": "2026-10-21T18:21:37.481Z",
+  "status": "local-verified",
+  "nasVersion": "0.2.4",
+  "fullSuite": {
+    "files": 73,
+    "total": 755,
+    "passed": 755,
+    "failed": 0,
+    "skipped": 0
+  },
+  "focused": {
+    "total": 90,
+    "passed": 90,
+    "failed": 0,
+    "skipped": 0
+  },
+  "interfaceChecks": 226,
+  "desktopIntegration": {
+    "source": 97,
+    "packaged": 97,
+    "smallWindow": "1100x640 batch history and controls visible"
+  },
+  "independentNASCatalogueDesktop": 31,
+  "layoutChecks": {
+    "nas": true,
+    "audioViewer": true,
+    "readHistory": true,
+    "repair": true
+  },
+  "countRulesUnchanged": true,
+  "packagedRuntimeFiles": 98,
+  "asarSha256": "f4ec743805d7f2929bc03ac5d5190a9c6ab3bf096bb2e060247f277739be3dcf",
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.46-Setup-x64.exe",
+      "bytes": 144920218,
+      "sha256": "3af5d882a5ba89cb79a6a160dd9f54cbd38b148e80e10d2c2024285fb6e76f7e"
+    },
+    {
+      "file": "CangXia-Backup-0.3.46-Windows-x64.exe",
+      "bytes": 144763876,
+      "sha256": "0163ede8a0dc5f6e2757562f50056f39dbcd86fc894186e054e3724bab279392"
+    }
+  ],
+  "independentReview": "Destructive scope, writer identities, background relocation, failed metadata publication, grouped-log crash recovery and standalone continuation ownership findings fixed and independently rechecked.",
+  "cloudCI": "not-run",
+  "previousCI": {
+    "version": "0.3.45",
+    "url": "https://github.com/wjh183322/CangXia/actions/runs/39639922281",
+    "status": "failure",
+    "detail": "Desktop repair layout exposed a missing-root/scan result dereference; reproduced locally and repaired. All four corresponding layout scripts pass locally."
+  },
+  "notes": [
+    "Cancellation cleans only exact task-produced files of unfinished jobs; first-task baseline, shared assets and complete separate tasks are protected.",
+    "Paused/network-error tasks retain safe resume progress across restart. Old tasks whose output ownership cannot be proved remain visibly retained for manual verification.",
+    "Cleanup failures remain retryable with explicit UI reasons; task status IPC omits callbacks and ownership metadata.",
+    "Grouped batch child identities and active checkpoint log ownership are durable; completed and old batch snapshots are not overwritten by standalone resume or interrupted startup.",
+    "Record-only deletion defaults to local records and excludes files, using actual detail/log source rather than unrelated selected author.",
+    "Tests use isolated profiles, temporary NAS and synthetic platform responses; no real user media or NAS data were deleted."
+  ]
+}

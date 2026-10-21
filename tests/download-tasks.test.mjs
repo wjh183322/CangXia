@@ -23,3 +23,7 @@ test('returning to a queue retains only selected IDs still in that tab',async t=
  const {store}=await fixture(t);store.setSetting('downloadJobs',[{id:'1',state:'waiting'},{id:'2',state:'running'},{id:'3',state:'failed'}]);
  assert.deepEqual(store.downloadTasks.validateSelection({tab:'active',ids:['1','2','3']}),{ids:['1','2'],invalid:1});store.downloadTasks.byId.get('1').state='complete';assert.deepEqual(store.downloadTasks.validateSelection({tab:'active',ids:['1','2']}),{ids:['2'],invalid:1});assert.throws(()=>store.downloadTasks.validateSelection({tab:'bogus',ids:['1']}));
 });
+
+test('download task pages expose cloneable public status without runtime callbacks or ownership metadata',async t=>{
+ const {store}=await fixture(t);store.setSetting('downloadJobs',[{id:'1',state:'waiting'}]);const job=store.downloadTasks.byId.get('1');job.phase='transferring';job.activeSource='nas';job.trackDownloadFile=()=>{};job.cancelOwnership={root:'private-root',metadata:[{bytes:'private-original'}]};const page=store.downloadTasks.page({tab:'active',page:1,pageSize:50});assert.doesNotThrow(()=>structuredClone(page));assert.equal(page.jobs[0].phase,'transferring');assert.equal(page.jobs[0].activeSource,'nas');assert.equal('cancelOwnership' in page.jobs[0],false);assert.equal('trackDownloadFile' in page.jobs[0],false);
+});

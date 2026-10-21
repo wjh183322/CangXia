@@ -73,7 +73,7 @@ test('one sync reads only added custom folders in order, with separate checkpoin
  assert.deepEqual(calls.map(x=>x.params?.collects_id),['10','20']);assert.ok(calls.every(x=>x.route==='/aweme/v1/web/collects/video/list/'));
  assert.equal(store.collectionReads.get('__all__','quick'),null);assert.equal(store.collectionReads.info('30').quick,null);
  for(const id of ['10','20'])assert.equal(store.collectionReads.info(id).quick.status,'complete');
- assert.equal(store.readHistory.runs({}).total,2);const batch=c.status.collectionBatch;assert.equal(batch.running,false);assert.equal(batch.succeeded,2);assert.equal(batch.pending,0);assert.equal(batch.items.length,2);
+ assert.equal(store.readHistory.runs({}).total,1);const batch=c.status.collectionBatch;assert.equal(store.readHistory.runs({batch:batch.historyToken}).total,2);assert.equal(batch.running,false);assert.equal(batch.succeeded,2);assert.equal(batch.pending,0);assert.equal(batch.items.length,2);
 });
 test('quick batch requires one explicit full-scan acknowledgement before requesting any folder',async t=>{
  const {c,calls}=await fixture(t);await assert.rejects(c.sync({allAdded:true,mode:'quick'}),/历史对照/);assert.equal(calls.length,0);assert.equal(c.busy,false);
@@ -143,5 +143,5 @@ test('an unexpected between-folder error leaves a stopped result with its concre
 
 test('expired cookies detected before a folder starts stop the whole batch without inventing read logs',async t=>{
  const {c,store,calls}=await fixture(t);c.isAuthenticated=async()=>false;await c.sync({allAdded:true,mode:'full'});
- assert.equal(calls.length,0);assert.equal(c.status.collectionBatch.phase,'stopped');assert.equal(c.status.collectionBatch.pending,1);assert.equal(store.readHistory.runs({}).total,0);assert.equal(c.status.needsLogin,true);
+ assert.equal(calls.length,0);assert.equal(c.status.collectionBatch.phase,'stopped');assert.equal(c.status.collectionBatch.pending,1);assert.equal(store.readHistory.runs({}).total,1);assert.ok(store.readHistory.runs({batch:c.status.collectionBatch.historyToken}).items.every(s=>s.hasReadSummary===false));assert.equal(c.status.needsLogin,true);
 });

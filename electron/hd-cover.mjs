@@ -31,7 +31,7 @@ export class HDCover {
    child.once('error',reject);child.once('close',code=>{clearTimeout(timer);signal.removeEventListener('abort',abort);if(signal.aborted)return reject(signal.reason);if(timedOut)return reject(Error(errors.matching_timeout));try{const result=JSON.parse(stdout.trim());if(code!==0||!result.ok)throw Error(errors[result.error]||'无法取得可靠匹配的高清图');resolve(result);}catch(e){reject(e);}});
   });}finally{fs.rmSync(manifest,{force:true});}
  }
- async ensure(queue,work,download,signal,progress){
+ async ensure(queue,work,download,signal,progress,writeOutput){
   const existing=bestCover(download);if(download.hdCover?.status==='ready'&&existing?.key===download.hdCover.key&&this.store.assetExists(download,existing))return;
   const folder=download.path,temp=requireInside(folder,path.join(folder,'.cangxia-hd-'+randomUUID()));this.store.assertDirectory(folder);fs.mkdirSync(temp);
   try{
@@ -47,7 +47,7 @@ export class HDCover {
    try{const fresh=await queue.resolveWork(work.id,signal);work=fresh||work;}catch(e){signal.throwIfAborted();refreshError=e.message;if(this.store.getSetting('accessHoldUntil')>Date.now())throw e;}
    try{candidate=await queue.saveBestCover(temp,work.coverVariants?.length?work.coverVariants:[{source:work.coverSource||'cover',urls:work.coverUrls||[]}],signal,()=>{});}catch(e){signal.throwIfAborted();refreshError=e.message;}
    if(candidate&&comparableResolution(candidate,resolution)){
-    this.publish(download,candidate,path.join(temp,candidate.file),signal);return;
+    this.publish(download,candidate,path.join(temp,candidate.file),signal,writeOutput);return;
    }
    const reference=existing&&this.store.assetExists(download,existing)?requireInside(folder,path.join(folder,existing.file)):candidate?path.join(temp,candidate.file):null;
    if(!reference||!video)throw Error(refreshError||'缺少封面或完整视频，未取得高清图');
@@ -56,12 +56,12 @@ export class HDCover {
    const result=await this.slot(signal,async()=>{progress('匹配视频中的对应画面');return this.extract({video:requireInside(folder,path.join(folder,video.file)),reference,output},signal);});
    signal.throwIfAborted();const bytes=fs.readFileSync(output),dims=imageDimensions(bytes);
    if(!dims.width||!dims.height||dims.width!==result.width||dims.height!==result.height||dims.width>resolution.width||dims.height>resolution.height)throw Error('截帧尺寸校验失败');
-   this.publish(download,{kind:'image',source:'video_frame',...dims,match:{seconds:result.seconds,frame:result.frame,correlation:result.correlation,crop:result.crop,videoWidth:resolution.width,videoHeight:resolution.height}},output,signal);
+   this.publish(download,{kind:'image',source:'video_frame',...dims,match:{seconds:result.seconds,frame:result.frame,correlation:result.correlation,crop:result.crop,videoWidth:resolution.width,videoHeight:resolution.height}},output,signal,writeOutput);
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
  }
- publish(download,asset,file,signal){
+ publish(download,asset,file,signal,writeOutput){
   signal.throwIfAborted();const bytes=fs.readFileSync(file),sha256=createHash('sha256').update(bytes).digest('hex'),key='cover-hd-'+sha256.slice(0,16),name=(asset.source==='video_frame'?'视频截帧-':'高清封面-')+sha256.slice(0,16)+path.extname(file),destination=requireInside(download.path,path.join(download.path,name));
-  if(fs.existsSync(destination)){if(createHash('sha256').update(fs.readFileSync(destination)).digest('hex')!==sha256)throw Error('高清图目标文件冲突，未覆盖');}else fs.copyFileSync(file,destination,fs.constants.COPYFILE_EXCL);
+  if(fs.existsSync(destination)){if(createHash('sha256').update(fs.readFileSync(destination)).digest('hex')!==sha256)throw Error('高清图目标文件冲突，未覆盖');}else if(writeOutput)writeOutput(destination,bytes);else fs.copyFileSync(file,destination,fs.constants.COPYFILE_EXCL);
   const saved={...asset,key,file:name,size:bytes.length,sha256};download.assets=[...download.assets.filter(a=>a.key!==key),saved];download.hdCover={status:'ready',source:saved.source,key,width:saved.width,height:saved.height,match:saved.match};download.coverWarning='';
  }
 }

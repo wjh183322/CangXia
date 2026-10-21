@@ -62,7 +62,7 @@ test('cancel all removes waiting and failed jobs, preserving completed history',
 });
 test('a stale failed-page cancellation cannot cancel a task that has moved to active',async()=>{const {q}=fixture();q.jobs=[{id:'1',state:'waiting'},{id:'2',state:'failed'}];const report=await q.cancel(['1','2'],{state:'failed'});assert.equal(report.cancelled,1);assert.deepEqual(q.jobs.map(j=>j.id),['1']);});
 
-test('cancel during a later image transfer retains saved files, collection and NAS records',async t=>{
+test('cancel during a later image transfer cleans task files while preserving collection and NAS records',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cangxia-cancel-')),store=await Store.open(path.join(root,'db.sqlite'),path.join(root,'media'));
  let secondStarted=false;const q=new DownloadQueue(store,{},async(url,{signal})=>{
   if(url.endsWith('/1.jpg'))return new Response('retained-image',{headers:{'content-type':'image/jpeg'}});
@@ -70,8 +70,8 @@ test('cancel during a later image transfer retains saved files, collection and N
  },()=>{});
  t.after(async()=>{q.pause();await q.waitForIdle();store.close();fs.rmSync(root,{recursive:true,force:true});});
  store.upsertWork({aweme_id:'1',desc:'retain',images:[{url_list:['https://p3.douyinpic.com/1.jpg']},{url_list:['https://p3.douyinpic.com/2.jpg']}]});store.ingestMembers('__all__',['1'],true);store.put('backup_downloads','1',{id:'1',assets:[{file:'NAS-preserved'}]});
- const backup=store.get('backup_downloads','1');q.enqueue(['1']);await until(()=>secondStarted);await q.cancel(['1']);await q.waitForIdle();
- assert.equal(q.jobs.length,0);const d=store.download('1');assert.equal(fs.readFileSync(path.join(d.path,d.assets[0].file),'utf8'),'retained-image');assert.ok(store.hasRead('1'));assert.deepEqual(store.rows('SELECT work_id FROM members'),[{work_id:'1'}]);assert.deepEqual(store.get('backup_downloads','1'),backup);
+ const backup=store.get('backup_downloads','1');q.enqueue(['1']);await until(()=>secondStarted);const dir=store.download('1').path;await q.cancel(['1']);await q.waitForIdle();
+ assert.equal(q.jobs.length,0);assert.equal(store.download('1'),null);assert.deepEqual(fs.readdirSync(dir),[]);assert.ok(store.hasRead('1'));assert.deepEqual(store.rows('SELECT work_id FROM members'),[{work_id:'1'}]);assert.deepEqual(store.get('backup_downloads','1'),backup);
 });
 
 test('six cached HTTP transfers run without metadata queries and resume verified prefixes',async t=>{
@@ -87,7 +87,7 @@ test('six cached HTTP transfers run without metadata queries and resume verified
  const q=new DownloadQueue(store,{resolveWork:async id=>{queries++;queryPeak=Math.max(queryPeak,queries);await delay(10);queries--;return store.work(id);}},(url,opts)=>fetch(`http://127.0.0.1:${server.address().port}/${new URL(url).pathname}`,opts),()=>{});
  t.after(async()=>{q.pause();await q.waitForIdle();server.closeAllConnections();await new Promise(r=>server.close(r));store.close();fs.rmSync(root,{recursive:true,force:true});});
  for(let id=1;id<=6;id++)store.upsertWork({aweme_id:String(id),desc:'pool '+id,images:[{url_list:[`https://p3.douyinpic.com/${id}.jpg`]}]});
- q.setConcurrency(6);q.enqueue(['1','2','3','4','5','6']);await until(()=>sockets===6);await delay(80);q.pause();await q.waitForIdle();await until(()=>sockets===0);
+ q.setConcurrency(6);q.enqueue(['1','2','3','4','5','6']);await until(()=>sockets===6);await until(()=>['1','2','3','4','5','6'].every(id=>{const d=store.download(id);return d&&fs.statSync(path.join(d.path,'图片-001.jpg.part'),{throwIfNoEntry:false})?.size>0;}));q.pause();await q.waitForIdle();await until(()=>sockets===0);
  assert.equal(q.active.size,0);assert.ok(q.jobs.every(j=>j.state==='waiting'));q.resume();await q.waitForIdle();
  assert.equal(peak,6);assert.equal(queryPeak,0);assert.ok(ranges>=6,'each interrupted transfer resumed');assert.ok(q.jobs.every(j=>j.state==='complete'));
  for(let id=1;id<=6;id++){const d=store.download(String(id));const a=d.assets.find(a=>a.key==='image-0');assert.deepEqual(fs.readFileSync(path.join(d.path,a.file)),bytes);}

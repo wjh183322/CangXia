@@ -3,6 +3,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {setImmediate as yieldLoop} from 'node:timers/promises';
 import {requireInside} from './model.mjs';
+import {prepareCancellationRelocation,trackCancellationFile,recordCancellationIdentity} from './download-cancel-cleanup.mjs';
 
 const key=file=>path.resolve(file).toLowerCase();
 export class LocalReconcile{
@@ -40,7 +41,13 @@ export class LocalReconcile{
   const before=await fs.readFile(file,'utf8'),info=JSON.parse(before),w=store.work(id);if(!w)return;
   Object.assign(info,{collection:store.collection(d.collectionId)?.name,collectionId:d.collectionId,author:w.author,coAuthors:w.coAuthors||[],workName:w.name,title:w.title,caption:w.caption,description:w.description,tags:w.tags,rawTags:w.rawTags,localTags:store.get('local_tags',id)?.tags||[],remoteState:w.remoteState,checkedAt:w.checkedAt});
   const text=JSON.stringify(info,null,2);if(text===before)return;
-  const temporary=file+'.'+randomUUID()+'.tmp';try{await fs.writeFile(temporary,text,{flag:'wx'});await this.validate(file);await fs.rename(temporary,file);}finally{await fs.rm(temporary,{force:true});}
+  const job=store.downloadTasks?.byId.get(id),temporary=file+'.'+randomUUID()+'.tmp';if(trackCancellationFile(store,job,temporary))store.downloadTasks.flush();let handle,identity;
+  const report=(file,stat,options)=>{if(recordCancellationIdentity(store,job,file,stat,options))store.downloadTasks.flush();};
+  try{handle=await fs.open(temporary,'wx');report(temporary,await handle.stat());await handle.writeFile(text);await handle.sync();identity=await handle.stat();report(temporary,identity,{settled:true});await handle.close();handle=null;await this.validate(file);await fs.rename(temporary,file);report(file,identity,{settled:true});}
+  finally{
+   if(handle)try{identity=await handle.stat();report(temporary,identity,{settled:true});}finally{await handle.close();}
+   const stat=await fs.lstat(temporary).catch(e=>{if(e.code==='ENOENT')return null;throw e;});if(stat&&identity&&!stat.isSymbolicLink()&&stat.dev===identity.dev&&stat.ino===identity.ino&&stat.size===identity.size&&stat.mtimeMs===identity.mtimeMs){await this.validate(temporary);await fs.unlink(temporary);}
+  }
   const asset=d.assets?.find(a=>a.key==='metadata');if(asset)asset.size=(await fs.stat(file)).size;store.put('downloads',id,d);
  }
  async relocate(row,owners){
@@ -56,6 +63,7 @@ export class LocalReconcile{
   if(target.dir!==path.resolve(d.path)&&await this.exists(target.dir))target=store.destination(id,{owners,exists:()=>true,check:false});
   await this.validate(d.path);await this.validate(target.dir);
   if(path.resolve(d.path)!==target.dir){
+   const job=store.downloadTasks?.byId.get(id);if(prepareCancellationRelocation(store,job,{targetDir:target.dir}))store.downloadTasks.flush();
    store.db.run('UPDATE local_reconcile SET source_path=?,target_path=? WHERE work_id=?',[d.path,target.dir,id]);
    if(await this.exists(d.path)){
     await fs.mkdir(path.dirname(target.dir),{recursive:true});if(await this.exists(target.dir))throw Error('目标作品目录已存在，已保留原文件，请检查同名目录');

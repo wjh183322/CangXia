@@ -8,6 +8,8 @@ import { inspectWorkFiles } from './repair-check.mjs';
 import {setImmediate as yieldToUI} from 'node:timers/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {sourceError} from '../shared/source-state.mjs';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {createCancellationOwnership,isPreTaskFile,trackCancellationFile,cleanupCancelledDownload,prepareCancellationRelocation,recordCancellationIdentity} from './download-cancel-cleanup.mjs';
 const storageFailure=e=>['ENOSPC','EACCES','EPERM','EROFS','ENOENT','ENOTDIR','EISDIR','EBUSY','EIO','EMFILE','EEXIST'].includes(e?.code)||String(e?.code||'').startsWith('SQLITE');
 const sourceFailure=e=>!storageFailure(e)&&(e?.sourceUnavailable||e?.refreshable||e?.httpStatus>=400||e?.code==='AUTH_REQUIRED'||['ECONNRESET','ETIMEDOUT','ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError');
 const transient=e=>!storageFailure(e)&&([408,425,500,502,503,504].includes(e?.httpStatus)||['ECONNRESET','ETIMEDOUT','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_SOCKET'].includes(e?.code||e?.cause?.code)||e?.name==='TimeoutError'||/\bnet::ERR_(CONNECTION_RESET|CONNECTION_CLOSED|CONNECTION_TIMED_OUT|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|HTTP2_PROTOCOL_ERROR)\b/.test(String(e?.message)+' '+String(e?.cause?.message)));
@@ -22,15 +24,18 @@ function extension(contentType, kind) {
   if (!ext) throw Object.assign(new Error('没有取得静态原图，已保留已有文件'),{sourceUnavailable:true});
   return ext;
 }
-function availableName(dir,name,extensions){
- for(let n=0;n<1000;n++){const candidate=n?name+'-补存'+(n===1?'':'-'+n):name;if(extensions.every(ext=>!fs.lstatSync(requireInside(dir,path.join(dir,candidate+ext)),{throwIfNoEntry:false})))return candidate;}
+function availableName(dir,name,extensions,avoid=()=>false){
+ for(let n=0;n<1000;n++){const candidate=n?name+'-补存'+(n===1?'':'-'+n):name;if(!avoid(candidate)&&extensions.every(ext=>!fs.lstatSync(requireInside(dir,path.join(dir,candidate+ext)),{throwIfNoEntry:false})))return candidate;}
  throw Object.assign(Error('同名文件过多，已有文件保留，请检查作品目录'),{code:'EEXIST'});
 }
 export class DownloadQueue {
   constructor(store, collector, fetchMedia, notify) {
     Object.assign(this, { store, collector, fetchMedia, notify });
+    this.ownershipContext=new AsyncLocalStorage();this.cancellations=new Map();
     this.taskRows=store.downloadTasks;
     this.jobs = (store.getSetting('downloadJobs') || []).map(j=>({...j,source:j.source==='nas'?'nas':'douyin',state:j.state==='running'?'waiting':j.state}));
+    for(const job of this.jobs)if(this.store.root&&!job.cancelOwnership&&job.state!=='complete')job.cancelOwnership={version:1,epoch:randomUUID(),root:path.resolve(this.store.root),legacyUnknown:true,dirs:[],files:[],metadata:[],original:null};
+    for(const job of this.jobs)if(job.cancelOwnership?.cancelRequested){job.state='failed';job.message='取消清理尚未完成，请再次取消以重试清理';}
     this.running=false;this.paused=this.jobs.some(j=>j.state==='waiting');this.active=new Map();this.resolveTail=Promise.resolve();this.cursor=0;
     const saved=store.getSetting('downloadConcurrency');this.concurrency=Number.isInteger(saved)&&saved>=1&&saved<=6?saved:3;
     collector.onSourceStatus=(id,state)=>{if(state==='unavailable')this.retireUnavailable([id]);else if(state==='available'){const job=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(job?.state==='unavailable'){job.state='failed';job.message='原作品已恢复可访问，可手动重试下载';this.emit(true);}}};
@@ -51,31 +56,52 @@ export class DownloadQueue {
   async cancel(ids=null,{state}={}){
     if(state!==undefined&&!['failed','unavailable'].includes(state))throw Error('取消任务的状态范围无效');
     const selected=ids===null?null:new Set(ids),removed=this.jobs.filter(j=>j.state!=='complete'&&(!state||j.state===state)&&(!selected||selected.has(j.id)));
-    const removedIds=new Set(removed.map(j=>j.id)),pending=[];
-    // Persist queue removal before waiting for network/file handles to settle.
-    this.jobs=this.jobs.filter(j=>!removedIds.has(j.id));this.cursor=0;
-    if(this.jobs.every(j=>j.state==='complete'))this.pauseReason='';
-    this.emit(true);this.store.save();
-    for(const id of removedIds){const task=this.active.get(id);if(task){task.cancelled=true;task.controller.abort();pending.push(task.promise);}}
-    this.wake?.();await Promise.allSettled(pending);this.emit(true);
-    return {cancelled:removedIds.size};
+    let cancelled=0;const failures=[];
+    // Keep durable rows until both the writer and cleanup settle. A restart must never resume a canceled writer.
+    const operations=removed.map(job=>{
+      let operation=this.cancellations.get(job.id);
+      if(!operation){operation=this.cancelJob(job);this.cancellations.set(job.id,operation);void operation.then(()=>this.cancellations.delete(job.id),()=>this.cancellations.delete(job.id));}
+      return operation.then(()=>{cancelled++;},error=>{failures.push({id:job.id,message:error.message});});
+    });
+    await Promise.all(operations);
+    this.cursor=0;if(this.jobs.every(j=>j.state==='complete'))this.pauseReason='';this.emit(true);this.store.save();
+    return {cancelled,cleanupFailed:failures.length,failures};
+  }
+  async cancelJob(job){
+    if(job.cancelOwnership)job.cancelOwnership={...job.cancelOwnership,cancelRequested:true};
+    const task=this.active.get(job.id);if(task){task.cancelled=true;task.controller.abort();}
+    job.state='failed';job.phase='cancelling';job.message='正在取消并清理本任务文件';this.emit(true);this.store.save();this.wake?.();
+    if(task)await Promise.allSettled([task.promise]);
+    try{if(job.cancelOwnership?.legacyUnknown&&!job.cancelOwnership.dirs.length){const ownership=createCancellationOwnership(this.store,job.id,{legacyUnknown:true,epoch:job.cancelOwnership.epoch});job.cancelOwnership=ownership?{...ownership,cancelRequested:true}:undefined;this.emit(true);}await cleanupCancelledDownload(this.store,job,this.jobs);this.jobs=this.jobs.filter(j=>j!==job);}
+    catch(error){job.state='failed';job.phase='cleanupFailed';job.message='取消清理失败，文件保留；请再次取消重试：'+error.message;this.emit(true);this.store.save();throw error;}
+  }
+  trackDownloadFile(job,file,options){if(trackCancellationFile(this.store,job,file,options))this.emit(true);}
+  prepareDownloadRelocation(job){if(prepareCancellationRelocation(this.store,job))this.emit(true);}
+  downloadFileIdentity(job,file,identity,options){if(recordCancellationIdentity(this.store,job,file,identity,options))this.emit(true);}
+  writeOwnedFile(job,file,bytes){
+    this.trackDownloadFile(job,file);const descriptor=fs.openSync(file,'wx');let identity;
+    try{this.downloadFileIdentity(job,file,fs.fstatSync(descriptor));fs.writeFileSync(descriptor,bytes);fs.fsyncSync(descriptor);return identity=fs.fstatSync(descriptor);}
+    finally{try{this.downloadFileIdentity(job,file,identity||fs.fstatSync(descriptor),{settled:true});}finally{fs.closeSync(descriptor);}}
   }
   emit(force=false) {
     // Asset checkpoints remain durable; avoid serializing a 30,000-job queue on every byte update.
     if(force||!this.lastPersist||Date.now()-this.lastPersist>=5000){
-      if(this.taskRows)this.taskRows.flush();else this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message,coverOnly,source})=>({id,title,state,progress,message,coverOnly,source:source||'douyin'})));this.lastPersist=Date.now();
+      if(this.taskRows)this.taskRows.flush();else this.store.setSetting('downloadJobs',this.jobs.map(({id,title,state,progress,message,coverOnly,source,cancelOwnership})=>({id,title,state,progress,message,coverOnly,source:source||'douyin',...(cancelOwnership?{cancelOwnership}:{})})));this.lastPersist=Date.now();
     }
     this.notify();
   }
   enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
     if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
-    if(ids.some(id=>this.active.get(id)?.cancelled))throw Error('该任务正在取消，请稍后重新添加');
+    if(ids.some(id=>this.active.get(id)?.cancelled||this.cancellations.has(id)||this.jobs.some(j=>j.id===id&&j.cancelOwnership?.cancelRequested)))throw Error('该任务正在取消或清理尚未完成，请再次取消重试清理');
     const requested=new Set(ids);if(this.jobs.some(j=>requested.has(j.id)&&['waiting','running'].includes(j.state)&&(!!j.coverOnly!==coverOnly||(!coverOnly&&(j.source||'douyin')!==source))))throw Error('所选作品已有不同类型或来源的任务，请先完成或取消该任务');
     const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
     for (const id of [...new Set(ids)]) {
       if(busy.has(id))continue;
       const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;if(source!=='nas'&&w.remoteState==='unavailable'){const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(previous)this.retireUnavailable([id]);continue;}
-      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source,...(catalogueLibrary?{catalogueLibrary}:{}) });
+      const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);
+      // Re-enqueuing an unfinished task is a retry of its original epoch, never a new ownership baseline.
+      const cancelOwnership=previous&&previous.state!=='complete'?previous.cancelOwnership:createCancellationOwnership(this.store,id);
+      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source,...(catalogueLibrary?{catalogueLibrary}:{}),...(cancelOwnership?{cancelOwnership}:{}) });
     }
     const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
     this.paused = false;this.pauseReason=''; this.emit(true);this.wake?.();void this.run();
@@ -87,7 +113,7 @@ export class DownloadQueue {
   async retryFailed(ids=null){
     this.retireUnavailable(this.jobs.filter(j=>j.state==='failed'&&(this.store.lightViews?.ready?this.store.lightViews.bases.get(j.id):this.store.work(j.id))?.remoteState==='unavailable').map(j=>j.id));
     const selected=ids===null?null:new Set(ids),failed=this.jobs.filter(j=>j.state==='failed'&&(!selected||selected.has(j.id)));let queued=0;
-    for(const job of failed){if(this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
+    for(const job of failed){if(job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
     if(queued){this.paused=false;this.pauseReason='';this.cursor=0;this.emit(true);this.wake?.();void this.run();}return {queued};
   }
   async resolveWork(id,signal,job){
@@ -103,9 +129,13 @@ export class DownloadQueue {
     try {
       while (true) {
         while(!this.paused&&this.active.size+(this.externalActive?.()||0)<this.concurrency&&this.cursor<this.jobs.length){
-          const job=this.jobs[this.cursor++];if(job.state!=='waiting'||this.active.has(job.id))continue;
+          const job=this.jobs[this.cursor++];if(job.state!=='waiting'||job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.active.has(job.id))continue;
+          job.trackDownloadFile=file=>{this.trackDownloadFile(job,file);this.trackDownloadFile(job,file+'.backup-part');};
+          job.trackDownloadRelocation=()=>this.prepareDownloadRelocation(job);
+          job.isPreTaskDownloadFile=file=>isPreTaskFile(job,file);
+          job.downloadFileIdentity=(file,identity,options)=>this.downloadFileIdentity(job,file,identity,options);
           const task={controller:new AbortController()};this.active.set(job.id,task);job.state='running';job.phase='preparing';this.emit();
-          task.promise=Promise.resolve().then(()=>this.saveWork(job,task.controller.signal)).then(async()=>{
+          task.promise=Promise.resolve().then(()=>{task.controller.signal.throwIfAborted();if(!job.cancelOwnership||job.cancelOwnership.legacyUnknown&&!job.cancelOwnership.dirs.length){const ownership=createCancellationOwnership(this.store,job.id,{legacyUnknown:!!job.cancelOwnership?.legacyUnknown,...(job.cancelOwnership?.epoch?{epoch:job.cancelOwnership.epoch}:{})});if(ownership)job.cancelOwnership={...ownership,...(job.cancelOwnership?.cancelRequested?{cancelRequested:true}:{})};this.emit(true);}return this.ownershipContext.run(job,()=>this.saveWork(job,task.controller.signal));}).then(async()=>{
             if(task.cancelled||task.retired)return;
             job.phase='checking';try{let result;const confirmed=await this.store.fileStates?.confirmWritten(job.id,{signal:task.controller.signal,onResult:value=>{result=value;}});if(this.store.fileStates&&!confirmed&&!job.coverOnly){job.confirmationCode=result?.code;throw Error(result?.issues?.map(i=>(i.key?i.key+'：':'')+i.message).join('；')||'已保存文件的当前状态未通过确认');}}catch(error){if(!task.cancelled){job.state=task.controller.signal.aborted?'waiting':'failed';job.message='已保存内容保留，文件确认暂未完成：'+error.message;if(task.controller.signal.aborted)this.cursor=0;}return;}if(task.cancelled||task.retired)return;
             job.state='complete';job.progress=100;job.message='文件已保存';
@@ -159,7 +189,7 @@ export class DownloadQueue {
   async saveResources(job,signal,w){
     signal.throwIfAborted();const {store}=this;
     const old = store.download(job.id);
-    if (old) store.relocate(job.id);
+    if (old){this.prepareDownloadRelocation(job);store.relocate(job.id);}
     const { dir, collectionId,home } = store.destination(job.id);
     store.assertDirectory(dir); fs.mkdirSync(dir, { recursive: true });
     let d = { ...store.download(job.id), id: job.id, path: dir, collectionId, home,state: 'partial', assets: store.download(job.id)?.assets || [], savedAt: old?.savedAt || new Date().toISOString() };
@@ -195,13 +225,14 @@ export class DownloadQueue {
   }
   async ensureHDCover(job,w,d,signal){
     if(!this.hdCovers)return;
-    try{await this.hdCovers.ensure(this,w,d,signal,message=>{job.phase='matching';job.message=message;this.emit();});}
+    try{await this.hdCovers.ensure(this,w,d,signal,message=>{job.phase='matching';job.message=message;this.emit();},(file,bytes)=>this.writeOwnedFile(job,file,bytes));}
     catch(e){if(signal.aborted)throw e;d.hdCover={status:'failed',message:e.message};d.coverWarning='未取得与视频清晰度相当的封面：'+e.message;throw Error(d.coverWarning);}
   }
   saveMetadata(w,d){
     const metadata = this.metadata(w, d),dir=d.path;
     const file = requireInside(dir, path.join(dir, '作品信息.json'));
-    fs.writeFileSync(file + '.part', JSON.stringify(metadata, null, 2)); fs.renameSync(file + '.part', file);
+    const job=this.ownershipContext.getStore(),temporary=isPreTaskFile(job,file+'.part')?path.join(dir,'.cangxia-metadata-'+randomUUID()+'.part'):file+'.part';this.trackDownloadFile(job,file);this.trackDownloadFile(job,temporary);
+    const identity=this.writeOwnedFile(job,temporary,JSON.stringify(metadata,null,2));fs.renameSync(temporary,file);this.downloadFileIdentity(job,file,identity,{settled:true});
     d.assets = [...d.assets.filter(a => a.key !== 'metadata'), { key: 'metadata', file: '作品信息.json', size: fs.statSync(file).size, kind: 'metadata' }];
   }
   metadata(w, d) {
@@ -209,14 +240,16 @@ export class DownloadQueue {
   }
   async saveAsset(dir, target, signal, progress) {
     if (!target.urls?.length) throw Object.assign(new Error('作品未提供此资源'),{refreshable:true});
-    target={...target,name:availableName(dir,target.name,target.kind==='video'?['.mp4']:['.jpg','.png','.webp','.avif'])};
+    const job=this.ownershipContext.getStore(),extensions=target.kind==='video'?['.mp4']:['.jpg','.png','.webp','.avif'];
+    target={...target,name:availableName(dir,target.name,extensions,name=>[...extensions.map(ext=>name+ext+'.part'),name+'.resume.json',name+'.resume.json.tmp'].some(file=>isPreTaskFile(job,path.join(dir,file))))};
+    const ownedExtension=(contentType,kind)=>{const ext=extension(contentType,kind);for(const name of [target.name+ext,target.name+ext+'.part',target.name+'.resume.json',target.name+'.resume.json.tmp'])this.trackDownloadFile(job,path.join(dir,name));return ext;};
     let lastError;
     let retries=0;
     for (const url of target.urls.slice(0, 9)) {
       if (!isMediaURL(url)) continue;
       for(;;){
       try {
-        let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,preserveExisting:true,fetchMedia:async(...args)=>{try{return await this.fetchMedia(...args);}catch(e){if(!storageFailure(e))e.sourceUnavailable=true;throw e;}},extension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
+        let lastProgress=0;const {file,size,sha256,resumedBytes}=await transferAsset({dir,target,url,signal,preserveExisting:true,onFileWrite:(file,identity,options)=>this.downloadFileIdentity(job,file,identity,options),fetchMedia:async(...args)=>{try{return await this.fetchMedia(...args);}catch(e){if(!storageFailure(e))e.sourceUnavailable=true;throw e;}},extension:ownedExtension,progress:bytes=>{if(Date.now()-lastProgress>500){lastProgress=Date.now();progress(bytes);}}});
         const dimensions=target.kind==='image'?imageDimensions(fs.readFileSync(file)):{};
         return { key: target.key, kind: target.kind, file: path.basename(file), size,sha256,resumedBytes,...dimensions };
       } catch (e) {
@@ -245,7 +278,7 @@ export class DownloadQueue {
       if(!candidates.length)throw lastError||new Error('没有可用静态单图');
       const sorted=[...candidates].sort((a,b)=>(b.width||0)*(b.height||0)-(a.width||0)*(a.height||0));const best=sorted[0];
       const comparisons=candidates.map(({source,width,height,size,sha256})=>({source,width,height,size,sha256}));
-      const ext=path.extname(best.file),final=path.join(dir,availableName(dir,'单图',[ext])+ext);await fs.promises.copyFile(path.join(dir,best.file),final,fs.constants.COPYFILE_EXCL);
+      const ext=path.extname(best.file),final=path.join(dir,availableName(dir,'单图',[ext])+ext);this.writeOwnedFile(this.ownershipContext.getStore(),final,fs.readFileSync(path.join(dir,best.file)));
       return {...best,file:path.basename(final),comparisons};
     }finally{for(const c of candidates){const file=requireInside(dir,path.join(dir,c.file));if(fs.existsSync(file))fs.unlinkSync(file);}}
   }

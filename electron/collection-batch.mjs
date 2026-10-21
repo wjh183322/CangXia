@@ -32,8 +32,9 @@ export async function readAddedCollections(c,{mode='quick',allowFullScan=false,i
  c.status.readProgress={mode,name:includeTotal?'总收藏与自建收藏夹':'全部自建收藏夹',checked:0,added:0,stage:'preparing',startedAt:batch.startedAt};
  const changedAccount=()=>c.store.getSetting('browserAccountKey')!==account;
  const interrupted=()=>epoch!==c.cancelEpoch||c.cancelled||c.status.needsLogin||changedAccount()||Number(c.store.getSetting('accessHoldUntil')||0)>Date.now();
- const publish=()=>{for(const [field,state]of [['succeeded','complete'],['failed','failed'],['skipped','skipped'],['pending','waiting'],['paused','paused']])batch[field]=batch.items.filter(item=>item.state===state).length;batch.processed=batch.succeeded+batch.failed+batch.skipped;batch.checked=batch.items.reduce((sum,item)=>sum+(item.summary?.checked||0),0);batch.added=batch.items.reduce((sum,item)=>sum+(item.summary?.added||0),0);c.notify();};
+ const publish=()=>{for(const [field,state]of [['succeeded','complete'],['failed','failed'],['skipped','skipped'],['pending','waiting'],['paused','paused']])batch[field]=batch.items.filter(item=>item.state===state).length;batch.processed=batch.succeeded+batch.failed+batch.skipped;batch.checked=batch.items.reduce((sum,item)=>sum+(item.summary?.checked||0),0);batch.added=batch.items.reduce((sum,item)=>sum+(item.summary?.added||0),0);c.store.readHistory.batches.publish(batch);c.notify();};
  try{
+  c.store.readHistory.batches.begin(batch);
   c.notify();
   for(const item of batch.items){
    if(interrupted())break;
@@ -58,7 +59,7 @@ export async function readAddedCollections(c,{mode='quick',allowFullScan=false,i
  }catch(error){batch.phase='stopped';batch.message='批量同步已停止：'+(error.message||'未完成，已有内容保留');return batch;}
  finally{
   for(const item of batch.items)if(item.state==='running')item.state='paused';
-  batch.running=false;batch.finishedAt=Date.now();c.batchReading=false;publish();
+  batch.running=false;batch.finishedAt=Date.now();c.batchReading=false;try{publish();}finally{c.store.readHistory.batches.active=null;}
   c.update(batch.phase==='done'?'done':batch.phase==='stopped'?'idle':'attention',batch.message||'批量同步未完成，已有内容保留');
  }
 }
