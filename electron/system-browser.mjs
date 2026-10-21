@@ -1,3 +1,4 @@
+import {probeWorkPage} from './work-page-probe.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
@@ -163,6 +164,7 @@ export class SystemBrowser extends EventEmitter {
     if(!isDouyinURL(url))throw new Error('作品链接不是抖音地址');await this.launch(url);
     const {targetId}=await this.connection.send('Target.createTarget',{url});await this.connection.send('Target.activateTarget',{targetId});return targetId;
   }
+  async verifyWorkPage(id,options={}){if(this.sourceProbe)throw Error('已有原作品网页正在复核');const pending=probeWorkPage(this,id,options);this.sourceProbe=pending;try{return await pending;}finally{if(this.sourceProbe===pending)this.sourceProbe=null;}}
   async observeWork(id,onResponse){
     if(!/^\d+$/.test(id))throw new Error('作品标识无效');await this.launch('about:blank');
     const {targetId}=await this.connection.send('Target.createTarget',{url:'about:blank'});const sid=await this.attach(targetId);const requests=new Map();

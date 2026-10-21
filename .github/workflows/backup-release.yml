@@ -70,6 +70,14 @@ jobs:
             .test-output/downloads-failed-*.png
             .test-output/media-redirect-result.json
           retention-days: 14
+      - name: Verify automatic work availability
+        run: |
+          node --test --test-concurrency=1 tests/source-page.test.mjs tests/source-filter.test.mjs tests/source-audit.test.mjs tests/source-status.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/source-page-browser-test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/browser-reading-desktop-test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build matching component
         shell: pwsh
         run: ./scripts/build-cover-helper.ps1 -Python python
@@ -80,6 +88,8 @@ jobs:
           npm run test:backup-preview
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/source-page-browser-test.mjs --packaged
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/check-backup-package.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

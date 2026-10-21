@@ -11,6 +11,8 @@ export function filteredSourceState(data,id){
  const message=String(filter.detail_msg||'').trim(),notice=String(filter.notice||'').trim();
  const accessWarning=String(data?.status_msg||data?.message||data?.data?.status_msg||data?.data?.message||'');
  if(/登录|验证码|安全验证|访问受限|频繁|稍后|可能|login|captcha|challenge|rate.?limit|too many/i.test(accessWarning+' '+message+' '+notice))return null;
+ // Supplied privacy response proves inaccessibility for this account, not deletion.
+ if(filter.filter_reason==='author_secret'&&envelope.aweme_detail===null&&notice==='作品暂时无法查看'&&/^由于对方隐私设置[，,]\s*无法查看(?:[，,。]|$)/.test(message))return {state:'unavailable',reason:'隐私限制，当前账号无法查看此作品。平台提示：'+message};
  // This empty-text audit tuple is another supplied, work-bound real response.
  // It proves current inaccessibility, not deletion or a particular audit result.
  if(filter.filter_reason==='status_audit_self_see'&&envelope.aweme_detail===null&&!message&&!notice)return {state:'unavailable',reason:'原作品当前不可访问，平台未提供具体原因'};
@@ -26,3 +28,9 @@ export function detailSourceState(raw,id,parsed){
  return parsed?.videoUrls?.length||parsed?.images?.some(i=>i.urls?.length)?{state:'available',reason:'平台返回对应作品详情和媒体资源'}:{state:'unknown',reason:'作品详情缺少可用媒体资源，暂无法确认原作品状态'};
 }
 export const sourceError=reason=>Object.assign(Error(reason||'原作品已失效，已停止自动下载与补齐'),{code:'SOURCE_UNAVAILABLE',sourceDeleted:true});
+
+export function needsPageVerification(data,id){
+ if(data?.aweme_detail||data?.data?.aweme_detail)return false;
+ const envelope=data?.filter_detail?data:data?.data,filter=envelope?.filter_detail,success=v=>v===0||v==='0';
+ return !!filter&&success(envelope.status_code??data?.status_code)&&(data?.status_code===undefined||success(data.status_code))&&envelope.aweme_detail===null&&filter.aweme_id===id&&filter.filter_reason===''&&!String(filter.detail_msg||'').trim()&&!String(filter.notice||'').trim()&&!/登录|验证码|安全验证|频繁|稍后|访问受限|login|captcha|challenge|rate.?limit|too many/i.test(String(data?.status_msg||data?.message||envelope.status_msg||envelope.message||''));
+}
