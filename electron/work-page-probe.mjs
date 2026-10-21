@@ -1,7 +1,7 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import {abortable} from './browser-api.mjs';
 import {parsePlatformJSON,parseWork} from './model.mjs';
-import {filteredSourceState,detailSourceState} from '../shared/source-state.mjs';
+import {filteredSourceState,detailSourceState,needsPageVerification} from '../shared/source-state.mjs';
 import {workPageSnapshot} from './work-page-state.mjs';
 const unknown=(reason,kind='unknown')=>({state:'unknown',kind,reason});
 const messages={login:'网页要求登录，暂无法确认原作品状态',challenge:'网页要求安全验证，暂无法确认原作品状态',frequency:'网页提示访问频繁，已停止自动复核',network:'网页网络异常，暂无法确认原作品状态',redirect:'网页已跳转，未将其他作品当作核验结果'};
@@ -19,7 +19,7 @@ export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=20
   listener=(method,p,sessionId)=>{
    if(sessionId!==sid||combined.aborted)return;
    if(method==='Fetch.requestPaused'){let media=['Media','Image'].includes(p.resourceType);try{const u=new URL(p.request.url);media||=/(^|\.)douyinvod\.com$/.test(u.hostname)||/\.(mp4|m3u8|mpd)(?:$|[?#])/i.test(u.pathname);}catch{}if(media)void connection.send('Fetch.failRequest',{requestId:p.requestId,errorReason:'BlockedByClient'},sid).catch(()=>{});return;}
-   const matches=url=>{try{const u=new URL(url);return u.origin==='https://www.douyin.com'&&u.pathname==='/aweme/v1/web/aweme/detail/'&&u.searchParams.get('aweme_id')===id;}catch{return false;}};
+   const matches=url=>{try{const u=new URL(url);return ['https://www.douyin.com','https://douyin.com'].includes(u.origin)&&u.pathname==='/aweme/v1/web/aweme/detail/'&&u.searchParams.get('aweme_id')===id;}catch{return false;}};
    const fail=kind=>{blocked=unknown(messages[kind]||'网页详情响应未能确认原作品状态',kind);};
    if(method==='Network.requestWillBeSent'&&matches(p.request?.url)){
     if(requests.size>=16)fail('unknown');else requests.set(p.requestId,{readable:false});
@@ -37,7 +37,7 @@ export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=20
     const task=(async()=>{try{
      const value=await abortable(connection.send('Network.getResponseBody',{requestId:p.requestId},sid),combined),text=value.base64Encoded?Buffer.from(value.body,'base64').toString('utf8'):value.body;
      if(typeof text!=='string'||Buffer.byteLength(text)>1024*1024){fail('unknown');return;}
-     const data=parsePlatformJSON(text),envelope=data.filter_detail||data.aweme_detail?data:data.data||data,success=v=>v===0||v==='0',message=String(data.status_msg||data.message||envelope.status_msg||envelope.message||'');
+     const data=parsePlatformJSON(text),envelope=data.filter_detail||data.aweme_detail?data:data.data||data,success=v=>v===0||v==='0',message=[data.status_msg,data.message,envelope.status_msg,envelope.message,envelope.filter_detail?.detail_msg,envelope.filter_detail?.notice].filter(v=>typeof v==='string').join(' ');
      if(/登录|login/i.test(message)){fail('login');return;}
      if(/验证码|安全验证|captcha|challenge/i.test(message)){fail('challenge');return;}
      if(/频繁|访问受限|rate.?limit/i.test(message)){fail('frequency');return;}
@@ -45,7 +45,7 @@ export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=20
      const raw=data.aweme_detail||data.data?.aweme_detail;
      if(raw&&String(raw.aweme_id??raw.awemeId)!==id){fail('unknown');return;}
      if(raw){const state=detailSourceState(raw,id,parseWork(raw));if(state.state==='available')positive={state:'available',kind:'api',workId:id,reason:'对应作品网页返回了作品详情和媒体资源',raw};else if(state.state==='unavailable')negative={...state,kind:'api',workId:id};else fail('unknown');}
-     else{const state=filteredSourceState(data,id);if(state)negative={...state,kind:'api',workId:id};else if(envelope.aweme_detail!==null||String(envelope.filter_detail?.aweme_id)!==id||envelope.filter_detail?.filter_reason!=='')fail('unknown');}
+     else{const state=filteredSourceState(data,id);if(state)negative={...state,kind:'api',workId:id};else if(!needsPageVerification(data,id))fail('unknown');}
     }catch{fail('unknown');}})();bodies.add(task);void task.finally(()=>bodies.delete(task));
    }
   };

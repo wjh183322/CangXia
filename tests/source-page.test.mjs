@@ -50,14 +50,14 @@ test('unresolved matching request stays unknown at the deadline',async()=>{
  assert.equal((await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:30})).state,'unknown');
 });
 test('matching access, transport and malformed responses override stale missing DOM',async t=>{
- for(const [mode,kind] of [['login','login'],['challenge','challenge'],['rate','frequency'],['network','network'],['http','network'],['business','unknown'],['parse','unknown']])await t.test(mode,async()=>{
+ for(const [mode,kind] of [['login','login'],['filter-login','login'],['notice','unknown'],['challenge','challenge'],['rate','frequency'],['network','network'],['http','network'],['business','unknown'],['parse','unknown']])await t.test(mode,async()=>{
   const f=probeFixture(),original=f.conn.send;f.conn.send=async(method,params,sid)=>{
    if(method==='Page.navigate'){
     emitDetail(f,'Network.requestWillBeSent',{request:{url:detailUrl}});
     emitDetail(f,'Network.responseReceived',{response:{status:mode==='rate'?429:mode==='http'?503:200,url:detailUrl}});
     emitDetail(f,mode==='network'?'Network.loadingFailed':'Network.loadingFinished',{});
    }
-   if(method==='Network.getResponseBody')return {body:mode==='parse'?'not json':JSON.stringify({...empty(),status_code:mode==='business'?9:0,...(mode==='login'?{status_msg:'请登录后观看'}:mode==='challenge'?{status_msg:'请完成安全验证'}:{})})};
+   if(method==='Network.getResponseBody')return {body:mode==='parse'?'not json':JSON.stringify({...empty(),status_code:mode==='business'?9:0,...(mode==='filter-login'?{status_msg:'ok',filter_detail:{...empty().filter_detail,notice:'login required'}}:mode==='notice'?{filter_detail:{...empty().filter_detail,notice:'unrecognized access notice'}}:mode==='login'?{status_msg:'请登录后观看'}:mode==='challenge'?{status_msg:'请完成安全验证'}:{})})};
    return original(method,params,sid);
   };
   const result=await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:1000});assert.equal(result.state,'unknown');assert.equal(result.kind,kind);
