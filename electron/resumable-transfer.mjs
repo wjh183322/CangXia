@@ -1,9 +1,10 @@
 import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {requireInside} from './model.mjs';
 const strongTag=value=>typeof value==='string'&&/^"[\x21\x23-\x7e]{1,512}"$/.test(value);
 const digest=value=>createHash('sha256').update(value).digest('hex');
 function ordinary(file){const stat=fs.lstatSync(file,{throwIfNoEntry:false});if(stat&&(!stat.isFile()||stat.isSymbolicLink()))throw new Error('下载临时文件不是普通文件，已停止');}
-async function remove(file){ordinary(file);await fs.promises.unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});}
+async function remove(file){const deadline=performance.now()+3000;for(let attempt=0;;attempt++){ordinary(file);try{await fs.promises.unlink(file);return;}catch(e){if(e.code==='ENOENT')return;const remaining=deadline-performance.now();if(!['EPERM','EACCES','EBUSY'].includes(e.code)||remaining<=0)throw e;await delay(Math.min(remaining,250,25*2**attempt));}}}
 async function hashPrefix(file,bytes,signal){const hash=createHash('sha256');if(bytes)for await(const chunk of fs.createReadStream(file,{start:0,end:bytes-1})){signal?.throwIfAborted();hash.update(chunk);}return hash;}
 async function readCheckpoint(dir,name,url,signal,checkpoints){
  const meta=requireInside(dir,path.join(dir,name+'.resume.json'));if(!checkpoints){ordinary(meta);if(!fs.existsSync(meta))return null;}

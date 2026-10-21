@@ -47,3 +47,9 @@ test('real HTTP disconnect resumes the saved prefix and reproduces the complete 
  await assert.rejects(transfer(dir,fetch,{url:address,progress:n=>{if(n>=65536)activeResponse.destroy();},checkpointBytes:32768}));const stored=JSON.parse(fs.readFileSync(path.join(dir,'视频.resume.json')));
  const result=await transfer(dir,fetch,{url:address});assert.equal(range,`bytes=${stored.offset}-`);assert.deepEqual(fs.readFileSync(result.file),body);
 });
+
+test('temporary Windows checkpoint cleanup denial retries without losing a completed video',async t=>{
+ const dir=fixture(t);await interrupted(dir);const temporary=path.join(dir,'视频.resume.json.tmp');fs.writeFileSync(temporary,'owned stale checkpoint');
+ const unlink=fs.promises.unlink;let attempts=0,ticks=0;fs.promises.unlink=async file=>{if(file===temporary&&++attempts<3)throw Object.assign(Error('owned sharing denial'),{code:'EBUSY'});return unlink(file);};
+ const timer=setInterval(()=>ticks++,5);try{const result=await transfer(dir,async()=>new Response(bytes.subarray(5),{status:206,headers:{...headers(),'content-length':'15','content-range':'bytes 5-19/20'}}));assert.deepEqual(fs.readFileSync(result.file),bytes);assert.ok(attempts>=3);assert.ok(ticks>1);assert.ok(!fs.existsSync(temporary));}finally{clearInterval(timer);fs.promises.unlink=unlink;}
+});
