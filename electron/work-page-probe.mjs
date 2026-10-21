@@ -8,7 +8,7 @@ const messages={login:'网页要求登录，暂无法确认原作品状态',chal
 export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=200}={}){
  if(!/^\d{1,30}$/.test(id))throw Error('作品标识无效');
  const timeout=AbortSignal.timeout(Math.min(12000,Math.max(1,timeoutMs))),combined=signal?AbortSignal.any([signal,timeout]):timeout;
- let connection,targetId,sid,listener,missing=false,positive=null,negative=null;const requests=new Map(),bodies=new Set();
+ let connection,targetId,sid,listener,missing=false,positive=null,negative=null,blocked=null;const requests=new Map(),bodies=new Set();
  const close=key=>connection.send('Target.closeTarget',{targetId:key}).catch(()=>{});
  try{
   combined.throwIfAborted();await abortable(browser.launch('about:blank'),combined);connection=browser.connection;if(!connection)throw Error('浏览器已关闭');
@@ -19,13 +19,34 @@ export async function probeWorkPage(browser,id,{signal,timeoutMs=10000,pollMs=20
   listener=(method,p,sessionId)=>{
    if(sessionId!==sid||combined.aborted)return;
    if(method==='Fetch.requestPaused'){let media=['Media','Image'].includes(p.resourceType);try{const u=new URL(p.request.url);media||=/(^|\.)douyinvod\.com$/.test(u.hostname)||/\.(mp4|m3u8|mpd)(?:$|[?#])/i.test(u.pathname);}catch{}if(media)void connection.send('Fetch.failRequest',{requestId:p.requestId,errorReason:'BlockedByClient'},sid).catch(()=>{});return;}
-   if(method==='Network.responseReceived')try{const u=new URL(p.response.url);if(p.response.status===200&&u.origin==='https://www.douyin.com'&&u.pathname==='/aweme/v1/web/aweme/detail/'&&u.searchParams.get('aweme_id')===id&&requests.size<16)requests.set(p.requestId,true);}catch{}
-   if(method==='Network.loadingFailed')requests.delete(p.requestId);
-   if(method==='Network.loadingFinished'&&requests.delete(p.requestId)&&bodies.size<8){
-    const task=(async()=>{try{const value=await abortable(connection.send('Network.getResponseBody',{requestId:p.requestId},sid),combined),text=value.base64Encoded?Buffer.from(value.body,'base64').toString('utf8'):value.body;if(typeof text!=='string'||Buffer.byteLength(text)>1024*1024)return;const data=parsePlatformJSON(text),envelope=data.filter_detail||data.aweme_detail?data:data.data||data,success=v=>v===0||v==='0';if(!success(envelope.status_code??data.status_code)||(data.status_code!==undefined&&!success(data.status_code))||/登录|验证码|安全验证|频繁|访问受限|captcha|login|challenge|rate.?limit/i.test(String(data.status_msg||data.message||envelope.status_msg||envelope.message||'')))return;const raw=data.aweme_detail||data.data?.aweme_detail;if(raw&&String(raw.aweme_id??raw.awemeId)!==id)return;
-     if(raw){const state=detailSourceState(raw,id,parseWork(raw));if(state.state==='available')positive={state:'available',kind:'api',workId:id,reason:'对应作品网页返回了作品详情和媒体资源',raw};else if(state.state==='unavailable')negative={...state,kind:'api',workId:id};}
-     else{const state=filteredSourceState(data,id);if(state)negative={...state,kind:'api',workId:id};}
-    }catch{}})();bodies.add(task);void task.finally(()=>bodies.delete(task));
+   const matches=url=>{try{const u=new URL(url);return u.origin==='https://www.douyin.com'&&u.pathname==='/aweme/v1/web/aweme/detail/'&&u.searchParams.get('aweme_id')===id;}catch{return false;}};
+   const fail=kind=>{blocked=unknown(messages[kind]||'网页详情响应未能确认原作品状态',kind);};
+   if(method==='Network.requestWillBeSent'&&matches(p.request?.url)){
+    if(requests.size>=16)fail('unknown');else requests.set(p.requestId,{readable:false});
+   }
+   if(method==='Network.responseReceived'&&(requests.has(p.requestId)||matches(p.response?.url))){
+    const status=p.response.status;
+    if(!matches(p.response.url)){requests.delete(p.requestId);fail('redirect');}
+    else if(status!==200){requests.delete(p.requestId);fail(status===429?'frequency':status===401?'login':status===403?'challenge':'network');}
+    else if(requests.has(p.requestId)||requests.size<16)requests.set(p.requestId,{readable:true});else fail('unknown');
+   }
+   if(method==='Network.loadingFailed'&&requests.delete(p.requestId))fail('network');
+   if(method==='Network.loadingFinished'&&requests.has(p.requestId)){
+    const request=requests.get(p.requestId);requests.delete(p.requestId);
+    if(!request.readable||bodies.size>=8){fail('unknown');return;}
+    const task=(async()=>{try{
+     const value=await abortable(connection.send('Network.getResponseBody',{requestId:p.requestId},sid),combined),text=value.base64Encoded?Buffer.from(value.body,'base64').toString('utf8'):value.body;
+     if(typeof text!=='string'||Buffer.byteLength(text)>1024*1024){fail('unknown');return;}
+     const data=parsePlatformJSON(text),envelope=data.filter_detail||data.aweme_detail?data:data.data||data,success=v=>v===0||v==='0',message=String(data.status_msg||data.message||envelope.status_msg||envelope.message||'');
+     if(/登录|login/i.test(message)){fail('login');return;}
+     if(/验证码|安全验证|captcha|challenge/i.test(message)){fail('challenge');return;}
+     if(/频繁|访问受限|rate.?limit/i.test(message)){fail('frequency');return;}
+     if(!success(envelope.status_code??data.status_code)||(data.status_code!==undefined&&!success(data.status_code))){fail('unknown');return;}
+     const raw=data.aweme_detail||data.data?.aweme_detail;
+     if(raw&&String(raw.aweme_id??raw.awemeId)!==id){fail('unknown');return;}
+     if(raw){const state=detailSourceState(raw,id,parseWork(raw));if(state.state==='available')positive={state:'available',kind:'api',workId:id,reason:'对应作品网页返回了作品详情和媒体资源',raw};else if(state.state==='unavailable')negative={...state,kind:'api',workId:id};else fail('unknown');}
+     else{const state=filteredSourceState(data,id);if(state)negative={...state,kind:'api',workId:id};else if(envelope.aweme_detail!==null||String(envelope.filter_detail?.aweme_id)!==id||envelope.filter_detail?.filter_reason!=='')fail('unknown');}
+    }catch{fail('unknown');}})();bodies.add(task);void task.finally(()=>bodies.delete(task));
    }
   };
   browser.on('event',listener);
@@ -41,8 +62,8 @@ await abortable(connection.send('Page.enable',{},sid),combined);
    const result=await abortable(connection.send('Runtime.evaluate',{expression:'('+workPageSnapshot.toString()+')('+JSON.stringify(id)+')',returnByValue:true},sid),combined),page=result.result?.value;
    if(result.exceptionDetails)throw Error('页面状态不可读取');
    if(Object.hasOwn(messages,page?.kind))return {...unknown(messages[page.kind],page.kind),workId:id};
-   if(page?.workId===id){if(positive)return positive;if(negative)return negative;
-    if(page.kind==='missing'&&bodies.size===0){if(missing)return {state:'unavailable',kind:'missing',workId:id,reason:'对应作品网页明确提示：你要观看的视频不存在'};missing=true;}else missing=false;
+   if(page?.workId===id){if(positive)return positive;if(blocked)return {...blocked,workId:id};if(negative&&requests.size===0&&bodies.size===0)return negative;
+    if(page.kind==='missing'&&requests.size===0&&bodies.size===0){if(missing)return {state:'unavailable',kind:'missing',workId:id,reason:'对应作品网页明确提示：你要观看的视频不存在'};missing=true;}else missing=false;
    }
    await delay(Math.max(1,pollMs),undefined,{signal:combined});
   }

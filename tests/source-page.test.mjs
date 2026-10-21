@@ -26,3 +26,40 @@ test('matching positive page detail wins over an early stale missing banner',asy
 test('page timeout stays unknown, closes its hidden target and removes listeners',async()=>{const f=probeFixture(),original=f.conn.send;f.conn.send=async(...args)=>args[0]==='Runtime.evaluate'?{result:{value:{kind:'pending',workId:id}}}:original(...args);const result=await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:25});assert.equal(result.state,'unknown');assert.equal(result.kind,'timeout');assert.equal(f.b.listenerCount('event'),0);assert.ok(f.calls.some(c=>c.method==='Target.closeTarget'));assert.equal(f.b.sourceProbe,null);});
 test('one browser cannot open concurrent verification targets and stop releases ownership',async()=>{const f=probeFixture(),original=f.conn.send;let entered;const ready=new Promise(r=>entered=r);f.conn.send=async(...args)=>{if(args[0]==='Runtime.evaluate'){entered();return new Promise(()=>{});}return original(...args);};const control=new AbortController(),first=f.b.verifyWorkPage(id,{signal:control.signal,timeoutMs:1000});await ready;await assert.rejects(f.b.verifyWorkPage(privacyId),/正在复核/);control.abort();await assert.rejects(first);assert.equal(f.calls.filter(c=>c.method==='Target.createTarget').length,1);assert.equal(f.b.sourceProbe,null);});
 test('page verification blocks media and image transfers rather than caching full works',async()=>{const f=probeFixture(),original=f.conn.send;f.conn.send=async(method,params,sid)=>{if(method==='Page.navigate')f.b.emit('event','Fetch.requestPaused',{requestId:'media-owned',resourceType:'Media',request:{url:'https://v3-web.douyinvod.com/owned.mp4'}},'probe-session');return original(method,params,sid);};await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:1000});assert.ok(f.calls.some(c=>c.method==='Fetch.failRequest'&&c.params.requestId==='media-owned'));assert.ok(f.calls.some(c=>c.method==='Network.setCacheDisabled'&&c.params.cacheDisabled));});
+
+const detailUrl='https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id='+id;
+function emitDetail(f,method,params){f.b.emit('event',method,{requestId:'own',...params},'probe-session');}
+test('matching detail initiation, headers and unread bodies all block premature missing evidence',async t=>{
+ for(const stage of ['request','headers','body'])await t.test(stage,async()=>{
+  const f=probeFixture(),original=f.conn.send;let finished=false;
+  f.conn.send=async(method,params,sid)=>{
+   if(method==='Page.navigate'){
+    emitDetail(f,'Network.requestWillBeSent',{request:{url:detailUrl}});
+    if(stage!=='request')emitDetail(f,'Network.responseReceived',{response:{status:200,url:detailUrl}});
+    if(stage==='body')emitDetail(f,'Network.loadingFinished',{});
+    else setTimeout(()=>{if(stage==='request')emitDetail(f,'Network.responseReceived',{response:{status:200,url:detailUrl}});finished=true;emitDetail(f,'Network.loadingFinished',{});},70);
+   }
+   if(method==='Network.getResponseBody'){if(stage==='body')await new Promise(r=>setTimeout(r,70));finished=true;return {body:JSON.stringify({status_code:0,aweme_detail:raw(id)})};}
+   return original(method,params,sid);
+  };
+  const result=await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:1000});assert.equal(result.state,'available');assert.equal(finished,true);
+ });
+});
+test('unresolved matching request stays unknown at the deadline',async()=>{
+ const f=probeFixture(),original=f.conn.send;f.conn.send=async(method,...args)=>{if(method==='Page.navigate')emitDetail(f,'Network.requestWillBeSent',{request:{url:detailUrl}});return original(method,...args);};
+ assert.equal((await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:30})).state,'unknown');
+});
+test('matching access, transport and malformed responses override stale missing DOM',async t=>{
+ for(const [mode,kind] of [['login','login'],['challenge','challenge'],['rate','frequency'],['network','network'],['http','network'],['business','unknown'],['parse','unknown']])await t.test(mode,async()=>{
+  const f=probeFixture(),original=f.conn.send;f.conn.send=async(method,params,sid)=>{
+   if(method==='Page.navigate'){
+    emitDetail(f,'Network.requestWillBeSent',{request:{url:detailUrl}});
+    emitDetail(f,'Network.responseReceived',{response:{status:mode==='rate'?429:mode==='http'?503:200,url:detailUrl}});
+    emitDetail(f,mode==='network'?'Network.loadingFailed':'Network.loadingFinished',{});
+   }
+   if(method==='Network.getResponseBody')return {body:mode==='parse'?'not json':JSON.stringify({...empty(),status_code:mode==='business'?9:0,...(mode==='login'?{status_msg:'请登录后观看'}:mode==='challenge'?{status_msg:'请完成安全验证'}:{})})};
+   return original(method,params,sid);
+  };
+  const result=await f.b.verifyWorkPage(id,{pollMs:2,timeoutMs:1000});assert.equal(result.state,'unknown');assert.equal(result.kind,kind);
+ });
+});

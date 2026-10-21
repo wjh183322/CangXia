@@ -19,9 +19,9 @@ void app.whenReady().then(async()=>{let browser,collector,store;const checks=[],
     }
     body='<!doctype html><html><head><style>body{margin:20px}main{width:700px}section{padding:20px}a{display:block;margin-top:100px}</style></head><body>'+content+'</body></html>';
    }else if(url.pathname.endsWith('/profile/self/'))body=JSON.stringify({status_code:0,user:{uid:'7',nickname:'synthetic'}});
-   else if(url.pathname.endsWith('/aweme/detail/')){const key=url.searchParams.get('aweme_id');body=JSON.stringify(mode==='privacy'?privacy():mode==='available'&&probeSessions.has(sid)?{status_code:0,aweme_detail:raw(key)}:empty(key));}
+   else if(url.pathname.endsWith('/aweme/detail/')){const key=url.searchParams.get('aweme_id'),probe=probeSessions.has(sid);if(mode==='delayed'&&probe)await new Promise(r=>setTimeout(r,700));if(mode==='network'&&probe){await send('Fetch.failRequest',{requestId:p.requestId,errorReason:'ConnectionReset'},sid);return;}body=JSON.stringify(mode==='privacy'?privacy():['available','delayed'].includes(mode)&&probe?{status_code:0,aweme_detail:raw(key)}:mode==='api-login'&&probe?{...empty(key),status_msg:'请登录后观看'}:empty(key));}
    else body='{}';
-   await send('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:200,responseHeaders:[{name:'Content-Type',value:type}],body:Buffer.from(body).toString('base64')},sid);
+   await send('Fetch.fulfillRequest',{requestId:p.requestId,responseCode:mode==='rate'&&probeSessions.has(sid)&&url.pathname.endsWith('/aweme/detail/')?429:200,responseHeaders:[{name:'Content-Type',value:type}],body:Buffer.from(body).toString('base64')},sid);
   })().catch(()=>{});});
   await send('Fetch.enable',{patterns:[{urlPattern:'*'}]},readerSid);
   store=await Store.open(path.join(root,'library.sqlite'),path.join(root,'media'));for(const key of [id,privacyId])store.upsertWork(raw(key));store.ingestMembers('__all__',[id,privacyId],true);
@@ -32,6 +32,8 @@ void app.whenReady().then(async()=>{let browser,collector,store;const checks=[],
   check('state verification blocks media requests instead of downloading works',blockedMedia>=2);
   mode='privacy';const before=created;result=await collector.verifySource(privacyId);check('privacy evidence is direct and creates no browser page',result.state==='unavailable'&&result.reason.includes('隐私')&&created===before);
   mode='available';result=await collector.verifySource(id);check('positive response from the matching page can recover a previously unavailable work',result.state==='available'&&result.method==='page'&&store.work(id).remoteState==='available');check('recovery does not automatically restart a download',queue.jobs.find(j=>j.id===id).state==='failed'&&!queue.running);
+  mode='delayed';result=await browser.verifyWorkPage(id,{timeoutMs:3000,pollMs:50});check('an initiated slow positive detail response wins over stale missing DOM',result.state==='available');
+  for(const [m,k] of [['api-login','login'],['rate','frequency'],['network','network']]){mode=m;result=await browser.verifyWorkPage(id,{timeoutMs:3000,pollMs:50});check('matching '+m+' evidence stays unknown despite missing DOM',result.state==='unknown'&&result.kind===k);}
   mode='comment';const prior=documents;result=await browser.verifyWorkPage(id,{timeoutMs:1800,pollMs:50});check('visible comment quotes do not mark a work missing in real Chrome',result.state==='unknown'&&documents>prior);
   mode='login';result=await browser.verifyWorkPage(id,{timeoutMs:3000,pollMs:50});check('a visible login challenge overrides the missing text',result.state==='unknown'&&result.kind==='login');
   mode='stall';let started;const ready=new Promise(r=>started=r);stall=started;const controller=new AbortController(),pending=browser.verifyWorkPage(id,{signal:controller.signal});await ready;controller.abort();await assert.rejects(pending);check('stop aborts navigation and releases the owned probe',browser.sourceProbe===null);
