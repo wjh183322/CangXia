@@ -1,0 +1,92 @@
+{
+  "ok": true,
+  "tag": "backup-v0.3.38",
+  "source": "d33ac837fea7f330ce6d195758e9984675ddfe68",
+  "runtimeSource": "a7c17414e2756bcb6061bb55fac934f4bceaed4f",
+  "ci": "https://github.com/wjh183322/CangXia/actions/runs/39564893670",
+  "ciConclusion": "success",
+  "release": "https://github.com/wjh183322/CangXia/releases/tag/backup-v0.3.38",
+  "assets": [
+    {
+      "name": "CangXia-Backup-0.3.38-Setup-x64.exe",
+      "size": 144910528,
+      "digest": "sha256:4879d7311dfafab17627ac770ab7cd2ef64cafe5b2477940d5a8541ce6267565"
+    },
+    {
+      "name": "CangXia-Backup-0.3.38-Windows-x64.exe",
+      "size": 144754205,
+      "digest": "sha256:de1f7b842154dc259f0a8a6af1d7f8a65366467336121779b0426b95260208ca"
+    },
+    {
+      "name": "SHA256-desktop.txt",
+      "size": 206,
+      "digest": "sha256:4b5f9f7be01df7f5ef6eec0a7bc461bafafa43f5b1248601e53546aaaa126798"
+    }
+  ],
+  "nodeTests": 648,
+  "ui": 165,
+  "desktop": 76,
+  "preview": 31,
+  "browserReader": 16,
+  "browserPackaged": 14,
+  "focusedSourceTests": 63,
+  "installerPayloads": [
+    {
+      "file": "CangXia-Backup-0.3.38-Setup-x64.exe",
+      "sha256": "4879d7311dfafab17627ac770ab7cd2ef64cafe5b2477940d5a8541ce6267565",
+      "asar": "fb66786a94a84bebf9eac4172093e6193a68bf098ef545d9a4d75c130dc1bff6",
+      "smoke": {
+        "ok": true,
+        "version": "0.3.38",
+        "packaged": true,
+        "preload": true
+      }
+    },
+    {
+      "file": "CangXia-Backup-0.3.38-Windows-x64.exe",
+      "sha256": "de1f7b842154dc259f0a8a6af1d7f8a65366467336121779b0426b95260208ca",
+      "asar": "fb66786a94a84bebf9eac4172093e6193a68bf098ef545d9a4d75c130dc1bff6",
+      "smoke": {
+        "ok": true,
+        "version": "0.3.38",
+        "packaged": true,
+        "preload": true
+      }
+    }
+  ],
+  "registryInstallation": false,
+  "windowsTests": {
+    "run": "39564893670",
+    "head": "a7c17414e2756bcb6061bb55fac934f4bceaed4f",
+    "counts": [
+      {
+        "name": "Windows full tests 2",
+        "tests": 89,
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows full tests 0",
+        "tests": 172,
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows full tests 1",
+        "tests": 150,
+        "conclusion": "success"
+      },
+      {
+        "name": "Windows full tests 3",
+        "tests": 237,
+        "conclusion": "success"
+      }
+    ],
+    "total": 648,
+    "allPassed": true,
+    "skipped": 0,
+    "desktop": "success",
+    "server": "success",
+    "url": "https://github.com/wjh183322/CangXia/actions/runs/39564893670"
+  },
+  "nasVersion": "0.2.4",
+  "liveAccountValidated": false
+}
