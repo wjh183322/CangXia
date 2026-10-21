@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "tag": "backup-v0.3.37",
+  "source": "5f6c629871f1c25375521db2ca609b5046d933ec",
+  "runtimeSource": "868cd7094c0a766305e3c337680bf535d1250a1b",
+  "ci": "https://github.com/wjh183322/CangXia/actions/runs/39538397974",
+  "ciConclusion": "success",
+  "release": "https://github.com/wjh183322/CangXia/releases/tag/backup-v0.3.37",
+  "assets": [
+    {
+      "name": "CangXia-Backup-0.3.37-Setup-x64.exe",
+      "size": 144907307,
+      "digest": "sha256:11c79aff03f732743c2411eb76aa05dcb0df2bf97c120b095c3a1064c087a00a"
+    },
+    {
+      "name": "CangXia-Backup-0.3.37-Windows-x64.exe",
+      "size": 144750976,
+      "digest": "sha256:7b0f5d82a2f5ac55d02433c8cc7c12d7f2da4fe35bbcfb18d14ce4606d5aa197"
+    },
+    {
+      "name": "SHA256-desktop.txt",
+      "size": 206,
+      "digest": "sha256:885f4c449de09eabc7286d0ae7735b005007fb2d1ff647eaa5ce0b025ddce44c"
+    }
+  ],
+  "nodeTests": 613,
+  "ui": 165,
+  "desktop": 76,
+  "preview": 31,
+  "focused": 26
+}

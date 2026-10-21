@@ -45,3 +45,5 @@
 | Windows app.asar | 15ddacd3814e5ad16626b785bbdd9fca3bc69636b6543ccb0329af134b0e5b0e |
 
 继续配套 NAS 0.2.4，已更新该服务的用户仅升级电脑端。没有修改真实 NAS 或用户资料，没有清缓存、清库或重读收藏。遵义电脑此前九条作品的真实文件仍属实机检查范围，不与本次状态保存修复混同。
+
+发布完成：[backup-v0.3.37](https://github.com/wjh183322/CangXia/releases/tag/backup-v0.3.37)，不可变 tag 为 5f6c629871f1c25375521db2ca609b5046d933ec。三个资产均已上传，远端大小和 SHA256 与本机实际启动验证的分发包一致；凭据见 [发布验证 JSON](../releases/backup-v0.3.37-verification.json)。采用已通过的四组全量验证替代耗时旧单作业运行，旧运行 39537593671 随后停止；最终 CI 39538397974 全部成功。
