@@ -1,4 +1,4 @@
-import {goneMessage,filteredSourceState,detailSourceState,sourceError,needsPageVerification} from '../shared/source-state.mjs';
+import {goneMessage,filteredSourceState,detailSourceState,sourceError} from '../shared/source-state.mjs';
 import {webCreatorParams} from '../shared/douyin-web.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { TOTAL, isDouyinURL, isMediaURL, parsePlatformJSON, parseWork, sleep } from './model.mjs';
@@ -235,27 +235,12 @@ export class Collector{
     try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined,quiet:true});const work=parseWork(data.aweme_detail||data.data?.aweme_detail||{});if(!work||work.id!==id)throw new Error('未取得对应作品资源');return work;}
     finally{this.waiters.delete(key);this.scheduleBrowserIdle();}
   }
-  async verifyEmptySource(id,data,signal){
-    if(!needsPageVerification(data,id)||this.requestMode!=='browser'||!this.browserBinding||typeof this.browser.verifyWorkPage!=='function')return null;
-    const binding=this.browserBinding,key=this.store.getSetting('browserAccountKey'),page=binding.page;
-    if(key!=='uid:'+binding.uid)throw Error('核验账号与资料库不一致');
-    const before=await this.browser.api.credentials(page,signal),fingerprint=this.browserFingerprint(before);if(fingerprint!==binding.fingerprint)throw Error('浏览器登录会话已经变化，请重新连接');
-    const result=await this.browser.verifyWorkPage(id,{signal,onDiagnostic:this.onDiagnostic});signal?.throwIfAborted();
-    const after=await this.browser.api.credentials(page,signal);
-    if(this.browserBinding!==binding||key!==this.store.getSetting('browserAccountKey')||this.browserFingerprint(after)!==fingerprint||!this.status.connected)throw Error('网页核验期间登录会话发生变化，未更新作品状态');
-    if(result?.workId!==id)return null;
-    if(result.state==='available'&&String(result.raw?.aweme_id??result.raw?.awemeId)===id&&detailSourceState(result.raw,id,parseWork(result.raw)).state==='available')return result;
-    if(result.state==='unavailable'&&['missing','api'].includes(result.kind))return result;
-    if(result.kind==='login'||result.kind==='challenge'){this.needsLogin(result.reason);throw Object.assign(Error(result.reason),{code:'AUTH_REQUIRED',sourceMethod:'page'});}
-    if(result.kind==='frequency')this.holdAccess();
-    return {state:'unknown',reason:result.reason||'网页证据不足，暂无法确认原作品状态'};
-  }
   async resolveWork(id,{backgroundOnly=false,signal,verifySource=false}={}){
     signal?.throwIfAborted();
     await this.ready;if(this.store.getSetting('loggedOut'))throw new Error('请登录原账号后再读取在线作品');this.assertNotCoolingDown();if(!/^\d+$/.test(id))throw new Error('作品标识无效');if(this.busy||this.waiters.size)throw new Error('请等待当前读取任务结束');
     if(await this.isAuthenticated()){
       const controller=new AbortController();const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;combined.throwIfAborted();this.waiters.set(id,{reject:()=>controller.abort()});
-      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});const raw=data.aweme_detail||data.data?.aweme_detail,message=data.status_msg||data.message||data.data?.status_msg||data.data?.message;const filtered=filteredSourceState(data,id);if(filtered)throw sourceError(filtered.reason);if(goneMessage(message))throw sourceError(message);if(!raw){const page=await this.verifyEmptySource(id,data,combined);combined.throwIfAborted();if(page?.state==='unavailable')throw Object.assign(sourceError(page.reason),{sourceMethod:'page'});if(page?.state==='available'){const w=this.store.upsertWork(page.raw,{fullDetail:true});if(verifySource||w.remoteState!=='unavailable')this.recordSource(id,{state:'available',reason:page.reason,method:'page'});this.store.save();this.notify();return this.store.work(id);}throw Object.assign(new Error(page?.reason||'未获得作品详情，已有文件仍保留；原作品状态暂无法确认'),{code:'SOURCE_UNKNOWN',sourceMethod:page?'page':'api'});}if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const verdict=detailSourceState(raw,id,parseWork(raw));if(verdict.state==='unavailable')throw sourceError(verdict.reason);if(verifySource&&verdict.state!=='available')throw Object.assign(Error(verdict.reason),{code:'SOURCE_UNKNOWN'});const w=this.store.upsertWork(raw,{fullDetail:true});if(verifySource||w.remoteState!=='unavailable')this.recordSource(id,verdict);this.store.save();this.notify();return this.store.work(id);}
+      try{const data=await this.request('/aweme/v1/web/aweme/detail/',{params:{aweme_id:id},signal:combined});combined.throwIfAborted();const raw=data.aweme_detail||data.data?.aweme_detail,message=data.status_msg||data.message||data.data?.status_msg||data.data?.message;const filtered=filteredSourceState(data,id);if(filtered)throw sourceError(filtered.reason);if(goneMessage(message))throw sourceError(message);if(!raw)throw Object.assign(new Error('未获得作品详情，已有文件仍保留；原作品状态暂无法确认'),{code:'SOURCE_UNKNOWN'});if(String(raw.aweme_id||raw.awemeId||'')!==id)throw new Error('返回的作品详情与目标不一致，未更新其他作品');const verdict=detailSourceState(raw,id,parseWork(raw));if(verdict.state==='unavailable')throw sourceError(verdict.reason);if(verifySource&&verdict.state!=='available')throw Object.assign(Error(verdict.reason),{code:'SOURCE_UNKNOWN'});const w=this.store.upsertWork(raw,{fullDetail:true});if(verifySource||w.remoteState!=='unavailable')this.recordSource(id,verdict);this.store.save();this.notify();return this.store.work(id);}
       catch(e){if(e.sourceDeleted)this.markUnavailable(id,{reason:e.message,method:e.sourceMethod||'api'});else if(e.code==='SOURCE_UNKNOWN')this.recordSource(id,{state:'unknown',reason:e.message,method:e.sourceMethod||'api'});if(backgroundOnly&&this.status.needsLogin)e.code='AUTH_REQUIRED';throw e;}
       finally{this.waiters.delete(id);this.scheduleBrowserIdle();}
     }

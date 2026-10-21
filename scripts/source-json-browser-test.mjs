@@ -1,0 +1,16 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url),root=fs.mkdtempSync(path.join(os.tmpdir(),'cx-source-json-browser-'));
+try{
+ fs.mkdirSync('.test-output',{recursive:true});fs.rmSync('.test-output/source-json-browser-result.json',{force:true});
+ const child=spawn(require('electron'),['tests/source-json-browser-desktop.mjs'],{windowsHide:true,stdio:'inherit',env:{...process.env,CANGXIA_SOURCE_TEST_PROFILE:path.join(root,'profile'),...(process.argv.includes('--packaged')?{CANGXIA_SOURCE_TEST_PACKAGE:path.resolve('release/backup/win-unpacked/resources/app.asar/electron')}:{})}});
+ const code=await new Promise((resolve,reject)=>{child.once('exit',resolve);child.once('error',reject);});
+ const result=JSON.parse(fs.readFileSync('.test-output/source-json-browser-result.json','utf8'));if(code!==0||!result.ok)process.exitCode=1;
+}finally{
+ assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));assert.ok(path.basename(root).startsWith('cx-source-json-browser-'));
+ fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});
+}

@@ -1,0 +1,70 @@
+{
+  "generatedAt": "2026-10-21T12:04:45.339Z",
+  "mode": "Ordinary read-only fetch in fresh anonymous official page; not automatic route replay",
+  "responses": [
+    {
+      "id": "7698014329241074098",
+      "variant": "current-app-apiRequest",
+      "http": 200,
+      "statusCode": 0,
+      "detail": "object",
+      "detailId": "7698014329241074098",
+      "awemeType": 68,
+      "imageCount": 1,
+      "currentClassifier": "available"
+    },
+    {
+      "id": "7689084254681498725",
+      "variant": "current-app-apiRequest",
+      "http": 200,
+      "statusCode": 0,
+      "detail": "object",
+      "detailId": "7689084254681498725",
+      "awemeType": 0,
+      "currentClassifier": "available"
+    },
+    {
+      "id": "7682371267983207909",
+      "variant": "current-app-apiRequest",
+      "http": 200,
+      "statusCode": 0,
+      "detail": "null",
+      "filterId": "7682371267983207909",
+      "filterReason": "",
+      "currentClassifier": null
+    },
+    {
+      "id": "7698014329241074098",
+      "variant": "note-page-origin",
+      "http": 200,
+      "statusCode": 0,
+      "detail": "object",
+      "detailId": "7698014329241074098",
+      "awemeType": 68,
+      "imageCount": 1,
+      "currentClassifier": "available"
+    }
+  ],
+  "officialBundles": [
+    {
+      "file": "client-entry~192ceba9.cfe4d023.js",
+      "sha256": "5bb94dc2bf62f11e2d9bc95dab4b7d32561d74b376049f6003eb2302181c1360"
+    },
+    {
+      "file": "client-entry~0.28149745.js",
+      "sha256": "9a0b3d9a1be454ca2f33ab4b3d8e12bb71150eaa8613336d93884982c25cc0ff"
+    },
+    {
+      "file": "client-entry~6f4ee80d.40c52456.js",
+      "sha256": "0a25490508b36cd1897194e05b557c98c62521e143f8c7e47e4f670e292d6ea6"
+    },
+    {
+      "file": "routes-Video-id-route.a7450dc7.js",
+      "sha256": "7d3b4707bcc3840ad76c863c814e39b5120b1e81df0869689b50ce5c5e28bf7a"
+    },
+    {
+      "file": "routes-Note-id-route.27436ca1.js",
+      "sha256": "f7f2cec303a5692b2011f6b44e27f7ae534d676edebd87302789351b3b4b9eec"
+    }
+  ]
+}
