@@ -5,6 +5,7 @@ import {checkDeletionUI} from './deletion-ui-checks.mjs';
 import {checkNasCatalogueUI} from './nas-catalogue-ui-checks.mjs';
 import {checkLocalSizeUI} from './local-size-ui-checks.mjs';
 import {checkReadHistoryUI} from './read-history-ui-checks.mjs';
+import {checkDownloadPreparationUI} from './download-preparation-ui-checks.mjs';
 import {createRequire} from 'node:module';
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
 import {Store} from '../electron/store.mjs';import {inspectRepairs} from '../electron/repair-check.mjs';import {listDirectory,makeDirectory} from '../electron/file-browser.mjs';
@@ -217,6 +218,7 @@ try{
  await checkNasCatalogueUI({store,notify,data,act,settle,click,aria,check});
  await checkCollectionBatchUI({notify,data,act,settle,click,aria,check});
  await checkStorageSizeUI({notify,data,act,settle,aria,check});
+ await checkDownloadPreparationUI({notify,data,act,settle,click,aria,check});
  fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:true,checks},null,2));console.log({ok:true,checks});
 }catch(e){fs.writeFileSync('.test-output/workspace-ui-result.json',JSON.stringify({ok:false,error:e.stack,checks,text:document.body.textContent},null,2));throw e;}finally{store.close();dom.window.close();}
 process.exit(0);

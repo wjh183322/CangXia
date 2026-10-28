@@ -15,7 +15,7 @@ import {LocalReconcile} from './local-reconcile.mjs';
 import {DownloadTasks} from './download-tasks.mjs';
 import {prepareCancellationRelocation,trackCancellationFile,recordCancellationIdentity} from './download-cancel-cleanup.mjs';
 import {FileStates} from './file-states.mjs';
-import {WorkViews} from './work-views.mjs';
+import {WorkViews,initializeViewEpoch} from './work-views.mjs';
 import {initializeRecordJournal,initializeAudioScopeJournal} from './record-journal.mjs';
 import {audioSources} from './work-audio.mjs';
 import {DeviceScopeState} from './device-scope-state.mjs';
@@ -57,6 +57,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS author_scan_order ON author_scan(author_id,position);
       CREATE INDEX IF NOT EXISTS creator_profiles_sec ON creator_profiles(json_extract(body,'$.secUid'));`);
     initializeRecordJournal(s);
+    initializeViewEpoch(s);
     db.run(`CREATE TABLE IF NOT EXISTS backup_file_hashes(file TEXT PRIMARY KEY,stamp TEXT NOT NULL,sha TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS preview_file_hashes(file TEXT PRIMARY KEY,stamp TEXT NOT NULL,sha TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS backup_hash_epoch(id INTEGER PRIMARY KEY,value INTEGER NOT NULL);
@@ -80,6 +81,7 @@ export class Store {
   constructor(db, file) { this.db = db; this.file = file; this.viewCache=new Map();this.revision=0;this.sync=new SyncState(this);this.authorSources=new AuthorSources(this);this.collectionReads=new CollectionReads(this);this.localReconcile=new LocalReconcile(this);this.fileStates=new FileStates(this);this.lightViews=new WorkViews(this);this.db.onRollback=()=>{this.viewCache.clear();this.lightViews.rollback();this.revision++;}; }
   syncProgress(){return [...this.sync.list().filter(r=>!this.collectionReads.managed(r.collectionId)),...this.collectionReads.list()];}
   backupRevision(){return this.rows('SELECT COALESCE(MAX(seq),0) value FROM backup_changes')[0].value;}
+  materialRevision(){return [this.backupRevision(),this.rows('SELECT value FROM local_view_epoch WHERE id=1')[0].value,this.fileStates.generation,this.deviceScopes?.revision||0].join(':');}
   rows(sql, args = []) {
     return this.db.all(sql,args);
   }
@@ -120,13 +122,13 @@ export class Store {
     if(!localOnly)this.backup?.assertWritable();
     const removed=new Set(ids),jobs=pruneHistory?(this.getSetting('downloadJobs')||[]):[];
     let changed=false;this.db.run('BEGIN');try{
-      for(const id of removed){this.db.run('DELETE FROM downloads WHERE id=?',[id]);this.viewCache.delete(id);}
+      for(const id of removed){this.db.run('DELETE FROM downloads WHERE id=?',[id]);this.db.run('DELETE FROM file_states WHERE id=?',[id]);this.viewCache.delete(id);}
       const present=new Set(pruneHistory?this.rows('SELECT id FROM downloads').map(r=>r.id):[]);
       const kept=jobs.filter(j=>!((j.state==='complete'&&!present.has(j.id))||(j.state==='failed'&&removed.has(j.id))));
       if(kept.length!==jobs.length)this.setSetting('downloadJobs',kept);
       this.db.run('COMMIT');changed=removed.size||kept.length!==jobs.length;
     }catch(e){this.db.run('ROLLBACK');throw e;}
-    if(changed)this.save();
+    if(changed){for(const id of removed){this.lightViews?.forgetLocal(id);this.fileStates.invalidate(id);}this.save();}
     return [...removed];
   }
   async pruneDeletedDownloads(){

@@ -5,7 +5,7 @@ methods.push('prepareScopedDeletion','confirmScopedDeletion','stopScopedDeletion
 methods.push('verifySources','markSourceUnavailable');
 const api = {};
 methods.push('stopWorkCreators','refreshWorkCreators','configureBackup','checkBackup','syncBackup','cancelBackup','acceptRemoteBackup','openBackupRecovery','previewExistingLibrary','importExistingLibrary','finishBackupExit');
-methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck','filterWorks');
+methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck','filterWorks','cancelFilterWorks');
 methods.push('addAuthor','readAuthor','archiveAuthor');
 methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
 methods.push('defectPage','retryDownloads','reportCoverStatus');

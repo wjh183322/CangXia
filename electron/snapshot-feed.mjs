@@ -3,10 +3,11 @@ const compact=w=>({...w,thumbnail:undefined});
 export class SnapshotFeed {
   constructor(store,{light=false}={}){this.store=store;this.light=light;this.previous=null;this.revision=-1;}
   frame(runtime,{full=false}={}){
-    if(!full&&this.previous&&this.revision===this.store.revision)return {delta:true,...runtime};
-    const state=this.light?this.store.lightViews.snapshot():this.store.snapshot({cache:true}),revision=this.store.revision;
-    if(full||!this.previous){if(!this.previous){this.previous=state;this.revision=revision;}return {...state,works:state.works.map(compact),libraryRevision:revision,...runtime};}
-    const baseRevision=this.revision;this.revision=revision;const prior=this.previous;this.previous=state;const oldWorks=new Map(prior.works.map(w=>[w.id,w])),changedWorks=[],removedWorks=[];
+    const material=this.light&&this.store.materialRevision?this.store.materialRevision():this.store.revision,unchanged=this.previous&&this.material===material;
+    if(!full&&unchanged)return {delta:true,...runtime};
+    const state=unchanged?this.previous:this.light?this.store.lightViews.snapshot():this.store.snapshot({cache:true}),revision=unchanged?this.revision:Math.max(this.store.revision,this.revision+1);
+    if(full||!this.previous){if(!this.previous){this.previous=state;this.revision=revision;this.material=material;}return {...state,works:state.works.map(compact),libraryRevision:revision,...runtime};}
+    const baseRevision=this.revision;this.revision=revision;this.material=material;const prior=this.previous;this.previous=state;const oldWorks=new Map(prior.works.map(w=>[w.id,w])),changedWorks=[],removedWorks=[];
     for(const w of state.works){if(oldWorks.get(w.id)!==w)changedWorks.push(compact(w));oldWorks.delete(w.id);}for(const id of oldWorks.keys())removedWorks.push(id);
     const membershipPatches={};for(const field of membershipFields){const scopes={};for(const id of new Set([...Object.keys(prior[field]||{}),...Object.keys(state[field]||{})])){if(!(id in state[field]))scopes[id]=null;else{const patch=arrayPatch(prior[field]?.[id],state[field][id]);if(patch)scopes[id]=patch;}}if(Object.keys(scopes).length)membershipPatches[field]=scopes;}
     const changes={};for(const [key,value]of Object.entries(state)){if(key==='works'||membershipFields.includes(key))continue;if(JSON.stringify(value)!==JSON.stringify(prior[key]))changes[key]=value;}

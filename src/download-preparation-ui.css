@@ -1,0 +1,4 @@
+.download-preparation-status{max-width:128px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preparation-counts{display:flex;flex-wrap:wrap;gap:8px 16px;margin:16px 0;color:var(--text-secondary,#64748b)}
+.preparation-results{max-height:280px;overflow:auto}
+.download-preparation-panel .queue-actions{flex-wrap:wrap}

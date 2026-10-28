@@ -29,14 +29,20 @@ export class SearchIndex{
    this.ready=true;
   })().finally(()=>this.loading=null);return this.loading;
  }
- async query(ids,options={}){
+ async query(ids,options={},control={}){
+  this.requests ||= new Map();const requestKey=control.requestKey,controller=new AbortController();if(requestKey){this.requests.get(requestKey)?.abort(new DOMException('已取消过期筛选','AbortError'));this.requests.set(requestKey,controller);}const signal=control.signal?AbortSignal.any([control.signal,controller.signal]):controller.signal;
+  let abort;try{signal.throwIfAborted();await Promise.race([this.prepare(),new Promise((_,reject)=>{abort=()=>reject(signal.reason);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);signal.removeEventListener('abort',abort);signal.throwIfAborted();return await this.queryReady(ids,options,signal);}
+  finally{if(abort)signal.removeEventListener('abort',abort);if(requestKey&&this.requests.get(requestKey)===controller)this.requests.delete(requestKey);}
+ }
+ async queryReady(ids,options={},signal){
+
   const {query='',type='all',tags=[],tagMode='any',localTags=[],localTagMode='any',author='',downloaded='all',source='all',sort='original'}=options;
   if(!['original','size-desc','size-asc'].includes(sort))throw Error('排序参数无效');
   if(typeof query!=='string'||query.length>6000||!['all','video','images'].includes(type)||!['all','unsaved','complete','missing','checking'].includes(downloaded)||!['all','unchecked','available','unavailable','unknown'].includes(source)||typeof author!=='string'||![tags,localTags].every(a=>Array.isArray(a)&&a.length<=1000&&a.every(t=>typeof t==='string'&&t.length<=256))||![tagMode,localTagMode].every(m=>['any','all'].includes(m)))throw Error('搜索筛选参数无效');
-  await this.prepare();const filters=[];if(source!=='all')filters.push(this.bucket('source:'+source));if(type!=='all')filters.push(this.bucket('type:'+type));if(author)filters.push(this.bucket('creator:'+author));if(downloaded!=='all')filters.push(this.bucket('download:'+downloaded));
+  signal?.throwIfAborted();const filters=[];if(source!=='all')filters.push(this.bucket('source:'+source));if(type!=='all')filters.push(this.bucket('type:'+type));if(author)filters.push(this.bucket('creator:'+author));if(downloaded!=='all')filters.push(this.bucket('download:'+downloaded));
   for(const [selected,prefix,mode]of [[tags,'tag:',tagMode],[localTags,'localtag:',localTagMode]])if(selected.length){if(mode==='all')for(const value of selected)filters.push(this.bucket(prefix+value));else{const union=new Set();for(const value of selected)for(const id of this.bucket(prefix+value))union.add(id);filters.push(union);}}
   const text=query.trim().toLocaleLowerCase();if(this.fts&&Array.from(text).length>=3&&!text.includes('\0')){try{const phrase='"'+text.replaceAll('"','""')+'"';filters.push(new Set(this.store.rows('SELECT search_rows.id FROM search_fts JOIN search_rows ON search_rows.rowid=search_fts.rowid WHERE search_fts MATCH ?',[phrase]).map(r=>r.id)));}catch{/* Exact cached substring matching remains available. */}}
-  const matched=[...new Set(ids)].filter(id=>filters.every(set=>set.has(id))&&(!text||this.rows.get(id)?.text.includes(text)));if(sort==='original')return matched;
+  const matched=[];let checked=0;for(const id of new Set(ids)){signal?.throwIfAborted();if(filters.every(set=>set.has(id))&&(!text||this.rows.get(id)?.text.includes(text)))matched.push(id);if(++checked%500===0)await yieldLoop();}if(sort==='original')return matched;
   return orderSizeEntries(matched.map((id,rank)=>{const row=this.rows.get(id);return {id,rank,bytes:row?.localBytes||0,known:!!row?.sizeKnown};}),sort);
  }
 }
