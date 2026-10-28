@@ -58,6 +58,7 @@ jobs:
         if: always()
         with:
           name: backup-ui-checks
+          include-hidden-files: true
           path: |
             .test-output/nas-ui-*.png
             .test-output/nas-layout-result.json
@@ -112,6 +113,7 @@ jobs:
         if: always()
         with:
           name: backup-source-status-checks
+          include-hidden-files: true
           path: |
             .test-output/source-status-*.png
             .test-output/backup-desktop-result.json
