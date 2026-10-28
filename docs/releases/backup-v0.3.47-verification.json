@@ -1,0 +1,568 @@
+{
+  "version": "0.3.47",
+  "verifiedAt": "2026-10-28T12:10:20.484Z",
+  "status": "local-verified-cloud-gate-separate",
+  "runtimeCommit": "aebe58e",
+  "nasVersion": "0.2.4",
+  "fullSuite": {
+    "total": 797,
+    "passed": 797,
+    "failed": 0,
+    "skipped": 0
+  },
+  "checks": {
+    "ui": 232,
+    "native": 104,
+    "preview": 31,
+    "nas": 6,
+    "audio": 9,
+    "history": 4,
+    "repair": 3
+  },
+  "independentReview": {
+    "important": 4,
+    "fixed": 4,
+    "redGreenCases": 5,
+    "critical": 0,
+    "deferredMinors": 0
+  },
+  "performance": {
+    "baselineMs": 123093.7403,
+    "optimizedMs": 2875.1033000000025,
+    "reductionPercent": 97.6642977189637,
+    "cold": [
+      {
+        "run": 0,
+        "phase": "cold",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2922.733500000002,
+        "firstPulseMs": 1.6497999999992317,
+        "eventLoopP95Ms": 15.007743,
+        "eventLoopMaxMs": 51.478527,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 279.83203125,
+        "peakRssMiB": 397.79296875,
+        "helperMetrics": {
+          "rssMiB": 68.5859375,
+          "heapMiB": 19.65119171142578,
+          "peakRssMiB": 71.62109375
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6988,
+            "totalMs": 1105.4397999998837,
+            "maxMs": 25.66240000000107
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 6.420900000004622,
+            "maxMs": 1.1642999999967287
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 13.905599999867263,
+            "maxMs": 1.2052000000039698
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 119.00269999985176,
+            "maxMs": 0.2569000000003143
+          },
+          "tasks.flush": {
+            "count": 778,
+            "totalMs": 81.77090000001772,
+            "maxMs": 37.805200000002515
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 36.04799999993702,
+            "maxMs": 0.17510000000038417
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.96660000000702,
+            "maxMs": 0.20150000000285218
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 41.87410000000091,
+            "maxMs": 41.87410000000091
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.13549999999668216,
+            "maxMs": 0.13549999999668216
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 29.659300000006624,
+            "maxMs": 29.659300000006624
+          }
+        },
+        "gcMaxMs": 1.6087999939918518
+      },
+      {
+        "run": 1,
+        "phase": "cold",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2782.4174000000057,
+        "firstPulseMs": 1.6466000000073109,
+        "eventLoopP95Ms": 15.048703,
+        "eventLoopMaxMs": 47.775743,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 380.890625,
+        "peakRssMiB": 397.79296875,
+        "helperMetrics": {
+          "rssMiB": 69.0546875,
+          "heapMiB": 19.62103271484375,
+          "peakRssMiB": 71.98828125
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6988,
+            "totalMs": 1115.7039999999688,
+            "maxMs": 68.6811000000016
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 6.358600000021397,
+            "maxMs": 1.2338000000017928
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 12.543400000082329,
+            "maxMs": 1.2704000000085216
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 111.61149999979534,
+            "maxMs": 0.1367000000027474
+          },
+          "tasks.flush": {
+            "count": 778,
+            "totalMs": 142.79560000017227,
+            "maxMs": 75.53559999998834
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 35.000200000053155,
+            "maxMs": 0.15469999999913853
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.6974999999656575,
+            "maxMs": 0.01720000000204891
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 38.25079999999434,
+            "maxMs": 38.25079999999434
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.14509999999427237,
+            "maxMs": 0.14509999999427237
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 27.668600000004517,
+            "maxMs": 27.668600000004517
+          }
+        },
+        "gcMaxMs": 2.137499988079071
+      },
+      {
+        "run": 2,
+        "phase": "cold",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2875.1033000000025,
+        "firstPulseMs": 4.810499999992317,
+        "eventLoopP95Ms": 15.319039,
+        "eventLoopMaxMs": 42.303487,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 468.3046875,
+        "peakRssMiB": 523.18359375,
+        "helperMetrics": {
+          "rssMiB": 68.98828125,
+          "heapMiB": 19.591583251953125,
+          "peakRssMiB": 71.625
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6988,
+            "totalMs": 1109.111299999684,
+            "maxMs": 27.390400000003865
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 9.289599999799975,
+            "maxMs": 4.303700000004028
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 16.29769999992277,
+            "maxMs": 4.345100000005914
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 111.06349999964004,
+            "maxMs": 0.2947999999887543
+          },
+          "tasks.flush": {
+            "count": 778,
+            "totalMs": 81.24220000010973,
+            "maxMs": 36.26240000000689
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 33.61630000009609,
+            "maxMs": 0.15970000000379514
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.494799999913084,
+            "maxMs": 0.022100000001955777
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 39.793900000004214,
+            "maxMs": 39.793900000004214
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.1386999999958789,
+            "maxMs": 0.1386999999958789
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 31.34530000000086,
+            "maxMs": 31.34530000000086
+          }
+        },
+        "gcMaxMs": 9.118099987506866
+      }
+    ],
+    "warm": [
+      {
+        "run": 0,
+        "phase": "service-warm",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2904.9876000000004,
+        "firstPulseMs": 1.6041000000041095,
+        "eventLoopP95Ms": 15.228927,
+        "eventLoopMaxMs": 59.899903,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 291.22265625,
+        "peakRssMiB": 397.79296875,
+        "helperMetrics": {
+          "rssMiB": 95.87109375,
+          "heapMiB": 27.922149658203125,
+          "peakRssMiB": 98.18359375
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6210,
+            "totalMs": 1179.743500000106,
+            "maxMs": 57.93019999999524
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 6.1400000000649015,
+            "maxMs": 1.2052999999941676
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 13.790200000039476,
+            "maxMs": 1.2277000000030966
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 113.67510000002949,
+            "maxMs": 0.20969999999942956
+          },
+          "tasks.flush": {
+            "count": 777,
+            "totalMs": 67.99679999993532,
+            "maxMs": 36.70049999999901
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 33.386499999891385,
+            "maxMs": 0.09740000000601867
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.640099999960512,
+            "maxMs": 0.014300000002549496
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 40.016999999999825,
+            "maxMs": 40.016999999999825
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.11230000000068685,
+            "maxMs": 0.11230000000068685
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 0.05099999999947613,
+            "maxMs": 0.05099999999947613
+          }
+        },
+        "gcMaxMs": 0.851699948310852
+      },
+      {
+        "run": 1,
+        "phase": "service-warm",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2847.95640000001,
+        "firstPulseMs": 38.21970000000147,
+        "eventLoopP95Ms": 15.245311,
+        "eventLoopMaxMs": 53.575679,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 381.25390625,
+        "peakRssMiB": 397.79296875,
+        "helperMetrics": {
+          "rssMiB": 96.83203125,
+          "heapMiB": 28.003273010253906,
+          "peakRssMiB": 98.26171875
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6210,
+            "totalMs": 1130.6365999986592,
+            "maxMs": 37.85580000000482
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 42.83879999993951,
+            "maxMs": 37.86350000000675
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 49.65819999964151,
+            "maxMs": 37.88249999999243
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 111.12089999961609,
+            "maxMs": 0.1967000000004191
+          },
+          "tasks.flush": {
+            "count": 777,
+            "totalMs": 65.53279999988445,
+            "maxMs": 34.81010000000242
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 33.023500000083004,
+            "maxMs": 0.08220000000437722
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.67699999998149,
+            "maxMs": 0.013300000005983748
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 38.46899999999732,
+            "maxMs": 38.46899999999732
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.11830000000190921,
+            "maxMs": 0.11830000000190921
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 0.036600000006728806,
+            "maxMs": 0.036600000006728806
+          }
+        },
+        "gcMaxMs": 0.8826000094413757
+      },
+      {
+        "run": 2,
+        "phase": "service-warm",
+        "newTasks": 775,
+        "savedCount": 31542,
+        "elapsedMs": 2761.299199999994,
+        "firstPulseMs": 1.5578999999997905,
+        "eventLoopP95Ms": 15.482879,
+        "eventLoopMaxMs": 49.938431,
+        "fullManifestScans": 0,
+        "manifestRows": 0,
+        "ownershipBuilds": 1,
+        "admitted": 775,
+        "rssMiB": 468.96875,
+        "peakRssMiB": 523.18359375,
+        "helperMetrics": {
+          "rssMiB": 96.35546875,
+          "heapMiB": 27.925216674804688,
+          "peakRssMiB": 98.4609375
+        },
+        "syncStages": {
+          "database.run": {
+            "count": 6210,
+            "totalMs": 1136.2046999996383,
+            "maxMs": 30.269700000004377
+          },
+          "repository.save": {
+            "count": 777,
+            "totalMs": 6.364599999928032,
+            "maxMs": 1.2277999999932945
+          },
+          "emit": {
+            "count": 777,
+            "totalMs": 12.466400000150315,
+            "maxMs": 1.2468000000080792
+          },
+          "refreshIndex": {
+            "count": 3100,
+            "totalMs": 109.9441999993287,
+            "maxMs": 0.22099999999045394
+          },
+          "tasks.flush": {
+            "count": 777,
+            "totalMs": 67.2405000000872,
+            "maxMs": 35.1767000000109
+          },
+          "admitPrepared": {
+            "count": 775,
+            "totalMs": 34.43209999994724,
+            "maxMs": 0.12080000000423752
+          },
+          "repository.result": {
+            "count": 775,
+            "totalMs": 4.88479999989795,
+            "maxMs": 0.027999999991152436
+          },
+          "finish": {
+            "count": 1,
+            "totalMs": 39.08690000000934,
+            "maxMs": 39.08690000000934
+          },
+          "repository.prune": {
+            "count": 1,
+            "totalMs": 0.1596000000135973,
+            "maxMs": 0.1596000000135973
+          },
+          "journal.prune": {
+            "count": 1,
+            "totalMs": 0.05040000000735745,
+            "maxMs": 0.05040000000735745
+          }
+        },
+        "gcMaxMs": 0.8851999640464783
+      }
+    ],
+    "scope": "process lifetime, includes fixture setup",
+    "conditions": "synthetic same-machine temporary SQLite; isolated final run; no actual media or NAS transfers"
+  },
+  "desktop": {
+    "source": {
+      "ok": true,
+      "fixture": "synthetic cached library, simulated NAS status and 2ms IO delay; no media/NAS transfers",
+      "firstStatusMs": 136.0693000000001,
+      "geometry": {
+        "stopVisible": true,
+        "width": 1100,
+        "height": 640
+      },
+      "browsedWhilePreparing": true,
+      "searchedWhilePreparing": true,
+      "admitted": 775,
+      "ownershipBuilds": 1,
+      "elapsedMs": 17452.0718,
+      "pulses": 1092,
+      "eventLoopP95Ms": 20.201471,
+      "eventLoopMaxMs": 194.510847,
+      "normalQuitDrained": true
+    },
+    "packaged": {
+      "ok": true,
+      "fixture": "synthetic cached library, simulated NAS status and 2ms IO delay; no media/NAS transfers",
+      "firstStatusMs": 117.74459999999999,
+      "geometry": {
+        "stopVisible": true,
+        "width": 1100,
+        "height": 640
+      },
+      "browsedWhilePreparing": true,
+      "searchedWhilePreparing": true,
+      "admitted": 775,
+      "ownershipBuilds": 1,
+      "elapsedMs": 17062.0667,
+      "pulses": 1083,
+      "eventLoopP95Ms": 20.185087,
+      "eventLoopMaxMs": 141.819903,
+      "normalQuitDrained": true
+    }
+  },
+  "snapshot": {
+    "savedCount": 31542,
+    "transactionMs": 169.8028,
+    "wal": {
+      "beforeBytes": 0,
+      "afterSnapshotBytes": 0,
+      "afterWritesBytes": 828152,
+      "afterCheckpointBytes": 0,
+      "checkpoint": {
+        "busy": 0,
+        "log": 0,
+        "checkpointed": 0
+      }
+    },
+    "ackWithheldDuringWrites": true
+  },
+  "packagedRuntimeFiles": 105,
+  "registryInstallation": false,
+  "files": [
+    {
+      "file": "CangXia-Backup-0.3.47-Setup-x64.exe",
+      "bytes": 144929601,
+      "sha256": "19506442a9ebcc81fb69840a780c567e635f7df87efbe90b2a83b82841c33b18",
+      "asar": "1a4f3a660a3b7cbe6185256dec94de9adb562f2db3cfe0ec67fd444d88001414",
+      "smoke": {
+        "ok": true,
+        "version": "0.3.47",
+        "packaged": true,
+        "preload": true
+      }
+    },
+    {
+      "file": "CangXia-Backup-0.3.47-Windows-x64.exe",
+      "bytes": 131236237,
+      "sha256": "33453ca11bb49fa424de708bd190d0e051cdcf5042a76a44f056c5c33610d023",
+      "asar": "1a4f3a660a3b7cbe6185256dec94de9adb562f2db3cfe0ec67fd444d88001414",
+      "smoke": {
+        "ok": true,
+        "version": "0.3.47",
+        "packaged": true,
+        "preload": true
+      }
+    }
+  ]
+}

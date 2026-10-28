@@ -1,6 +1,6 @@
 # 客户端批量下载与响应性优化 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 修复数万条历史记录下批量下载准备阻塞窗口的问题，同时减少浏览及状态更新的重复计算。
 
@@ -63,7 +63,7 @@
 
 **Interfaces:** `directoryKey(file):string`; `buildDirectoryIndex(rows:Iterable<{id,path}>):Map<string,Set<string>>`; `DirectoryReservations.reserve(path,id)`, `.owners(path)`, `.release(id)`。`DownloadPathJournal.init()`, `.head():number`, `.changes(after,{limit:200}):{head,floor,items,hasMore}`, `.prune()`。`createPreparationFixture(t,{savedCount,unsavedCount,unavailableCount})` 返回 `{store,queue,ids,root,operations,close}`，可注入受控媒体请求，默认不启动真实下载。
 
-- [ ] **Step 1 — 写失败测试。** 用真实临时 SQLite 核对索引路径，不仅伪造 Map；保存可运行的现有 `enqueue` 基线测量。benchmark 的 baseline 代码固定取自设计基线 `08e6436522a3828211e9c32b51f90d7d830b4fa8`，提取到自建临时源树后运行同一夹具；optimized 使用当前源码，不能修改实现后仍把当前 enqueue 当旧基线，也不能只硬编码旧耗时。测试断言：
+- [x] **Step 1 — 写失败测试。** 用真实临时 SQLite 核对索引路径，不仅伪造 Map；保存可运行的现有 `enqueue` 基线测量。benchmark 的 baseline 代码固定取自设计基线 `08e6436522a3828211e9c32b51f90d7d830b4fa8`，提取到自建临时源树后运行同一夹具；optimized 使用当前源码，不能修改实现后仍把当前 enqueue 当旧基线，也不能只硬编码旧耗时。测试断言：
   ```js
   assert.equal(scanCount, 1); // 31,542 条历史记录＋775 次候选查询只构建一次
   assert.deepEqual([...index.get(directoryKey(shared))].sort(), ['1','2']);
@@ -71,10 +71,10 @@
   assert.equal(journal.head(), beforeRollback); // 路径事务回滚不发布变更
   ```
   覆盖 Windows 大小写、同名、作者目录、可靠 `home`、批次自身预留、原文件不被更改；基线计时不作为未优化测试的脆弱毫秒断言。
-- [ ] **Step 2 — 运行红灯。** `node --test tests/download-directory-index.test.mjs`；应因新接口不存在或重复扫描断言失败。
-- [ ] **Step 3 — 实现索引与事务日志。** 仅通过 `SELECT id,json_extract(body,'$.path') path FROM downloads` 读取归属；新增本机 `download_path_changes`、日志地板元数据及路径 INSERT/UPDATE/DELETE 触发器，在同一 SQLite 事务记录旧/新路径。直接 SQL、遗忘文件及回滚都必须捕获；只改资源进度不生成路径事件。无活动快照时保留最近 10,000 个事件，低于地板的请求报 `PATH_JOURNAL_GAP`，不继续用旧索引。根/资料库及来源变化另以上下文标识和逐项签名验证，不与字节进度混用。
-- [ ] **Step 4 — 绿灯与基线。** `node --test tests/download-directory-index.test.mjs tests/collection-sync-isolation.test.mjs`；全通过。运行 `node scripts/benchmark-download-preparation.mjs --variant baseline --saved 31542 --new 775 --output .test-output/responsiveness-baseline.json`，保留实际完成或可解释的超时报告；必须另有 1/5/20 项样本，不能只给外推结果。
-- [ ] **Step 5 — 提交。** 只提交本任务指定源码/测试/脚本：`git commit -m "perf: index download directory ownership once per batch"`。
+- [x] **Step 2 — 运行红灯。** `node --test tests/download-directory-index.test.mjs`；应因新接口不存在或重复扫描断言失败。
+- [x] **Step 3 — 实现索引与事务日志。** 仅通过 `SELECT id,json_extract(body,'$.path') path FROM downloads` 读取归属；新增本机 `download_path_changes`、日志地板元数据及路径 INSERT/UPDATE/DELETE 触发器，在同一 SQLite 事务记录旧/新路径。直接 SQL、遗忘文件及回滚都必须捕获；只改资源进度不生成路径事件。无活动快照时保留最近 10,000 个事件，低于地板的请求报 `PATH_JOURNAL_GAP`，不继续用旧索引。根/资料库及来源变化另以上下文标识和逐项签名验证，不与字节进度混用。
+- [x] **Step 4 — 绿灯与基线。** `node --test tests/download-directory-index.test.mjs tests/collection-sync-isolation.test.mjs`；全通过。运行 `node scripts/benchmark-download-preparation.mjs --variant baseline --saved 31542 --new 775 --output .test-output/responsiveness-baseline.json`，保留实际完成或可解释的超时报告；必须另有 1/5/20 项样本，不能只给外推结果。
+- [x] **Step 5 — 提交。** 只提交本任务指定源码/测试/脚本：`git commit -m "perf: index download directory ownership once per batch"`。
 
 ## Task 2：受控的独立只读分析进程
 
@@ -82,7 +82,7 @@
 
 **Interfaces:** `DownloadAnalysis({file,root,libraryId,spawn,idleMs=30000,timeoutMs=30000})` 提供 `open({operationId,signal}):Promise<{snapshotId,baseSeq,context}>`, `lookup(snapshotId,candidates,{signal}):Promise<Array<{path,owners:string[]}>>`, `release(snapshotId)`, `close()`。`candidates` 是候选目录，不是完整作品对象。生产 `spawn` 使用 `utilityProcess.fork`；测试注入消息适配器，Node 测试不把 worker thread 当作生产独立进程。
 
-- [ ] **Step 1 — 写失败测试。** 消息限额、ACK、取消、崩溃、空闲回收及一致性：
+- [x] **Step 1 — 写失败测试。** 消息限额、ACK、取消、崩溃、空闲回收及一致性：
   ```js
   assert.ok(packets.every(p=>p.items.length<=200 && p.bytes<=256*1024));
   assert.equal(maxUnacknowledged, 1);
@@ -91,10 +91,10 @@
   assert.notEqual(await helperPid(), mainPid); // 在真实 Electron 桌面检查中断言
   ```
   正式桌面测试使用 `assert.notEqual(helperPid, mainPid)`；验证 readonly SQL 拒绝写入，主进程回复无全库清单，取消后迟到消息无效；第 30 秒可回收，活动请求不误回收。
-- [ ] **Step 2 — 红灯。** `node --test tests/download-analysis-process.test.mjs`；应因新服务缺失失败。
-- [ ] **Step 3 — 实现协议。** 启动后在一个 read-only SQLite 快照读取 `baseSeq` 和紧凑路径索引；事务结束再回 ready/候选块，不跨 ACK 保持读事务。请求/响应校验 operation/session/context，候选、响应均严格分块；单项超限可见失败。最多一个请求和一个等待槽，再多请求报忙；退出结清等待者；崩溃不回退同步扫描。环境使用必要变量白名单，不传入会话或 NAS 密钥。将 utility 入口纳入既有 `electron/**/*` 打包路径并检查实际包内启动。
-- [ ] **Step 4 — 绿灯。** `node --test tests/download-analysis-process.test.mjs tests/download-directory-index.test.mjs`；通过。`node scripts/backup-desktop-test.mjs` 中真实辅助进程 PID、只读查询、崩溃后的错误反馈检查通过。
-- [ ] **Step 5 — 提交。** `git commit -m "feat: isolate download directory analysis in a utility process"`。
+- [x] **Step 2 — 红灯。** `node --test tests/download-analysis-process.test.mjs`；应因新服务缺失失败。
+- [x] **Step 3 — 实现协议。** 启动后在一个 read-only SQLite 快照读取 `baseSeq` 和紧凑路径索引；事务结束再回 ready/候选块，不跨 ACK 保持读事务。请求/响应校验 operation/session/context，候选、响应均严格分块；单项超限可见失败。最多一个请求和一个等待槽，再多请求报忙；退出结清等待者；崩溃不回退同步扫描。环境使用必要变量白名单，不传入会话或 NAS 密钥。将 utility 入口纳入既有 `electron/**/*` 打包路径并检查实际包内启动。
+- [x] **Step 4 — 绿灯。** `node --test tests/download-analysis-process.test.mjs tests/download-directory-index.test.mjs`；通过。`node scripts/backup-desktop-test.mjs` 中真实辅助进程 PID、只读查询、崩溃后的错误反馈检查通过。
+- [x] **Step 5 — 提交。** `git commit -m "feat: isolate download directory analysis in a utility process"`。
 
 ## Task 3：异步采集原文件保护快照
 
@@ -102,7 +102,7 @@
 
 **Interfaces:** `captureCancellationOwnership(store,id,{target,signal,legacyUnknown=false,epoch,ioConcurrency=4}):Promise<Ownership>` 返回与现有 `version:1` 相同的 `cancelOwnership` 格式。已有未完成任务由协调器直接沿用快照，不调用此函数重置。`target:{dir,collectionId,home}` 来自 Task 1/2 分析并由主进程复核。
 
-- [ ] **Step 1 — 写失败测试。** 注入慢 `lstat/readdir/readFile`，证明等待期间事件循环可响应；验证首次受理后、真正下载前已有文件仍保留：
+- [x] **Step 1 — 写失败测试。** 注入慢 `lstat/readdir/readFile`，证明等待期间事件循环可响应；验证首次受理后、真正下载前已有文件仍保留：
   ```js
   assert.equal(retry.cancelOwnership.epoch, originalEpoch);
   assert.equal(maxIoConcurrency<=4, true);
@@ -110,10 +110,10 @@
   assert.deepEqual(await readOriginalFiles(), originals);
   ```
   覆盖符号链接/越界拒绝、同名目录、metadata 原始字节、外部替换、异步采集期间根目录变化；中断不创建作品文件。
-- [ ] **Step 2 — 红灯。** `node --test tests/download-ownership-async.test.mjs`；新接口不存在或同步阻塞检查失败。
-- [ ] **Step 3 — 实现异步采集。** 使用异步 fs、并发 4、读前后身份确认；不截断 metadata，不放宽边界。采集结果仅为建议，最终受理前核对任务/根目录/路径签名；对原有 legacyUnknown 保留保守清理规则。已有单任务写入身份检查继续由原模块负责，不迁移文件写入到辅助进程。
-- [ ] **Step 4 — 绿灯。** `node --test tests/download-ownership-async.test.mjs tests/download-cancel-cleanup.test.mjs`；全部通过，外部新文件/替换文件、共享内容和元数据恢复回归成立。
-- [ ] **Step 5 — 提交。** `git commit -m "perf: capture download ownership without blocking the main loop"`。
+- [x] **Step 2 — 红灯。** `node --test tests/download-ownership-async.test.mjs`；新接口不存在或同步阻塞检查失败。
+- [x] **Step 3 — 实现异步采集。** 使用异步 fs、并发 4、读前后身份确认；不截断 metadata，不放宽边界。采集结果仅为建议，最终受理前核对任务/根目录/路径签名；对原有 legacyUnknown 保留保守清理规则。已有单任务写入身份检查继续由原模块负责，不迁移文件写入到辅助进程。
+- [x] **Step 4 — 绿灯。** `node --test tests/download-ownership-async.test.mjs tests/download-cancel-cleanup.test.mjs`；全部通过，外部新文件/替换文件、共享内容和元数据恢复回归成立。
+- [x] **Step 5 — 提交。** `git commit -m "perf: capture download ownership without blocking the main loop"`。
 
 ## Task 4：持久化分段受理、停止和恢复
 
@@ -121,7 +121,7 @@
 
 **Interfaces:** `DownloadTasks.upsertMany(jobs)`, `.removeMany(ids)` 增量维护 Map/桶/脏集，不整队替换。`DownloadQueue.admitPrepared(jobs,{operationId,held:true}):number`, `.releaseAdmission(operationId,ids)`, `.discardUnneeded(ids):Promise<{removed}>`。`DownloadPreparation({store,queue,analysis,onChange,diagnostics})` 提供 `.start(request):{operationId}`, `.submit(request):Promise<AdmissionResult>`, `.state()`, `.results({operationId,page:1})`, `.stop(operationId)`, `.continue(operationId):Promise<AdmissionResult>`, `.drain({ids?,signal?})`, `.close()`。
 
-- [ ] **Step 1 — 写失败测试。** 真实临时库完整准备 32,585 个选择，775 入队；成功、单项失败、主动停止、整批错误、崩溃重启分开测试：
+- [x] **Step 1 — 写失败测试。** 真实临时库完整准备 32,585 个选择，775 入队；成功、单项失败、主动停止、整批错误、崩溃重启分开测试：
   ```js
   assert.equal(result.queued, 775);
   assert.equal(fullOwnershipBuilds, 1);
@@ -131,11 +131,11 @@
   assert.equal(unrelatedRunning.state, 'running');
   ```
   自身登记不使整批失效；其他任务路径变化只重核受影响项；日志缺口/根改变终止；明确继续只放行本批；duplicate start 返回现有批次或可见忙错误，不重复登记。移除完整作品旧失败任务后，逐字节验证文件仍在。
-- [ ] **Step 2 — 红灯。** `node --test tests/download-preparation.test.mjs`；新协调器/门控缺失失败。
-- [ ] **Step 3 — 实现状态机。** 本机表 `download_preparations(id,body)` 保存摘要、`download_preparation_results(operation_id,work_id,position,state,reason)` 仅保存实际受理/失败项，不为 31,542 个跳过项存完整对象；任务 `admission` 与快照同事务登记。每片 ≤50 项/约8 ms，无写事务跨 await。路径覆盖层合并 Task 1 日志及本批预留；根/身份/代次缺口中断。先完整快照再登记 held，正常完成解除限制；单项错误放行其他成功项，整批中断保持 held。停止/失败受理中重试任务与新任务同规则，保留原 epoch。结果页50项，摘要最近20个已终结且无held批次，未解决批次不清除；分析覆盖层最多10,000事件，溢出明确中断。
+- [x] **Step 2 — 红灯。** `node --test tests/download-preparation.test.mjs`；新协调器/门控缺失失败。
+- [x] **Step 3 — 实现状态机。** 本机表 `download_preparations(id,body)` 保存摘要、`download_preparation_results(operation_id,work_id,position,state,reason)` 仅保存实际受理/失败项，不为 31,542 个跳过项存完整对象；任务 `admission` 与快照同事务登记。每片 ≤50 项/约8 ms，无写事务跨 await。路径覆盖层合并 Task 1 日志及本批预留；根/身份/代次缺口中断。先完整快照再登记 held，正常完成解除限制；单项错误放行其他成功项，整批中断保持 held。停止/失败受理中重试任务与新任务同规则，保留原 epoch。结果页50项，摘要最近20个已终结且无held批次，未解决批次不清除；分析覆盖层最多10,000事件，溢出明确中断。
   调度器、resume、retry、重启恢复均跳过 held；只有 `.continue` 复核后解除本批。`discardUnneeded` 必须先停止并等待相关旧写入者，再移除任务而不调用产物删除；显式取消仍用原 cleanup，成功后释放预留。
-- [ ] **Step 4 — 绿灯。** `node --test tests/download-preparation.test.mjs tests/download-selection.test.mjs tests/download-cancel-cleanup.test.mjs tests/download-ownership-async.test.mjs`；全部通过。常规 `queue.enqueue` 尚可保持旧入口以保证本任务独立，下一任务统一迁移后不允许生产调用绕过准备器。
-- [ ] **Step 5 — 提交。** `git commit -m "feat: persist responsive download preparation and held admissions"`。
+- [x] **Step 4 — 绿灯。** `node --test tests/download-preparation.test.mjs tests/download-selection.test.mjs tests/download-cancel-cleanup.test.mjs tests/download-ownership-async.test.mjs`；全部通过。常规 `queue.enqueue` 尚可保持旧入口以保证本任务独立，下一任务统一迁移后不允许生产调用绕过准备器。
+- [x] **Step 5 — 提交。** `git commit -m "feat: persist responsive download preparation and held admissions"`。
 
 ## Task 5：接通全部入口、冲突协调与退出
 
@@ -143,7 +143,7 @@
 
 **Interfaces:** 新 preload：`startDownloadPreparation(request):Promise<{operationId}>`, `stopDownloadPreparation(operationId)`, `continueDownloadPreparation(operationId)`, `downloadPreparationResults(options)`。`runtimeState.downloadPreparation` 为公开摘要。保留 `api.download(ids,options):Promise<AdmissionResult>` 兼容等待式调用；生产 `DownloadQueue.enqueue(ids,options):Promise<number>` 委托准备器 `kind:'exact'`，全部调用者显式 await，不把 Promise 当数量。只在协调器内部调用 `admitPrepared`。
 
-- [ ] **Step 1 — 写失败测试。** 所有入口准确保留类型与结果：
+- [x] **Step 1 — 写失败测试。** 所有入口准确保留类型与结果：
   ```js
   assert.equal(typeof legacyDownloadResult.queued, 'number');
   assert.equal(defectQueued.source, 'douyin');
@@ -152,11 +152,11 @@
   assert.equal(shutdownClosedDbWhileAdmitting, false);
   ```
   准备中 scoped delete/root change/重试冲突被明确拒绝或先安全 drain；安全读取仍可用；删除等待包含整个准备操作，不只等待已返回的 start IPC。正常退出和 renderer 崩溃都暂停受理，不放行 held。
-- [ ] **Step 2 — 红灯。** `node --test tests/download-preparation-integration.test.mjs`；未接线的入口失败。
-- [ ] **Step 3 — 统一接线。** 注入 manager 与 analysis，设置 guarded/read-only IPC 白名单与当前写入权限复核；新 start 必须立即返回 ID，工作下个事件循环启动。`backup.beforeScopedDeletion`、`finishBackupExit`、`before-quit`、render-process-gone、NAS 应用记录和根目录修改协调准备器；先停止新受理，等待当前片段持久化，再 close helper/DB。保留 NAS 音频恢复与媒体恢复各自数量；失败也报告已受理数，不产生 false success toast。
+- [x] **Step 2 — 红灯。** `node --test tests/download-preparation-integration.test.mjs`；未接线的入口失败。
+- [x] **Step 3 — 统一接线。** 注入 manager 与 analysis，设置 guarded/read-only IPC 白名单与当前写入权限复核；新 start 必须立即返回 ID，工作下个事件循环启动。`backup.beforeScopedDeletion`、`finishBackupExit`、`before-quit`、render-process-gone、NAS 应用记录和根目录修改协调准备器；先停止新受理，等待当前片段持久化，再 close helper/DB。保留 NAS 音频恢复与媒体恢复各自数量；失败也报告已受理数，不产生 false success toast。
   迁移并更新所有 sync `enqueue` 数值断言和 caller，测试使用注入分析服务/隔离准备器，不留下只为过旧测试保留的同步全库 fallback。
-- [ ] **Step 4 — 绿灯。** `node --test tests/download-preparation-integration.test.mjs tests/download-preparation.test.mjs tests/download-selection.test.mjs tests/source-status.test.mjs tests/download-cancel-cleanup.test.mjs`；通过。`rg -n 'queue\.enqueue\(' electron` 每个生产调用均已 await/return Promise；`node scripts/backup-desktop-test.mjs` 验证源程序真实入口。
-- [ ] **Step 5 — 提交。** `git commit -m "refactor: route download admission through responsive preparation"`。
+- [x] **Step 4 — 绿灯。** `node --test tests/download-preparation-integration.test.mjs tests/download-preparation.test.mjs tests/download-selection.test.mjs tests/source-status.test.mjs tests/download-cancel-cleanup.test.mjs`；通过。`rg -n 'queue\.enqueue\(' electron` 每个生产调用均已 await/return Promise；`node scripts/backup-desktop-test.mjs` 验证源程序真实入口。
+- [x] **Step 5 — 提交。** `git commit -m "refactor: route download admission through responsive preparation"`。
 
 ## Task 6：准备状态可见与浏览派生数据去重
 
@@ -164,7 +164,7 @@
 
 **Interfaces:** `DownloadPreparationStatus({state,onOpen})`, `DownloadPreparationPanel({api,state,onClose,onResult})`；关闭提示不停止任务，入口可重开；继续/停止由 Task 5 API 操作。`SearchIndex.query(ids,options,{signal,requestKey}={})` 对同 requestKey 的旧查询取消，保留不同来源的独立查询；搜索索引增量准备共享，不因取消一个查询取消其他调用的初始化。preload 兼容扩展 `filterWorks(ids,{...options,requestKey})`，新增 `cancelFilterWorks(requestKey)`；主进程按有效 renderer 来源和键拥有 AbortController，renderer 的同一列表保持稳定键，切换/卸载时取消，不能只在界面丢回复。
 
-- [ ] **Step 1 — 写失败测试。** UI start确认只发送一次，200ms目标内可见准备状态；停止/重开/继续/部分失败显示实际计数。运行更新与过期回复：
+- [x] **Step 1 — 写失败测试。** UI start确认只发送一次，200ms目标内可见准备状态；停止/重开/继续/部分失败显示实际计数。运行更新与过期回复：
   ```js
   assert.strictEqual(runtimeOnlyUpdate.works, before.works);
   assert.strictEqual(runtimeOnlyUpdate.members, before.members);
@@ -174,10 +174,10 @@
   assert.equal(mergeState(staleFrame, delta).downloadPreparation.operationId, operationId);
   ```
   翻页/收藏顺序/跨页选择/详情返回位置不变，原任务列表仍分页50项；失败不能显示新增0掩盖错误。
-- [ ] **Step 2 — 红灯。** `npm run test:ui` 运行新增检查；`node --test tests/local-performance.test.mjs` 检查 runtime 引用及过期帧；新状态未接入时应失败。
-- [ ] **Step 3 — 实现窄更新。** 下载批量确认使用 start API，避免全局 pending 覆盖整个准备期；状态提示关闭后保留入口。资料与运行版本分开，原数据未变则复用 works/membership/标签/作者引用；selection派生用memo。搜索合并间隔150ms，具备独立 requestKey 的后端取消；每次新输入取消同键旧查询，结果不反向覆盖。对全文排序等重计算仍分段；不为正常浏览再建进程。
-- [ ] **Step 4 — 绿灯。** `npm run test:ui`、`node --test tests/local-performance.test.mjs tests/download-preparation-integration.test.mjs` 全通过；四个现有 NAS/音频/日志/补齐布局脚本通过，新增提示不挤坏小窗口。
-- [ ] **Step 5 — 提交。** `git commit -m "perf: keep browsing responsive during download preparation"`。
+- [x] **Step 2 — 红灯。** `npm run test:ui` 运行新增检查；`node --test tests/local-performance.test.mjs` 检查 runtime 引用及过期帧；新状态未接入时应失败。
+- [x] **Step 3 — 实现窄更新。** 下载批量确认使用 start API，避免全局 pending 覆盖整个准备期；状态提示关闭后保留入口。资料与运行版本分开，原数据未变则复用 works/membership/标签/作者引用；selection派生用memo。搜索合并间隔150ms，具备独立 requestKey 的后端取消；每次新输入取消同键旧查询，结果不反向覆盖。对全文排序等重计算仍分段；不为正常浏览再建进程。
+- [x] **Step 4 — 绿灯。** `npm run test:ui`、`node --test tests/local-performance.test.mjs tests/download-preparation-integration.test.mjs` 全通过；四个现有 NAS/音频/日志/补齐布局脚本通过，新增提示不挤坏小窗口。
+- [x] **Step 5 — 提交。** `git commit -m "perf: keep browsing responsive during download preparation"`。
 
 ## Task 7：同规模性能、故障恢复与实际包验收
 
@@ -185,7 +185,7 @@
 
 **Interfaces:** benchmark `--variant baseline|optimized --saved 31542 --new 775 --runs 3 --output <path>` 产生计数、冷/热耗时、主进程事件循环 p95/max、首个状态时间、停止反馈、主/辅助进程峰值资源；真实临时库与纯分析分别出报告。结果中不记录标题/路径/凭据。
 
-- [ ] **Step 1 — 写回归验收。** 先在基线确定结构性检查失败、窗口状态不能在长同步段及时返回；再在新实现运行相同条件。核心断言：
+- [x] **Step 1 — 写回归验收。** 先在基线确定结构性检查失败、窗口状态不能在长同步段及时返回；再在新实现运行相同条件。核心断言：
   ```js
   assert.equal(report.admitted, 775);
   assert.equal(report.fullOwnershipBuilds, 1);
@@ -195,10 +195,10 @@
   assert.equal(report.originalFilesChanged, 0);
   ```
   上述耗时比例在独立同机 benchmark 中验收；普通 CI 单元测试固定断言结构、正确性与能让出事件循环，CI另存多轮性能报告，不把同机80%目标降格为口头估计。单独记录 ≤50ms片段、p95≤100ms、>250ms阶段、约200ms首状态/500ms停止、峰值内存；硬件噪声不能吞掉错误。增加慢盘、消息乱序/超限、整批崩溃、事务失败、任意受理点退出、同名/替换文件及在准备时真实翻页/搜索的桌面检查。
-- [ ] **Step 2 — 完成失败/通过闭环。** `node --test tests/download-preparation-performance.test.mjs`；先看到原行为失败，再看到优化结果通过；重新运行 baseline/optimized 三轮，不能只复用前一次模拟1.9秒。
-- [ ] **Step 3 — 回归及打包。** 顺序运行 `npm test`、`npm run test:ui`、`npm run build`、`node scripts/backup-desktop-test.mjs`、`node scripts/backup-preview-desktop-test.mjs`；运行 NAS、audio-viewer、read-log、repair 四个 Electron 布局脚本。随后构建 Windows 包，运行 `node scripts/check-backup-package.mjs`、`node scripts/backup-desktop-test.mjs --packaged`、`node scripts/backup-package-smoke.mjs`，确认真实 ASAR 内 utility process 能启动、停止和回收。检查两种 Windows 产物的启动与源码一致性，若系统已有安装包验证辅助脚本可复用，不下载/执行不明工具。
-- [ ] **Step 4 — 独立整分支审查。** 按 `superpowers:requesting-code-review` 对设计、计划、最终差异、性能报告及取消恢复证据做一次独立审查；按反馈复现并修复重要问题。记录通过项、风险和真实遵义/NAS未验收部分。若发布，先确定精确提交并验证云端CI最终状态；不可用旧提交绿灯替代本轮，失败必须处理或明确报告。
-- [ ] **Step 5 — 提交及交付。** `git commit -m "test: verify bulk download responsiveness and recovery"`。只在所有必需检查与重要审查问题完成后按 `superpowers:finishing-a-development-branch` 处理整合/发布；本计划不授权真实作品清理或 NAS 迁移。
+- [x] **Step 2 — 完成失败/通过闭环。** `node --test tests/download-preparation-performance.test.mjs`；先看到原行为失败，再看到优化结果通过；重新运行 baseline/optimized 三轮，不能只复用前一次模拟1.9秒。
+- [x] **Step 3 — 回归及打包。** 顺序运行 `npm test`、`npm run test:ui`、`npm run build`、`node scripts/backup-desktop-test.mjs`、`node scripts/backup-preview-desktop-test.mjs`；运行 NAS、audio-viewer、read-log、repair 四个 Electron 布局脚本。随后构建 Windows 包，运行 `node scripts/check-backup-package.mjs`、`node scripts/backup-desktop-test.mjs --packaged`、`node scripts/backup-package-smoke.mjs`，确认真实 ASAR 内 utility process 能启动、停止和回收。检查两种 Windows 产物的启动与源码一致性，若系统已有安装包验证辅助脚本可复用，不下载/执行不明工具。
+- [x] **Step 4 — 独立整分支审查。** 按 `superpowers:requesting-code-review` 对设计、计划、最终差异、性能报告及取消恢复证据做一次独立审查；按反馈复现并修复重要问题。记录通过项、风险和真实遵义/NAS未验收部分。若发布，先确定精确提交并验证云端CI最终状态；不可用旧提交绿灯替代本轮，失败必须处理或明确报告。
+- [x] **Step 5 — 提交及交付。** `git commit -m "test: verify bulk download responsiveness and recovery"`。只在所有必需检查与重要审查问题完成后按 `superpowers:finishing-a-development-branch` 处理整合/发布；本计划不授权真实作品清理或 NAS 迁移。
 
 ## 自审覆盖与执行交接
 
@@ -212,6 +212,6 @@
 | 状态可见、浏览/搜索/选择及增量通知 | 6 |
 | 同规模/慢盘/并发/原文件保护/源程序和实际包验证 | 7 |
 
-已自审：任务间接口统一使用 operationId、admission.held、baseSeq；Task 2 的只读快照不会跨 ACK；Task 4 不因本批登记反复全库构建；Task 5 不遗留 Promise 当数字的生产 caller；五项 Review Focus 均有拥有者及明确测试。没有实施代码，也没有本轮通过/性能改善的宣称。
+已自审：任务间接口统一使用 operationId、admission.held、baseSeq；Task 2 的只读快照不会跨 ACK；Task 4 不因本批登记反复全库构建；Task 5 不遗留 Promise 当数字的生产 caller；五项 Review Focus 均有拥有者及明确测试。原计划已执行，本地全量797、UI232、两种桌面104、独立预览31及包一致性105通过，重要审查反馈已用RED→GREEN修复。性能及实机边界见验证记录；GitHub云端门禁在最终推送提交单独核对。
 
 执行前在隔离工作区按 `using-git-worktrees` 核对当前改动并保留无关文件。用户此前已指定本会话执行，因此交接只请审阅本计划，不重新要求选择执行方式；确认计划后使用 `executing-plans` 按任务推进，最终独立审查。
