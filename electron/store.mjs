@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {SqliteStore} from './sqlite-store.mjs';
+import {DownloadPathJournal} from './download-path-journal.mjs';
 import {SyncState} from './sync-state.mjs';
 import {AuthorSources} from './author-sources.mjs';
 import {CollectionReads} from './collection-reads.mjs';
@@ -40,6 +41,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sync_items(collection_id TEXT NOT NULL,work_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(collection_id,work_id));
       CREATE INDEX IF NOT EXISTS sync_items_order ON sync_items(collection_id,position);
       CREATE TABLE IF NOT EXISTS sync_pages(collection_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(collection_id,cursor));`);
+    s.pathJournal=new DownloadPathJournal(s);s.pathJournal.init();
     db.run('CREATE TABLE IF NOT EXISTS audio_source_hints(work TEXT PRIMARY KEY,body TEXT NOT NULL);');
     if (!s.getSetting('root')) s.setSetting('root', defaultRoot);
     if (!s.collection(TOTAL)) s.put('collections', TOTAL, { id: TOTAL, name: '收藏', folder: '收藏', added: true, rank: -1, count: 0 });
