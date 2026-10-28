@@ -1,4 +1,9 @@
 import path from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+
+export function readDirectorySnapshot(file,{onDatabase=()=>{}}={}){
+ const db=new DatabaseSync(file,{readOnly:true,timeout:5000});try{onDatabase(db);db.exec('BEGIN');const baseSeq=Number(db.prepare("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='download_path_changes'),0) n").get().n),index=buildDirectoryIndex(db.prepare("SELECT id,json_extract(body,'$.path') path FROM downloads").iterate());db.exec('COMMIT');return {baseSeq,index};}finally{db.close();}
+}
 
 export const directoryKey=file=>path.resolve(file).toLowerCase();
 export function buildDirectoryIndex(rows){

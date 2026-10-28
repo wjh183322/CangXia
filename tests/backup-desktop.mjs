@@ -1,4 +1,5 @@
 import {checkSourceStatusDesktop} from './source-status-desktop-checks.mjs';
+import {checkDownloadAnalysisDesktop} from './download-analysis-desktop-checks.mjs';
 import {checkCollectionBatchDesktop} from './collection-batch-desktop-checks.mjs';
 import {checkStorageSizeDesktop,checkLocalFilterLayout} from './storage-size-desktop-checks.mjs';
 import {checkReadHistoryDesktop} from './read-history-desktop-checks.mjs';
@@ -19,6 +20,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
   const preview=await call('previewExistingLibrary','local');check('import preview reports fixture records and preserves the empty destination',preview.works===1&&preview.files===3&&(await call('state')).works.length===0);
   await call('importExistingLibrary',preview.token);data=await call('state');check('copy import retains local media and marks pending changes',data.works[0].local&&data.storage.pending&&fs.existsSync(path.join(process.env.CANGXIA_BACKUP_TEST_ORIGINAL,'library.sqlite')));
   await call('syncBackup');data=await call('state');check('background sync confirms NAS state without removing local media',data.storage.phase==='synced'&&data.works[0].local&&data.works[0].backedUp);
+  await checkDownloadAnalysisDesktop({mainURL,profile:process.env.CANGXIA_BACKUP_TEST_PROFILE,root:data.root,check});
   assert.equal(data.storage.pending,false);await call('refreshStorageSize');check('refreshing a clean local directory never creates pending NAS changes',(await call('state')).storage.pending===false);
   const searched=await call('filterWorks',data.works.map(w=>w.id),{query:'备份版桌面'});check('native indexed search returns matching IDs without restoring heavy list descriptions',searched.ids.join(',')==='123'&&data.works[0].description===undefined);
   const intent=await call('prepareScopedDeletion',{ids:['123'],files:true,records:false,target:'local'});assert.equal(intent.summary.files,true);await call('cancelPreparedDeletion',intent.token);check('list state omits local paths and full file manifests',data.works[0].localRecord.path===undefined);const local=(await call('workDetail','123')).localRecord;assert.ok(local.path.startsWith(path.dirname(process.env.CANGXIA_BACKUP_TEST_PROFILE)+path.sep));for(const a of local.assets)fs.unlinkSync(path.join(local.path,a.file));data=await call('refreshFiles');check('clearing local files retains NAS backup',!data.works[0].local&&data.works[0].backedUp);
