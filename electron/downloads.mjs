@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {transferAsset} from './resumable-transfer.mjs';
+import {DownloadPreparation} from './download-preparation.mjs';
 import { isMediaURL, requireInside } from './model.mjs';
 import { imageDimensions } from './media-info.mjs';
 import { randomUUID, createHash } from 'node:crypto';
@@ -98,31 +99,22 @@ export class DownloadQueue {
     if(changed.length){this.cursor=0;this.paused=false;this.pauseReason='';this.emit();this.wake?.();void this.run();}return changed.length;
   }
   async discardUnneeded(ids){const wanted=new Set(ids),jobs=this.jobs.filter(j=>wanted.has(j.id)&&!j.coverOnly&&(j.source||'douyin')==='douyin'&&j.state!=='complete'&&!j.cancelOwnership?.cancelRequested);for(const job of jobs){const task=this.active.get(job.id);if(task){task.cancelled=true;task.controller.abort();}}await Promise.allSettled(jobs.map(j=>this.active.get(j.id)?.promise).filter(Boolean));this.taskRows.removeMany(jobs.map(j=>j.id));this.taskRows.flush();this.cursor=0;this.emit();return {removed:jobs.length};}
-  enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
-    if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
-    if(ids.some(id=>this.active.get(id)?.cancelled||this.cancellations.has(id)||this.jobs.some(j=>j.id===id&&j.cancelOwnership?.cancelRequested)))throw Error('该任务正在取消或清理尚未完成，请再次取消重试清理');
-    const requested=new Set(ids);if(this.jobs.some(j=>requested.has(j.id)&&['waiting','running'].includes(j.state)&&(!!j.coverOnly!==coverOnly||(!coverOnly&&(j.source||'douyin')!==source))))throw Error('所选作品已有不同类型或来源的任务，请先完成或取消该任务');
-    const busy=new Set(this.jobs.filter(j=>['waiting','running'].includes(j.state)).map(j=>j.id)),added=[];
-    for (const id of [...new Set(ids)]) {
-      if(busy.has(id))continue;
-      const w = this.store.lightViews?.ready?this.store.lightViews.bases.get(id):this.store.work(id); if (!w) continue;if(source!=='nas'&&w.remoteState==='unavailable'){const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);if(previous)this.retireUnavailable([id]);continue;}
-      const previous=this.taskRows?.byId.get(id)||this.jobs.find(j=>j.id===id);
-      // Re-enqueuing an unfinished task is a retry of its original epoch, never a new ownership baseline.
-      const cancelOwnership=previous&&previous.state!=='complete'?previous.cancelOwnership:createCancellationOwnership(this.store,id);
-      added.push({ id, title: w.name, state: 'waiting', progress: 0, message: '',coverOnly,source,...(catalogueLibrary?{catalogueLibrary}:{}),...(cancelOwnership?{cancelOwnership}:{}) });
-    }
-    const replacing=new Set(added.map(j=>j.id));this.jobs=this.jobs.filter(j=>!replacing.has(j.id)).concat(added);this.cursor=0;
-    this.paused = false;this.pauseReason=''; this.emit(true);this.wake?.();void this.run();
-    return added.length;
+  async enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
+    this.preparation ||= new DownloadPreparation({store:this.store,queue:this,onChange:()=>this.notify()});
+    const result=await this.preparation.submit({ids,source,coverOnly,catalogueLibrary,kind:'exact'});
+    if(result.phase==='failed')throw Object.assign(Error(result.message),{code:'PREPARATION_FAILED',operationId:result.operationId,accepted:result.queued});
+    return result.queued;
   }
-  pause() { this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
+  pause() { if(this.preparation?.controller)this.preparation.stop(this.preparation.state().operationId);this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }
   retireUnavailable(ids){const wanted=new Set(ids);let changed=0;for(const job of this.jobs){if(!wanted.has(job.id)||job.state==='complete'||job.source==='nas')continue;if(job.state!=='unavailable')changed++;job.state='unavailable';job.message='原作品已失效，已停止自动下载与补齐';const task=this.active.get(job.id);if(task){task.retired=true;task.controller.abort();}this.onJobSettled?.(job);}if(changed){this.emit(true);this.store.save();this.wake?.();}return changed;}
   resume() { this.pauseReason='';this.paused = false;this.cursor=0;this.emit(true);this.wake?.();void this.run(); }
   async retryFailed(ids=null){
     this.retireUnavailable(this.jobs.filter(j=>j.state==='failed'&&(this.store.lightViews?.ready?this.store.lightViews.bases.get(j.id):this.store.work(j.id))?.remoteState==='unavailable').map(j=>j.id));
-    const selected=ids===null?null:new Set(ids),failed=this.jobs.filter(j=>j.state==='failed'&&(!selected||selected.has(j.id)));let queued=0;
-    for(const job of failed){if(job.admission?.held||job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
-    if(queued){this.paused=false;this.pauseReason='';this.cursor=0;this.emit(true);this.wake?.();void this.run();}return {queued};
+    const selected=ids===null?null:new Set(ids),groups=new Map();
+    for(const job of this.jobs)if(job.state==='failed'&&(!selected||selected.has(job.id))&&!job.admission?.held&&!job.cancelOwnership?.cancelRequested&&!this.cancellations.has(job.id)){
+      const options={source:job.source||'douyin',coverOnly:!!job.coverOnly,...(job.catalogueLibrary?{catalogueLibrary:job.catalogueLibrary}:{})},key=JSON.stringify(options);if(!groups.has(key))groups.set(key,{ids:[],options});groups.get(key).ids.push(job.id);
+    }
+    let queued=0;for(const group of groups.values())queued+=await this.enqueue(group.ids,group.options);return {queued};
   }
   async resolveWork(id,signal,job){
     if(job){job.phase='waitingResource';job.message='等待后台刷新资源';this.emit();}

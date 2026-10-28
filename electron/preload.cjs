@@ -9,7 +9,7 @@ methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadP
 methods.push('addAuthor','readAuthor','archiveAuthor');
 methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
 methods.push('defectPage','retryDownloads','reportCoverStatus');
-methods.push('previewDownloads');
+methods.push('previewDownloads','startDownloadPreparation','stopDownloadPreparation','continueDownloadPreparation','downloadPreparationResults');
 methods.push('cancelRepairs','repairPage');
 methods.push('audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
 methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');

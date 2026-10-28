@@ -22,7 +22,7 @@ async function fixture(t,state='partial'){
 
 test('partial record with complete registered files is promoted without download',async t=>{
  const f=await fixture(t),before=f.hashes();
- for(let i=0;i<2;i++){f.queue.enqueue([f.id]);await f.queue.waitForIdle();assert.equal(f.queue.jobs.find(j=>j.id===f.id).state,'complete');assert.equal(f.store.download(f.id).state,'complete');}
+ for(let i=0;i<2;i++){await f.queue.enqueue([f.id]);await f.queue.waitForIdle();assert.equal(f.queue.jobs.find(j=>j.id===f.id).state,'complete');assert.equal(f.store.download(f.id).state,'complete');}
  assert.equal(f.networkCalls,0);assert.deepEqual(f.hashes(),before);assert.equal(f.store.fileStates.get(f.id).status,'complete');
 });
 
