@@ -90,6 +90,14 @@ export class DownloadQueue {
     }
     this.notify();
   }
+  admitPrepared(jobs,{operationId,held=true}={}){this.taskRows.upsertMany(jobs.map(job=>({...job,admission:{...job.admission,operationId,held}})));this.taskRows.flush();return jobs.length;}
+  releaseAdmission(operationId,ids){
+    const wanted=ids?new Set(ids):null,changed=[];
+    for(const job of this.jobs)if(job.admission?.operationId===operationId&&job.admission.held&&(!wanted||wanted.has(job.id))){changed.push({job,admission:job.admission,message:job.message});job.admission={...job.admission,held:false};job.message='等待下载';}
+    try{this.taskRows.flush();}catch(error){for(const old of changed){old.job.admission=old.admission;old.job.message=old.message;}throw error;}
+    if(changed.length){this.cursor=0;this.paused=false;this.pauseReason='';this.emit();this.wake?.();void this.run();}return changed.length;
+  }
+  async discardUnneeded(ids){const wanted=new Set(ids),jobs=this.jobs.filter(j=>wanted.has(j.id)&&!j.coverOnly&&(j.source||'douyin')==='douyin'&&j.state!=='complete'&&!j.cancelOwnership?.cancelRequested);for(const job of jobs){const task=this.active.get(job.id);if(task){task.cancelled=true;task.controller.abort();}}await Promise.allSettled(jobs.map(j=>this.active.get(j.id)?.promise).filter(Boolean));this.taskRows.removeMany(jobs.map(j=>j.id));this.taskRows.flush();this.cursor=0;this.emit();return {removed:jobs.length};}
   enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
     if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
     if(ids.some(id=>this.active.get(id)?.cancelled||this.cancellations.has(id)||this.jobs.some(j=>j.id===id&&j.cancelOwnership?.cancelRequested)))throw Error('该任务正在取消或清理尚未完成，请再次取消重试清理');
@@ -113,7 +121,7 @@ export class DownloadQueue {
   async retryFailed(ids=null){
     this.retireUnavailable(this.jobs.filter(j=>j.state==='failed'&&(this.store.lightViews?.ready?this.store.lightViews.bases.get(j.id):this.store.work(j.id))?.remoteState==='unavailable').map(j=>j.id));
     const selected=ids===null?null:new Set(ids),failed=this.jobs.filter(j=>j.state==='failed'&&(!selected||selected.has(j.id)));let queued=0;
-    for(const job of failed){if(job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
+    for(const job of failed){if(job.admission?.held||job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.taskRows&&!this.taskRows.byId.has(job.id))continue;job.state='waiting';job.progress=0;job.message='等待重试';queued++;if(queued%100===0)await yieldToUI();}
     if(queued){this.paused=false;this.pauseReason='';this.cursor=0;this.emit(true);this.wake?.();void this.run();}return {queued};
   }
   async resolveWork(id,signal,job){
@@ -129,7 +137,7 @@ export class DownloadQueue {
     try {
       while (true) {
         while(!this.paused&&this.active.size+(this.externalActive?.()||0)<this.concurrency&&this.cursor<this.jobs.length){
-          const job=this.jobs[this.cursor++];if(job.state!=='waiting'||job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.active.has(job.id))continue;
+          const job=this.jobs[this.cursor++];if(job.state!=='waiting'||job.admission?.held||job.cancelOwnership?.cancelRequested||this.cancellations.has(job.id)||this.active.has(job.id))continue;
           job.trackDownloadFile=file=>{this.trackDownloadFile(job,file);this.trackDownloadFile(job,file+'.backup-part');};
           job.trackDownloadRelocation=()=>this.prepareDownloadRelocation(job);
           job.isPreTaskDownloadFile=file=>isPreTaskFile(job,file);
