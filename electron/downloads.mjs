@@ -91,15 +91,17 @@ export class DownloadQueue {
     }
     this.notify();
   }
-  admitPrepared(jobs,{operationId,held=true}={}){this.taskRows.upsertMany(jobs.map(job=>({...job,admission:{...job.admission,operationId,held}})));this.taskRows.flush();return jobs.length;}
-  releaseAdmission(operationId,ids){
+  admitPrepared(jobs,{operationId,held=true}={}){this.taskRows.upsertMany(jobs.map(job=>({...job,admission:{...job.admission,operationId,held}})));this.taskRows.flush({ids:jobs.map(j=>j.id)});return jobs.length;}
+  startReleasedAdmissions(){this.cursor=0;this.paused=false;this.pauseReason='';this.emit();this.wake?.();void this.run();}
+  releaseAdmission(operationId,ids,{start=true}={}){
     const wanted=ids?new Set(ids):null,changed=[];
     for(const job of this.jobs)if(job.admission?.operationId===operationId&&job.admission.held&&(!wanted||wanted.has(job.id))){changed.push({job,admission:job.admission,message:job.message});job.admission={...job.admission,held:false};job.message='等待下载';}
-    try{this.taskRows.flush();}catch(error){for(const old of changed){old.job.admission=old.admission;old.job.message=old.message;}throw error;}
-    if(changed.length){this.cursor=0;this.paused=false;this.pauseReason='';this.emit();this.wake?.();void this.run();}return changed.length;
+    try{this.taskRows.flush({ids:changed.map(j=>j.job.id)});}catch(error){for(const old of changed){old.job.admission=old.admission;old.job.message=old.message;}throw error;}
+    if(changed.length&&start)this.startReleasedAdmissions();return changed.length;
   }
   async discardUnneeded(ids){const wanted=new Set(ids),jobs=this.jobs.filter(j=>wanted.has(j.id)&&!j.coverOnly&&(j.source||'douyin')==='douyin'&&j.state!=='complete'&&!j.cancelOwnership?.cancelRequested);for(const job of jobs){const task=this.active.get(job.id);if(task){task.cancelled=true;task.controller.abort();}}await Promise.allSettled(jobs.map(j=>this.active.get(j.id)?.promise).filter(Boolean));this.taskRows.removeMany(jobs.map(j=>j.id));this.taskRows.flush();this.cursor=0;this.emit();return {removed:jobs.length};}
   async enqueue(ids,{coverOnly=false,source='douyin',catalogueLibrary}={}) {
+    if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
     this.preparation ||= new DownloadPreparation({store:this.store,queue:this,onChange:()=>this.notify()});
     const result=await this.preparation.submit({ids,source,coverOnly,catalogueLibrary,kind:'exact'});
     if(result.phase==='failed')throw Object.assign(Error(result.message),{code:'PREPARATION_FAILED',operationId:result.operationId,accepted:result.queued});

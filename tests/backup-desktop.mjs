@@ -5,11 +5,11 @@ import {checkStorageSizeDesktop,checkLocalFilterLayout} from './storage-size-des
 import {checkReadHistoryDesktop} from './read-history-desktop-checks.mjs';
 import {checkAuthorDesktop} from './author-desktop-checks.mjs';
 import {app,session,shell} from 'electron';import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {pathToFileURL} from 'node:url';
-app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[],originalVisits=[];let started=false,hdProbeCalls=0,navigationStage='baseline';
+app.disableHardwareAcceleration();const settings=JSON.parse(process.env.CANGXIA_BACKUP_TEST_SETTINGS||'null');if(!settings)throw new Error('Run scripts/backup-desktop-test.mjs');const checks=[],originalVisits=[];let started=false,hdProbeCalls=0,navigationStage='baseline',pendingNative='idle';
 let nextForegroundGate;const gateForeground=()=>{let release,entered;const gate={waiting:new Promise(resolve=>release=resolve),signal:new Promise(resolve=>entered=resolve),enter:()=>entered()};nextForegroundGate=gate;return {release,entered:gate.signal};};
-const timeout=setTimeout(()=>{console.error('Backup desktop timeout');app.exit(1);},90000);
-app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
- const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);fs.writeFileSync('.test-output/backup-desktop-progress.json',JSON.stringify({checks},null,2));};
+const timeout=setTimeout(()=>{console.error('Backup desktop timeout',JSON.stringify({navigationStage,pendingNative}));app.exit(1);},90000);
+app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.webContents.on('render-process-gone',(_event,details)=>{console.error('Fixture renderer exited',details);fs.writeFileSync('.test-output/responsiveness-renderer-exit.json',JSON.stringify({navigationStage,pendingNative,...details},null,2));});win.webContents.on('did-finish-load',()=>{if(!win.webContents.getURL().endsWith('/index.html'))return;void(async()=>{
+ const call=async(method,...args)=>{pendingNative='ipc:'+method;try{return await win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);}finally{pendingNative='idle';}};const check=(name,value)=>{assert.ok(value,name);checks.push(name);fs.writeFileSync('.test-output/backup-desktop-progress.json',JSON.stringify({checks},null,2));};
  try{
   let data=await call('state');check('backup starts isolated and read-only',data.storage.mode==='backup'&&!data.storage.writable&&data.works.length===0);
   const title=await win.webContents.executeJavaScript('document.title');check('backup title and settings identify the correct edition',title.includes('藏匣备份版 v'+data.version)&&win.getTitle()===title);
@@ -65,10 +65,10 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     for(let i=0;i<120;i++){data=await call('state');if(data.queue.transferring===6)simultaneous=true;if(!data.queue.running)break;await new Promise(r=>setTimeout(r,50));}
     const completedPage=await call('downloadPage',{tab:'complete',page:1,pageSize:50});
     check('native normal queue transfers six cached works simultaneously without refreshing details',peakTransfers===6&&simultaneous&&detailQueries===0&&completedPage.jobs.filter(j=>Number(j.id)>=100002&&Number(j.id)<=100007).length===6);
-    await win.webContents.executeJavaScript("[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('本地媒体库')).click()");
-    const visibleLocalIds=()=>win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId)");
+    navigationStage='local-size-navigation';await win.webContents.executeJavaScript("[...document.querySelectorAll('.main-nav button')].find(b=>b.textContent.includes('本地媒体库')).click()");
+    const visibleLocalIds=async()=>{pendingNative='visibleLocalIds';try{return await win.webContents.executeJavaScript("[...document.querySelectorAll('.work-card')].map(e=>e.dataset.workId)");}finally{pendingNative='idle';}};
     const sameSet=(a,b)=>a.length===b.length&&a.every(id=>b.includes(id));let originalLocalOrder=[],sizeReady=false;
-    const sizeControlDeadline=Date.now()+6000;
+    navigationStage='local-size-ready';const sizeControlDeadline=Date.now()+6000;
     while(Date.now()<sizeControlDeadline){
       const current=await call('state'),visible=await visibleLocalIds(),localIds=current.works.filter(w=>w.local).map(w=>w.id);
       sizeReady=await win.webContents.executeJavaScript("!!document.querySelector('[aria-label=\"本地媒体库排序\"]')")&&sameSet(visible,localIds)&&['100002','100003','100004','100005','100006','100007'].every(id=>visible.includes(id));
@@ -77,7 +77,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
     assert.ok(sizeReady,'local size test must start with the complete current local card set');
     const memberOrderBefore=JSON.stringify((await call('state')).members);
     await win.webContents.executeJavaScript("(()=>{const select=document.querySelector('[aria-label=\"本地媒体库排序\"]');select.value='size-desc';select.dispatchEvent(new Event('change',{bubbles:true}));})()");
-    let sizeMatches=false,sizeSample;const sizeOrderDeadline=Date.now()+6000;
+    navigationStage='local-size-order';let sizeMatches=false,sizeSample;const sizeOrderDeadline=Date.now()+6000;
     while(Date.now()<sizeOrderDeadline){
       const before=await call('state'),expected=(await call('filterWorks',originalLocalOrder,{sort:'size-desc'})).ids,actual=await visibleLocalIds(),after=await call('state');
       sizeSample={actual,expected,sourceIds:originalLocalOrder,revisions:[before.libraryRevision,after.libraryRevision]};

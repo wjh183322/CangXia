@@ -14,7 +14,8 @@ export async function checkStorageSizeDesktop({win,call,check}){
 }
 
 export async function checkLocalFilterLayout({win,check}){
- const previous=win.getContentSize();try{win.setContentSize(1000,640);await win.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ // Hidden test windows may not produce animation frames. Bound the wait, then still assert real geometry.
+ const previous=win.getContentSize();try{win.setContentSize(1000,640);fs.writeFileSync('.test-output/local-filter-layout-visibility.json',JSON.stringify({visibility:await win.webContents.executeJavaScript('document.visibilityState'),visible:win.isVisible(),focused:win.isFocused(),minimized:win.isMinimized()}));await win.webContents.executeJavaScript('Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,300))])');
  const layout=await win.webContents.executeJavaScript(`(()=>{const sort=document.querySelector('[aria-label="本地媒体库排序"]'),filters=[...document.querySelectorAll('.source-filters .filter-tile>span')].map(e=>e.textContent),stop=document.querySelector('[aria-label="刷新本机目录大小"]').getBoundingClientRect(),log=document.querySelector('.read-log-nav').getBoundingClientRect();return {filters,sortOutside:!!sort.closest('.selection-toolbar')&&!sort.closest('.filter-panel'),width:document.documentElement.scrollWidth,viewport:innerWidth,storageBottom:stop.bottom,logBottom:log.bottom,height:innerHeight};})()`);
  check('native local filters match account filters and size ordering stays beside pagination at a small window',layout.filters.join(',')==='作者,下载状态,原作品,标签,我的标签'&&layout.sortOutside&&layout.width<=layout.viewport+1);
  try{fs.writeFileSync('.test-output/local-media-storage-small.png',(await win.webContents.capturePage()).toPNG());}catch{}

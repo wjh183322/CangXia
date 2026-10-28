@@ -492,6 +492,6 @@ app.on('before-quit', event => {
     try{await flatClose;}catch{dialog.showErrorBox('临时文件未完全清理','单独下载任务已取消；目标目录中的 .cangxia-flat- 开头临时文件夹可能仍有未完成片段，可在退出后删除。');}
     for(let i=0;i<50&&(queue?.running||collector?.busy);i++)await new Promise(r=>setTimeout(r,100));
     await Promise.race([browserClose||Promise.resolve(),new Promise(r=>setTimeout(r,3000))]);
-    await queue?.preparation?.close();await directorySize?.close();diagnostics?.record({event:'shutdown',reason:collector?.busy?'pending-request':'normal'});diagnostics?.close();await audio?.close();await nasCatalogue?.close();await backup?.close();await store?.fileStates.close();await repairChecks?.close();defectRepair?.close();if(!collector?.busy)store?.close();app.exit(0);
+    await queue?.preparation?.close();await directorySize?.close();diagnostics?.record({event:'shutdown',reason:collector?.busy?'pending-request':'normal'});diagnostics?.close();await audio?.close();await nasCatalogue?.close();await backup?.close();await store?.fileStates.close();await repairChecks?.close();defectRepair?.close();await store?.lightViews.search.close();if(!collector?.busy)store?.close();app.exit(0);
   })();
 });

@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';import path from 'node:path';import {randomUUID} from 'node:crypto';import {requireInside} from './model.mjs';
+const metadataLimit=16*1024*1024;
+const tooLarge=()=>Object.assign(Error('原有作品信息过大，文件保留；请先核对该作品目录'),{code:'OWNERSHIP_TOO_LARGE'});
+async function readBounded(handle,signal){const chunks=[],buffer=Buffer.alloc(64*1024);let size=0;for(;;){signal?.throwIfAborted();const {bytesRead}=await handle.read(buffer,0,Math.min(buffer.length,metadataLimit+1-size),size);if(!bytesRead)break;size+=bytesRead;if(size>metadataLimit)throw tooLarge();chunks.push(Buffer.from(buffer.subarray(0,bytesRead)));}return Buffer.concat(chunks,size);}
 
 export async function validateOwnershipPath(root,file,{signal,io=fs}={}){
  const resolved=requireInside(root,file);let part=resolved;
@@ -12,8 +15,8 @@ export async function captureCancellationOwnership(store,id,{target,signal,legac
  for(const dir of new Set([original?.path,destination].filter(Boolean).map(p=>path.resolve(p)))){
   check();await validateOwnershipPath(root,path.join(dir,'.cancel-path-check'),{signal,io});let existing=[];try{existing=await io.readdir(dir);}catch(e){if(e.code!=='ENOENT')throw e;}check();dirs.push({dir,existing});
   for(const name of new Set(['作品信息.json',...(original?.assets||[]).filter(a=>a.kind==='metadata').map(a=>a.file)])){
-   if(!existing.includes(name))continue;const file=await validateOwnershipPath(root,path.join(dir,name),{signal,io}),before=await io.lstat(file);if(!before.isFile())throw Error('原有作品信息不是普通文件');let handle;
-   try{handle=await io.open(file,'r');const opened=await handle.stat();if(opened.dev!==before.dev||opened.ino!==before.ino)throw Error('原有文件在检查时被替换，已保留');const bytes=await handle.readFile();const after=await handle.stat();await validateOwnershipPath(root,file,{signal,io});const current=await io.lstat(file);if(before.dev!==current.dev||before.ino!==current.ino||before.size!==after.size||before.mtimeMs!==after.mtimeMs||after.size!==current.size||after.mtimeMs!==current.mtimeMs)throw Error('原有作品信息在检查时发生变化，已保留');metadata.push({file,bytes:bytes.toString('base64')});}finally{await handle?.close();}
+   if(!existing.includes(name))continue;const file=await validateOwnershipPath(root,path.join(dir,name),{signal,io}),before=await io.lstat(file);if(!before.isFile())throw Error('原有作品信息不是普通文件');if(before.size>metadataLimit)throw tooLarge();let handle;
+   try{handle=await io.open(file,'r');const opened=await handle.stat();if(opened.dev!==before.dev||opened.ino!==before.ino)throw Error('原有文件在检查时被替换，已保留');const bytes=await readBounded(handle,signal);const after=await handle.stat();await validateOwnershipPath(root,file,{signal,io});const current=await io.lstat(file);if(before.dev!==current.dev||before.ino!==current.ino||before.size!==after.size||before.mtimeMs!==after.mtimeMs||after.size!==current.size||after.mtimeMs!==current.mtimeMs)throw Error('原有作品信息在检查时发生变化，已保留');metadata.push({file,bytes:bytes.toString('base64')});}finally{await handle?.close();}
    check();
   }
  }

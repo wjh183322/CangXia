@@ -89,6 +89,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run test:backup-preview
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/responsiveness-desktop-test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/source-json-browser-test.mjs --packaged
@@ -101,6 +103,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/backup-desktop-test.mjs --packaged
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/responsiveness-desktop-test.mjs --packaged
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem release/backup -Filter '*.exe' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name } | Set-Content release/backup/SHA256-desktop.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -109,6 +113,8 @@ jobs:
           path: |
             .test-output/source-status-*.png
             .test-output/backup-desktop-result.json
+            .test-output/responsiveness-desktop*.json
+            .test-output/local-filter-layout-visibility.json
             .test-output/source-json-browser-result.json
             .test-output/preview-files-desktop-result.json
             .test-output/browser-reading-desktop-result.json

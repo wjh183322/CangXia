@@ -23,16 +23,17 @@ export class SearchIndex{
   if(this.stored.get(id)!==text){this.store.db.run('INSERT INTO search_rows(id,text) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text',[id,text]);this.stored.set(id,text);}
  }
  async prepare(){
-  await this.views.prepare();this.init();if(this.loading)return this.loading;
+  if(this.closed)throw Error('筛选服务已关闭');await this.views.prepare();if(this.closed)throw Error('筛选服务已关闭');this.init();if(this.loading)return this.loading;
   this.loading=(async()=>{if(!this.ready||this.profilesDirty){this.profile=creatorIndex(this.store.creatorProfiles());for(const id of this.views.bases.keys())this.dirty.add(id);this.profilesDirty=false;for(const id of this.rows.keys())if(!this.views.bases.has(id))this.dirty.add(id);}
-   while(this.dirty.size){const ids=[...this.dirty].slice(0,200);this.store.db.run('BEGIN');try{for(const id of ids){this.dirty.delete(id);this.update(id);}this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');this.stored=new Map(this.store.rows('SELECT id,text FROM search_rows').map(r=>[r.id,r.text]));for(const id of ids)this.dirty.add(id);throw e;}await yieldLoop();}
+   while(this.dirty.size){if(this.closed)break;const ids=[...this.dirty].slice(0,200);this.store.db.run('BEGIN');try{for(const id of ids){this.dirty.delete(id);this.update(id);}this.store.db.run('COMMIT');}catch(e){this.store.db.run('ROLLBACK');this.stored=new Map(this.store.rows('SELECT id,text FROM search_rows').map(r=>[r.id,r.text]));for(const id of ids)this.dirty.add(id);throw e;}await yieldLoop();}
    this.ready=true;
   })().finally(()=>this.loading=null);return this.loading;
  }
+ async close(){this.closed=true;for(const controller of this.controllers||[])controller.abort(new DOMException('筛选服务已关闭','AbortError'));await Promise.allSettled([this.loading,this.views.loading].filter(Boolean));}
  async query(ids,options={},control={}){
-  this.requests ||= new Map();const requestKey=control.requestKey,controller=new AbortController();if(requestKey){this.requests.get(requestKey)?.abort(new DOMException('已取消过期筛选','AbortError'));this.requests.set(requestKey,controller);}const signal=control.signal?AbortSignal.any([control.signal,controller.signal]):controller.signal;
+  if(this.closed)throw Error('筛选服务已关闭');this.controllers ||= new Set();this.requests ||= new Map();const requestKey=control.requestKey,controller=new AbortController();this.controllers.add(controller);if(requestKey){this.requests.get(requestKey)?.abort(new DOMException('已取消过期筛选','AbortError'));this.requests.set(requestKey,controller);}const signal=control.signal?AbortSignal.any([control.signal,controller.signal]):controller.signal;
   let abort;try{signal.throwIfAborted();await Promise.race([this.prepare(),new Promise((_,reject)=>{abort=()=>reject(signal.reason);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);signal.removeEventListener('abort',abort);signal.throwIfAborted();return await this.queryReady(ids,options,signal);}
-  finally{if(abort)signal.removeEventListener('abort',abort);if(requestKey&&this.requests.get(requestKey)===controller)this.requests.delete(requestKey);}
+  finally{this.controllers.delete(controller);if(abort)signal.removeEventListener('abort',abort);if(requestKey&&this.requests.get(requestKey)===controller)this.requests.delete(requestKey);}
  }
  async queryReady(ids,options={},signal){
 
