@@ -3,9 +3,10 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {setImmediate as yieldLoop} from 'node:timers/promises';
 import {requireInside} from './model.mjs';
+import {directoryKey} from './download-directory-index.mjs';
 import {prepareCancellationRelocation,trackCancellationFile,recordCancellationIdentity} from './download-cancel-cleanup.mjs';
 
-const key=file=>path.resolve(file).toLowerCase();
+const key=directoryKey;
 export class LocalReconcile{
  constructor(store){this.store=store;this.progress=null;}
  init(){

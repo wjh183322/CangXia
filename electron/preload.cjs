@@ -5,11 +5,11 @@ methods.push('prepareScopedDeletion','confirmScopedDeletion','stopScopedDeletion
 methods.push('verifySources','markSourceUnavailable');
 const api = {};
 methods.push('stopWorkCreators','refreshWorkCreators','configureBackup','checkBackup','syncBackup','cancelBackup','acceptRemoteBackup','openBackupRecovery','previewExistingLibrary','importExistingLibrary','finishBackupExit');
-methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck','filterWorks');
+methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck','filterWorks','cancelFilterWorks');
 methods.push('addAuthor','readAuthor','archiveAuthor');
 methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
 methods.push('defectPage','retryDownloads','reportCoverStatus');
-methods.push('previewDownloads');
+methods.push('previewDownloads','startDownloadPreparation','stopDownloadPreparation','continueDownloadPreparation','downloadPreparationResults');
 methods.push('cancelRepairs','repairPage');
 methods.push('audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
 methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');

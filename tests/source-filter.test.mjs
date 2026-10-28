@@ -71,7 +71,7 @@ test('filtered unavailable works retire failed tasks and skip normal repair sele
  await f.collector.verifySource(id);
  assert.equal(queue.taskRows.page({tab:'unavailable'}).total,1);assert.equal(queue.taskRows.page({tab:'failed'}).total,0);
  assert.equal(queue.jobs.find(j=>j.id==='2').state,'waiting');assert.equal(queue.paused,pausedBefore);
- assert.equal(planDownloads(f.store,queue,[id]).report.unavailable,1);assert.equal(queue.enqueue([id]),0);
+ assert.equal(planDownloads(f.store,queue,[id]).report.unavailable,1);assert.equal(await queue.enqueue([id]),0);
  // Ordinary list refresh cannot clear the evidence; explicit positive verification can.
  f.store.upsertWork(raw(id));assert.equal(f.store.work(id).remoteState,'unavailable');
  f.setReply({status_code:0,aweme_detail:raw(id)});await f.collector.verifySource(id);
@@ -95,7 +95,7 @@ test('filter response discovered while downloading retires only the target and c
  const queue=new DownloadQueue(f.store,f.collector,async()=>new Response('fixture'),()=>{});
  f.store.fileStates.confirmWritten=async()=>true;
  queue.saveResources=async job=>{if(job.id===id)throw Object.assign(Error('expired media'),{refreshable:true});};
- queue.enqueue([id,'2']);await queue.waitForIdle();
+ await queue.enqueue([id,'2']);await queue.waitForIdle();
  assert.equal(queue.jobs.find(j=>j.id===id).state,'unavailable');assert.equal(queue.jobs.find(j=>j.id==='2').state,'complete');
  assert.equal(queue.paused,false);assert.equal(queue.taskRows.page({tab:'failed'}).total,0);
  assert.match(f.store.work(id).sourceStatus.reason,/权限限制或已删除/);

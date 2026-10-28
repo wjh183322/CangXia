@@ -10,10 +10,10 @@ async function fixture(t){
  return {id,dir,store,queue,d,get transfers(){return transfers;}};
 }
 test('an unregistered existing video survives repair and the second retry does not download again',async t=>{
- const f=await fixture(t);f.queue.enqueue([f.id]);await f.queue.waitForIdle();
+ const f=await fixture(t);await f.queue.enqueue([f.id]);await f.queue.waitForIdle();
  assert.equal(fs.readFileSync(path.join(f.d.path,'视频.mp4'),'utf8'),'original unregistered bytes');
  const saved=f.store.download(f.id);assert.equal(saved.state,'complete');const video=saved.assets.find(a=>a.key==='video');assert.notEqual(video.file,'视频.mp4');assert.equal(fs.readFileSync(path.join(saved.path,video.file),'utf8'),'verified new video');
- assert.equal(f.queue.jobs.find(j=>j.id===f.id).state,'complete');f.queue.enqueue([f.id]);await f.queue.waitForIdle();assert.equal(f.transfers,1);
+ assert.equal(f.queue.jobs.find(j=>j.id===f.id).state,'complete');await f.queue.enqueue([f.id]);await f.queue.waitForIdle();assert.equal(f.transfers,1);
  const metadata=JSON.parse(fs.readFileSync(path.join(saved.path,'作品信息.json'),'utf8'));assert.equal(metadata.workId,f.id);assert.ok(metadata.assets.some(a=>a.key==='video'&&a.file===video.file));
 });
 test('focused diagnostics include current manifest and file facts without private data or modifying records',async t=>{

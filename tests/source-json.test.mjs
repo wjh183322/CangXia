@@ -87,7 +87,7 @@ test('JSON-only verification retires the failed work without changing files, NAS
  assert.equal(result.state,'unavailable');assert.equal(result.method,'api');assert.equal(f.pageCalls,0);assert.equal(f.requests.length,1);
  assert.equal(f.queue.jobs.find(j=>j.id===id).state,'unavailable');assert.equal(f.queue.jobs.find(j=>j.id===noteId).state,'failed');
  assert.deepEqual(f.store.orderedMemberRows('__all__').map(r=>r.work_id),[id,noteId,privacyId]);assert.equal(fs.readFileSync(file,'utf8'),'retained media');assert.deepEqual(f.store.work(id).backupMedia,{retained:true});
- assert.equal(planDownloads(f.store,f.queue,[id]).report.unavailable,1);assert.equal(f.queue.enqueue([id]),0);
+ assert.equal(planDownloads(f.store,f.queue,[id]).report.unavailable,1);assert.equal(await f.queue.enqueue([id]),0);
 });
 
 test('later positive video and note JSON restore availability without restarting their failed tasks',async t=>{
@@ -126,7 +126,7 @@ test('cancelling an in-flight JSON request cannot mark the work unavailable or r
 
 test('empty JSON discovered during a download retires only the target and continues the queue',async t=>{
  const f=await fixture(t);f.queue.saveResources=async job=>{if(job.id===id)throw Object.assign(Error('expired media'),{refreshable:true});};f.store.fileStates.confirmWritten=async()=>true;
- f.queue.jobs=[];f.queue.enqueue([id,noteId]);await f.queue.waitForIdle();
+ f.queue.jobs=[];await f.queue.enqueue([id,noteId]);await f.queue.waitForIdle();
  assert.equal(f.queue.jobs.find(j=>j.id===id).state,'unavailable');assert.equal(f.queue.jobs.find(j=>j.id===noteId).state,'complete');
  assert.equal(f.queue.paused,false);assert.equal(f.queue.taskRows.page({tab:'failed'}).total,0);assert.equal(f.pageCalls,0);
 });

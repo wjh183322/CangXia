@@ -28,4 +28,5 @@ assert.equal(manifest.version,expected.version);
 for(const key of ['name','main','type','dependencies'])assert.deepEqual(manifest[key],expected[key],`Packaged manifest ${key}`);
 assert.ok(asar.extractFile(archive,path.normalize('node_modules/ws/package.json')).length,'WebSocket dependency included');
 assert.ok(fs.existsSync(path.join(path.dirname(archive),'cover-helper','CangXiaCover.exe')),'Matching component included');
+assert.ok(files.includes('electron/download-analysis-entry.mjs'),'Download utility entry is covered by runtime equality checks');
 console.log(`Package archive verified: ${files.length} runtime files, version ${manifest.version}`);

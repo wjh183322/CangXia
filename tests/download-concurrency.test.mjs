@@ -9,13 +9,18 @@ import {DownloadQueue} from '../electron/downloads.mjs';
 import {Store} from '../electron/store.mjs';
 
 async function until(predicate){for(let i=0;i<500;i++){if(predicate())return;await delay(10);}assert.fail('timed out');}
-function fixture(){const settings=new Map();let writes=0;const store={getSetting:k=>settings.get(k),setSetting:(k,v)=>{settings.set(k,structuredClone(v));if(k==='downloadJobs')writes++;},save(){},work:id=>({id,name:id})};const q=new DownloadQueue(store,{},null,()=>{});return {q,settings,writes:()=>writes};}
+async function fixture(t){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cx-pool-unit-')),store=await Store.open(path.join(dir,'library.sqlite'),path.join(dir,'media'));
+ for(let i=1;i<=6;i++)store.upsertWork({aweme_id:String(i),desc:'pool-'+i,images:[{url_list:['https://p3.douyinpic.com/fixture.jpg']}]});
+ store.fileStates.confirmWritten=async()=>true;const q=new DownloadQueue(store,{},null,()=>{});let writes=0;const flush=q.taskRows.flush.bind(q.taskRows);q.taskRows.flush=()=>{writes++;return flush();};
+ t.after(async t=>{await q.preparation?.close();q.pause();await q.waitForIdle();await store.fileStates.close();store.close();assert.equal(path.dirname(dir),os.tmpdir());fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});});return {q,settings:{get:key=>store.getSetting(key)},writes:()=>writes};
+}
 
-test('pool enforces live limits, deduplicates enqueue, isolates failure and persists final states',async()=>{
- const {q,settings}=fixture(),gates=new Map(),starts=[];
+test('pool enforces live limits, deduplicates enqueue, isolates failure and persists final states',async t=>{
+ const {q,settings}=await fixture(t),gates=new Map(),starts=[];
  q.setConcurrency(2);q.saveWork=job=>new Promise((resolve,reject)=>{starts.push(job.id);gates.set(job.id,job.id==='3'?()=>reject(Error('fixture failed')):resolve);});
- q.enqueue(['1','2','3','4','5','6']);await until(()=>starts.length===2);
- q.enqueue(['1','2','3']);assert.equal(q.jobs.length,6);
+ await q.enqueue(['1','2','3','4','5','6']);await until(()=>starts.length===2);
+ await q.enqueue(['1','2','3']);assert.equal(q.jobs.length,6);
  q.setConcurrency(3);await until(()=>starts.length===3);assert.equal(q.active.size,3);
  q.setConcurrency(1);gates.get('1')();gates.get('2')();await delay(30);assert.equal(starts.length,3);
  gates.get('3')();await until(()=>starts.length===4);assert.equal(q.active.size,1);
@@ -25,42 +30,42 @@ test('pool enforces live limits, deduplicates enqueue, isolates failure and pers
  assert.throws(()=>q.setConcurrency(7));assert.throws(()=>q.setConcurrency('3'));
 });
 
-test('pause drains all active jobs, blocks queued metadata queries and resumes without duplicate work',async()=>{
- const {q}=fixture();let calls=0,release;
+test('pause drains all active jobs, blocks queued metadata queries and resumes without duplicate work',async t=>{
+ const {q}=await fixture(t);let calls=0,release;
  q.collector={resolveWork:()=>{calls++;return new Promise((resolve,reject)=>{release=resolve;q.collector.cancelResolve=()=>reject(Error('paused'));});}};
  q.saveWork=(job,signal)=>q.resolveWork(job.id,signal);
- q.enqueue(['1','2','3','4']);await until(()=>calls===1&&q.active.size===3);q.pause();await q.waitForIdle();
+ await q.enqueue(['1','2','3','4']);await until(()=>calls===1&&q.active.size===3);q.pause();await q.waitForIdle();
  assert.equal(calls,1);assert.equal(q.active.size,0);assert.ok(q.jobs.every(j=>j.state==='waiting'));
- q.collector.resolveWork=async()=>{calls++;await delay(5);};q.resume();await q.waitForIdle();assert.equal(calls,5);assert.ok(q.jobs.every(j=>j.state==='complete'));
+ q.collector.resolveWork=async t=>{calls++;await delay(5);};q.resume();await q.waitForIdle();assert.equal(calls,5);assert.ok(q.jobs.every(j=>j.state==='complete'));
 });
 
-test('progress updates do not repeatedly serialize the full persisted queue',()=>{
- const {q,writes}=fixture();q.jobs=Array.from({length:30000},(_,i)=>({id:String(i),state:'waiting'}));
+test('progress updates do not repeatedly serialize the full persisted queue',async t=>{
+ const {q,writes}=await fixture(t);q.jobs=Array.from({length:30000},(_,i)=>({id:String(i),state:'waiting'}));
  q.emit(true);for(let i=0;i<1000;i++)q.emit();assert.equal(writes(),1);q.pause();assert.equal(writes(),2);
 });
 
-test('cancel one active task removes it durably while other tasks continue',async()=>{
- const {q,settings}=fixture(),finish=new Map();
+test('cancel one active task removes it durably while other tasks continue',async t=>{
+ const {q,settings}=await fixture(t),finish=new Map();
  q.saveWork=(job,signal)=>new Promise((resolve,reject)=>{finish.set(job.id,resolve);signal.addEventListener('abort',()=>reject(signal.reason),{once:true});});
- q.enqueue(['1','2','3']);await until(()=>finish.size===3);assert.equal((await q.cancel(['1'])).cancelled,1);
+ await q.enqueue(['1','2','3']);await until(()=>finish.size===3);assert.equal((await q.cancel(['1'])).cancelled,1);
  assert.equal(q.paused,false);assert.deepEqual(q.jobs.map(j=>j.id),['2','3']);assert.ok(!settings.get('downloadJobs').some(j=>j.id==='1'));
  finish.get('2')();finish.get('3')();await q.waitForIdle();assert.ok(q.jobs.every(j=>j.state==='complete'));
  const restarted=new DownloadQueue(q.store,{},null,()=>{});assert.deepEqual(restarted.jobs.map(j=>j.id),['2','3']);
 });
 
-test('cancel a queued resource lookup returns promptly without interrupting the resolver ahead',async()=>{
- const {q}=fixture();let release;const calls=[];
+test('cancel a queued resource lookup returns promptly without interrupting the resolver ahead',async t=>{
+ const {q}=await fixture(t);let release;const calls=[];
  q.collector.resolveWork=async(id,{signal})=>{calls.push(id);if(id==='1')await new Promise(r=>release=r);assert.equal(signal.aborted,false);};
- q.saveWork=(job,signal)=>q.resolveWork(job.id,signal,job);q.enqueue(['1','2','3']);await until(()=>calls.length===1);
+ q.saveWork=(job,signal)=>q.resolveWork(job.id,signal,job);await q.enqueue(['1','2','3']);await until(()=>calls.length===1);
  await Promise.race([q.cancel(['2']),delay(1000).then(()=>{throw Error('cancel waited for another task');})]);
  assert.deepEqual(calls,['1']);release();await q.waitForIdle();assert.deepEqual(calls,['1','3']);
 });
 
-test('cancel all removes waiting and failed jobs, preserving completed history',async()=>{
- const {q,settings}=fixture();q.jobs=[{id:'1',state:'complete'},{id:'2',state:'waiting'},{id:'3',state:'failed'}];q.paused=true;
+test('cancel all removes waiting and failed jobs, preserving completed history',async t=>{
+ const {q,settings}=await fixture(t);q.jobs=[{id:'1',state:'complete'},{id:'2',state:'waiting'},{id:'3',state:'failed'}];q.paused=true;
  assert.equal((await q.cancel()).cancelled,2);assert.deepEqual(q.jobs,[{id:'1',state:'complete'}]);assert.deepEqual(settings.get('downloadJobs').map(j=>j.id),['1']);
 });
-test('a stale failed-page cancellation cannot cancel a task that has moved to active',async()=>{const {q}=fixture();q.jobs=[{id:'1',state:'waiting'},{id:'2',state:'failed'}];const report=await q.cancel(['1','2'],{state:'failed'});assert.equal(report.cancelled,1);assert.deepEqual(q.jobs.map(j=>j.id),['1']);});
+test('a stale failed-page cancellation cannot cancel a task that has moved to active',async t=>{const {q}=await fixture(t);q.jobs=[{id:'1',state:'waiting'},{id:'2',state:'failed'}];const report=await q.cancel(['1','2'],{state:'failed'});assert.equal(report.cancelled,1);assert.deepEqual(q.jobs.map(j=>j.id),['1']);});
 
 test('cancel during a later image transfer cleans task files while preserving collection and NAS records',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cangxia-cancel-')),store=await Store.open(path.join(root,'db.sqlite'),path.join(root,'media'));
@@ -68,9 +73,9 @@ test('cancel during a later image transfer cleans task files while preserving co
   if(url.endsWith('/1.jpg'))return new Response('retained-image',{headers:{'content-type':'image/jpeg'}});
   secondStarted=true;return new Response(new ReadableStream({start(controller){signal.addEventListener('abort',()=>controller.error(signal.reason),{once:true});}}),{headers:{'content-type':'image/jpeg'}});
  },()=>{});
- t.after(async()=>{q.pause();await q.waitForIdle();store.close();fs.rmSync(root,{recursive:true,force:true});});
+ t.after(async t=>{q.pause();await q.waitForIdle();store.close();fs.rmSync(root,{recursive:true,force:true});});
  store.upsertWork({aweme_id:'1',desc:'retain',images:[{url_list:['https://p3.douyinpic.com/1.jpg']},{url_list:['https://p3.douyinpic.com/2.jpg']}]});store.ingestMembers('__all__',['1'],true);store.put('backup_downloads','1',{id:'1',assets:[{file:'NAS-preserved'}]});
- const backup=store.get('backup_downloads','1');q.enqueue(['1']);await until(()=>secondStarted);const dir=store.download('1').path;await q.cancel(['1']);await q.waitForIdle();
+ const backup=store.get('backup_downloads','1');await q.enqueue(['1']);await until(()=>secondStarted);const dir=store.download('1').path;await q.cancel(['1']);await q.waitForIdle();
  assert.equal(q.jobs.length,0);assert.equal(store.download('1'),null);assert.deepEqual(fs.readdirSync(dir),[]);assert.ok(store.hasRead('1'));assert.deepEqual(store.rows('SELECT work_id FROM members'),[{work_id:'1'}]);assert.deepEqual(store.get('backup_downloads','1'),backup);
 });
 
@@ -85,9 +90,9 @@ test('six cached HTTP transfers run without metadata queries and resume verified
   res.on('close',()=>{clearInterval(timer);sockets--;});
  });await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const q=new DownloadQueue(store,{resolveWork:async id=>{queries++;queryPeak=Math.max(queryPeak,queries);await delay(10);queries--;return store.work(id);}},(url,opts)=>fetch(`http://127.0.0.1:${server.address().port}/${new URL(url).pathname}`,opts),()=>{});
- t.after(async()=>{q.pause();await q.waitForIdle();server.closeAllConnections();await new Promise(r=>server.close(r));store.close();fs.rmSync(root,{recursive:true,force:true});});
+ t.after(async t=>{q.pause();await q.waitForIdle();server.closeAllConnections();await new Promise(r=>server.close(r));store.close();fs.rmSync(root,{recursive:true,force:true});});
  for(let id=1;id<=6;id++)store.upsertWork({aweme_id:String(id),desc:'pool '+id,images:[{url_list:[`https://p3.douyinpic.com/${id}.jpg`]}]});
- q.setConcurrency(6);q.enqueue(['1','2','3','4','5','6']);await until(()=>sockets===6);await until(()=>['1','2','3','4','5','6'].every(id=>{const d=store.download(id);return d&&fs.statSync(path.join(d.path,'图片-001.jpg.part'),{throwIfNoEntry:false})?.size>0;}));q.pause();await q.waitForIdle();await until(()=>sockets===0);
+ q.setConcurrency(6);await q.enqueue(['1','2','3','4','5','6']);await until(()=>sockets===6);await until(()=>['1','2','3','4','5','6'].every(id=>{const d=store.download(id);return d&&fs.statSync(path.join(d.path,'图片-001.jpg.part'),{throwIfNoEntry:false})?.size>0;}));q.pause();await q.waitForIdle();await until(()=>sockets===0);
  assert.equal(q.active.size,0);assert.ok(q.jobs.every(j=>j.state==='waiting'));q.resume();await q.waitForIdle();
  assert.equal(peak,6);assert.equal(queryPeak,0);assert.ok(ranges>=6,'each interrupted transfer resumed');assert.ok(q.jobs.every(j=>j.state==='complete'));
  for(let id=1;id<=6;id++){const d=store.download(String(id));const a=d.assets.find(a=>a.key==='image-0');assert.deepEqual(fs.readFileSync(path.join(d.path,a.file)),bytes);}
