@@ -104,7 +104,7 @@ export class DownloadQueue {
     if(!['douyin','nas'].includes(source))throw Error('下载来源无效');
     this.preparation ||= new DownloadPreparation({store:this.store,queue:this,onChange:()=>this.notify()});
     const result=await this.preparation.submit({ids,source,coverOnly,catalogueLibrary,kind:'exact'});
-    if(result.phase==='failed')throw Object.assign(Error(result.message),{code:'PREPARATION_FAILED',operationId:result.operationId,accepted:result.queued});
+    if(['failed','stopped'].includes(result.phase))throw Object.assign(Error(result.message),{code:result.phase==='stopped'?'PREPARATION_STOPPED':'PREPARATION_FAILED',operationId:result.operationId,accepted:result.queued});
     return result.queued;
   }
   pause() { if(this.preparation?.controller)this.preparation.stop(this.preparation.state().operationId);this.paused = true;for(const task of this.active.values())task.controller.abort();if(this.resolving)this.collector.cancelResolve?.('下载已暂停');this.wake?.();this.emit(true);this.store.save(); }

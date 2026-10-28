@@ -44,6 +44,6 @@ export class SearchIndex{
   for(const [selected,prefix,mode]of [[tags,'tag:',tagMode],[localTags,'localtag:',localTagMode]])if(selected.length){if(mode==='all')for(const value of selected)filters.push(this.bucket(prefix+value));else{const union=new Set();for(const value of selected)for(const id of this.bucket(prefix+value))union.add(id);filters.push(union);}}
   const text=query.trim().toLocaleLowerCase();if(this.fts&&Array.from(text).length>=3&&!text.includes('\0')){try{const phrase='"'+text.replaceAll('"','""')+'"';filters.push(new Set(this.store.rows('SELECT search_rows.id FROM search_fts JOIN search_rows ON search_rows.rowid=search_fts.rowid WHERE search_fts MATCH ?',[phrase]).map(r=>r.id)));}catch{/* Exact cached substring matching remains available. */}}
   const matched=[];let checked=0;for(const id of new Set(ids)){signal?.throwIfAborted();if(filters.every(set=>set.has(id))&&(!text||this.rows.get(id)?.text.includes(text)))matched.push(id);if(++checked%500===0)await yieldLoop();}if(sort==='original')return matched;
-  return orderSizeEntries(matched.map((id,rank)=>{const row=this.rows.get(id);return {id,rank,bytes:row?.localBytes||0,known:!!row?.sizeKnown};}),sort);
+  return orderSizeEntries(matched.map((id,rank)=>{const row=this.rows.get(id);return {id,rank,bytes:row?.localBytes||0,known:!!row?.sizeKnown};}),sort,{signal});
  }
 }

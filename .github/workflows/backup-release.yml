@@ -91,6 +91,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/responsiveness-desktop-test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/benchmark-download-snapshot.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/source-json-browser-test.mjs --packaged
@@ -114,6 +116,7 @@ jobs:
             .test-output/source-status-*.png
             .test-output/backup-desktop-result.json
             .test-output/responsiveness-desktop*.json
+            .test-output/responsiveness-snapshot.json
             .test-output/local-filter-layout-visibility.json
             .test-output/source-json-browser-result.json
             .test-output/preview-files-desktop-result.json

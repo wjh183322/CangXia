@@ -91,7 +91,7 @@ function handler(name, action) {
       if(scopedActive()){
         if(['prepareCatalogueDeletion','prepareNASRestore','confirmNASRestore','resolveDeletionPending','refreshFiles','audioResume','flatStart','flatResume','flatRetry','startRepairs','resume','logout','openAccount','startQrLogin','finishLogin','importLoginConfig','configureBackup','checkBackup','syncBackup','acceptRemoteBackup','importExistingLibrary','chooseRoot','resumeReconcile','sync','confirmCollectionRead','readAuthor','addAuthor','archiveAuthor','addCollections','importLink','prepareScopedDeletion','retryScopedDeletion'].includes(name))throw Error('正在处理删除范围，请先停止并等待当前步骤完成');
         const listMethods=['download','retryDownloads','previewDownloads','repairVideoCover','flatPrepare','audioSave','audioRemove'];
-        const targets=name==='retryDownloads'&&args[0]===null?queue.jobs.filter(j=>j.state==='failed').map(j=>j.id):listMethods.includes(name)?(name==='flatPrepare'?args[1]:args[0]):['audioPrepare','audioRefresh','checkSource','setTags','markSourceUnavailable'].includes(name)?[args[0]]:[];
+        const targets=name==='startDownloadPreparation'?args[0]?.ids:name==='continueDownloadPreparation'?queue.jobs.filter(j=>j.admission?.operationId===args[0]&&j.admission.held).map(j=>j.id):name==='retryDownloads'&&args[0]===null?queue.jobs.filter(j=>j.state==='failed').map(j=>j.id):listMethods.includes(name)?(name==='flatPrepare'?args[1]:args[0]):['audioPrepare','audioRefresh','checkSource','setTags','markSourceUnavailable'].includes(name)?[args[0]]:[];
         if(Array.isArray(targets)&&targets.some(id=>scopedFileIds.has(id)))throw Error('所选作品正在进行文件删除，请等待当前步骤完成');
       }
       if(writes.has(name))backup.assertWritable();
