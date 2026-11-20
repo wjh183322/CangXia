@@ -41,6 +41,7 @@ const staleAuth = () => new ProbeError('STALE_AUTH_EPOCH', 'The source authoriza
 const authRequired = () => new ProbeError('PROBE_AUTH_REQUIRED', 'Verify the normal browser login before reading the source.');
 const staleView = () => new ProbeError('STALE_BROWSER_VIEW', 'Refresh the verification view before sending input.');
 const panelRequired = () => new ProbeError('PROBE_VERIFICATION_PANEL_REQUIRED', 'The official page has no recognized verification panel.');
+const restartRequired = () => new ProbeError('PROBE_BROWSER_RESTART_REQUIRED', 'Restart the probe browser to restore verification access.');
 const invalidInput = () => new ProbeError('INVALID_BROWSER_INPUT', 'The verification input is outside the supported controls.');
 const invalidRoute = () => new ProbeError('PROBE_BROWSER_ROUTE', 'The probe only accepts supported read-only browser requests.');
 const requestFailed = () => new ProbeError('PROBE_BROWSER_REQUEST', 'The source browser request failed.');
@@ -375,6 +376,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   let binding;
   let pageRevision = randomInt(1, 2 ** 31);
   let epochController = new AbortController();
+  let verificationBlocked = false;
   let login;
   let reader;
   let detail;
@@ -465,17 +467,55 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     return { pageRevision, width: login?.panel?.width ?? 0, height: login?.panel?.height ?? 0 };
   }
 
-  function assertView(revision) {
+  function assertVerificationAvailable() {
     assertOpen();
+    if (verificationBlocked) throw restartRequired();
+  }
+
+  function assertView(revision) {
+    assertVerificationAvailable();
     if (!trustedView(login) || revision !== pageRevision) throw staleView();
     return login;
+  }
+
+  async function retireLogin(slot) {
+    if (login === slot) {
+      login = undefined;
+      pageRevision++;
+    }
+    pages.delete(slot.page);
+    if (!slot.page.isClosed()) {
+      await browserCall(() => slot.page.close({ runBeforeUnload: false })).catch(() => {});
+    }
+    if (!slot.page.isClosed()) {
+      verificationBlocked = true;
+      throw restartRequired();
+    }
+  }
+
+  async function mutateLogin(slot, revision, task) {
+    let dispatched = false;
+    try {
+      return await browserCall(() => {
+        assertView(revision);
+        dispatched = true;
+        return task();
+      }, epochController.signal);
+    } catch (error) {
+      if (!dispatched) throw error;
+      // The driver can reject before the browser has finished applying the action.
+      await retireLogin(slot);
+      if (error instanceof ProbeError) throw error;
+      throw new ProbeError('PROBE_BROWSER_INPUT', 'The verification action could not be confirmed.');
+    }
   }
 
   async function refreshPanel(slot, action) {
     const revision = pageRevision;
     assertView(revision);
     const { page, viewProbe } = slot;
-    const result = await browserCall(() => page.evaluate(panelScript, { viewProbe, ...action }), epochController.signal);
+    const inspect = () => page.evaluate(panelScript, { viewProbe, ...action });
+    const result = await (action?.action === 'open' ? mutateLogin(slot, revision, inspect) : browserCall(inspect, epochController.signal));
     assertView(revision);
     let panel = null;
     if (validPanel(result) && result.x + result.width <= viewport.width && result.y + result.height <= viewport.height &&
@@ -486,14 +526,14 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     if (JSON.stringify(panel) !== JSON.stringify(slot.panel)) {
       slot.panel = panel;
       pageRevision++;
-      if (slot.pressed) await browserCall(() => page.close(), epochController.signal);
+      if (slot.pressed) await retireLogin(slot);
     }
     return result?.allowed === true;
   }
 
   function openLogin() {
     return withView(async () => {
-      assertOpen();
+      assertVerificationAvailable();
       try {
         if (!trustedView(login)) {
           invalidate();
@@ -548,10 +588,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         const allowed = await refreshPanel(slot, { action: type, ...position });
         assertView(revision);
         if (!allowed) throw invalidInput();
-        const run = task => browserCall(() => {
-          assertView(revision);
-          return task();
-        }, epochController.signal);
+        const run = task => mutateLogin(slot, revision, task);
         if (type === 'text') await run(() => keyboard.insertText(text));
         else if (type === 'key') await run(() => keyboard.press(key));
         else if (type === 'click' && !slot.pressed) await run(() => mouse.click(position.x, position.y));
@@ -567,8 +604,8 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
           await run(() => mouse[type]());
         } else throw invalidInput();
       } catch (error) {
-        assertView(revision);
         if (error instanceof ProbeError) throw error;
+        assertView(revision);
         throw new ProbeError('PROBE_BROWSER_INPUT', 'The verification page could not receive input.');
       }
       assertView(revision);
@@ -657,7 +694,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   function verifyIdentity() {
     return withView(async () => {
-      assertOpen();
+      assertVerificationAvailable();
       verifying = true;
       try {
         return await withSource(async () => {
@@ -723,8 +760,8 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         signal.throwIfAborted();
         assertNoCooldown();
         const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal);
-        await assertSession(authEpoch, signal);
         await beforeRead(signal);
+        await assertSession(authEpoch, signal);
         assertAuthEpoch(authEpoch);
         const result = await read(slot, query, signal);
         await assertSession(authEpoch, signal);

@@ -74,7 +74,10 @@ class FakeContext extends EventEmitter {
     const children = [];
     let href = 'about:blank';
     let closed = false;
-    const input = (type, ...args) => context.input.push({ page, type, args });
+    const input = async (type, ...args) => {
+      await context.beforeInput?.(type, page);
+      if (!closed) context.input.push({ page, type, args });
+    };
     const window = {};
     page.url = () => href;
     page.mainFrame = () => frame;
@@ -92,7 +95,11 @@ class FakeContext extends EventEmitter {
       page.emit('framenavigated', child);
       return child;
     };
-    page.close = async () => { closed = true; page.emit('close'); };
+    page.close = async () => {
+      await context.beforePageClose?.(page);
+      closed = true;
+      page.emit('close');
+    };
     page.screenshot = async options => {
       assert.equal(options.path, undefined);
       context.lastShot = options;
@@ -104,6 +111,10 @@ class FakeContext extends EventEmitter {
     };
     page.keyboard = { insertText: async text => input('text', text), press: async key => input('key', key) };
     page.evaluate = async (fn, arg) => {
+      if (arg?.viewProbe) {
+        await context.beforePanel?.(arg.action, page);
+        if (closed) return null;
+      }
       if (arg?.viewProbe && !context.panelDocument) return context.panel && { ...context.panel, allowed: context.allowTarget !== false };
       if (fn.toString().includes('navigator.userAgent')) await context.onUserAgent?.();
       return runInNewContext(`(${fn})(arg)`, {
@@ -154,7 +165,10 @@ async function fixture(t, { launch, defer = false } = {}) {
   const clock = {
     now: () => time,
     advance(ms) { time += ms; },
-    setTimeout(callback, ms) { time += ms; return setImmediate(callback); },
+    setTimeout(callback, ms) {
+      time += ms;
+      return setImmediate(() => { clock.onPaceWait?.(); callback(); });
+    },
     clearTimeout: clearImmediate
   };
   browser.clock = clock;
@@ -343,6 +357,84 @@ test('panel redraw or movement retires an older frame revision', async t => {
   await assert.rejects(gateway.frame(updated), { code: 'STALE_BROWSER_VIEW' });
 });
 
+test('timed-out pointer dispatch retires its page before replacement input', async t => {
+  const { browser, gateway } = await fixture(t);
+  const view = await gateway.openLogin();
+  const old = browser.pages()[0];
+  let releaseClick;
+  let releaseClose;
+  browser.beforeInput = () => new Promise(resolve => { releaseClick = resolve; });
+  browser.beforePageClose = () => new Promise(resolve => {
+    releaseClose = resolve;
+    browser.emit('closing-login');
+  });
+  const closing = once(browser, 'closing-login');
+  const timedOut = assert.rejects(gateway.input({ ...view, type: 'click', x: 2, y: 3 }), { code: 'PROBE_BROWSER_TIMEOUT' });
+  await closing;
+  const reopening = gateway.openLogin();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(browser.pages(), [old]);
+  browser.beforePageClose = undefined;
+  releaseClose();
+  await timedOut;
+  assert.equal(old.isClosed(), true);
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 2, y: 3 }), { code: 'STALE_BROWSER_VIEW' });
+  browser.beforeInput = undefined;
+  const replacement = await reopening;
+  assert.notEqual(replacement.pageRevision, view.pageRevision);
+  assert.notEqual(browser.pages()[0], old);
+  await gateway.input({ ...replacement, type: 'click', x: 2, y: 3 });
+  releaseClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(browser.input.map(action => action.page), [browser.pages()[0]]);
+});
+
+test('timed-out login-opening action retires its page before creating a new view', async t => {
+  const { browser, gateway } = await fixture(t);
+  let releaseOpen;
+  let old;
+  browser.beforePanel = (action, page) => {
+    if (action !== 'open') return;
+    old = page;
+    return new Promise(resolve => { releaseOpen = resolve; });
+  };
+  await assert.rejects(gateway.openLogin(), { code: 'PROBE_BROWSER_TIMEOUT' });
+  assert.equal(old.isClosed(), true);
+  browser.beforePanel = undefined;
+  const replacement = await gateway.openLogin();
+  releaseOpen();
+  assert.notEqual(browser.pages()[0], old);
+  assert.equal((await gateway.frame(replacement)).width, panelRect.width);
+});
+
+test('if retirement cannot be confirmed the login view remains locked until restart', async t => {
+  const { browser, gateway, open } = await fixture(t);
+  const view = await gateway.openLogin();
+  const old = browser.pages()[0];
+  browser.beforeInput = () => { throw new Error('fixture error after dispatch'); };
+  browser.beforePageClose = () => { throw new Error('fixture close failed'); };
+  await assert.rejects(gateway.input({ ...view, type: 'text', text: 'test' }), { code: 'PROBE_BROWSER_RESTART_REQUIRED' });
+  browser.beforeInput = undefined;
+  browser.beforePageClose = undefined;
+  await old.close();
+  await assert.rejects(gateway.openLogin(), { code: 'PROBE_BROWSER_RESTART_REQUIRED' });
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 2, y: 3 }), { code: 'PROBE_BROWSER_RESTART_REQUIRED' });
+  await assert.rejects(gateway.verifyIdentity(), { code: 'PROBE_BROWSER_RESTART_REQUIRED' });
+  await gateway.close();
+  assert.equal((await (await open()).openLogin()).width, panelRect.width);
+});
+
+test('a read-only panel inspection failure leaves the same view usable', async t => {
+  const { browser, gateway } = await fixture(t);
+  const view = await gateway.openLogin();
+  const page = browser.pages()[0];
+  browser.beforePanel = () => { throw new Error('fixture inspect failure'); };
+  await assert.rejects(gateway.frame(view), { code: 'PROBE_BROWSER_FRAME' });
+  browser.beforePanel = undefined;
+  assert.equal(page.isClosed(), false);
+  assert.equal((await gateway.frame(view)).pageRevision, view.pageRevision);
+});
+
 test('foreign child document requests and a committed redirected frame cannot be exposed', async t => {
   const { browser, gateway } = await fixture(t);
   const view = await gateway.openLogin();
@@ -445,6 +537,14 @@ test('a slow authorization check cannot collapse the spacing between actual fetc
   await gateway.request(detail, opts);
   await gateway.request(detail, opts);
   assert.ok(browser.reads[2].clock - browser.reads[1].clock >= 1100);
+});
+
+test('session changes during pacing reject before dispatching a source read', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  browser.clock.onPaceWait = () => { browser.session = 'different-account-session'; };
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'STALE_AUTH_EPOCH' });
+  assert.equal(browser.reads.length, 1);
 });
 
 test('stalled cookie reads time out and release the source queue', { timeout: 6000 }, async t => {
