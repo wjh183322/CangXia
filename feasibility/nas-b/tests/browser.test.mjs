@@ -744,12 +744,39 @@ test('a direct browser-directory link is rejected without touching its target', 
   assert.equal(await sandbox.read('browser-outside/preferences'), 'fixture');
 });
 
-test('Linux Chromium may check its own stale singleton artifacts', { skip: process.platform !== 'linux' }, async t => {
-  const { layout, open } = await fixture(t, { defer: true });
-  await symlink('fixture-host-2147483647', path.join(layout.browser, 'SingletonLock'));
-  await symlink('987654321', path.join(layout.browser, 'SingletonCookie'));
-  await symlink(path.join(tmpdir(), '.org.chromium.Chromium.abc123', 'SingletonSocket'), path.join(layout.browser, 'SingletonSocket'));
-  await open();
+test('Linux Chromium accepts only its known stale singleton names and locations', { skip: process.platform !== 'linux' }, async t => {
+  const temp = path.resolve(tmpdir());
+  for (const [parent, allowed] of [
+    [path.join(temp, '.org.chromium.Chromium.abc123'), true],
+    [path.join(temp, '.com.google.Chrome.beta.Ab_12-'), true],
+    ['/tmp/org.chromium.Chromium.aBc123', temp === '/tmp'],
+    ['/tmp/com.google.Chrome.Zx0129', temp === '/tmp'],
+    [path.join(temp + '-sibling', 'org.chromium.Chromium.abc123'), false],
+    [path.join(temp, 'elsewhere', 'org.chromium.Chromium.abc123'), false],
+    [path.join(temp, 'org.chromium.Chromium.abc12'), false],
+    [path.join(temp, 'org.chromium.Chromium.Ab_12-'), false],
+    [path.join(temp, 'com.google.Chrome.beta.abc123'), false],
+    [path.join(temp, 'some-other-browser.abc123'), false]
+  ]) {
+    await t.test(parent, async t => {
+      const { layout, open } = await fixture(t, {
+        defer: true, launch: allowed ? undefined : () => assert.fail('unsafe singleton link reached Chromium')
+      });
+      await symlink('fixture-host-2147483647', path.join(layout.browser, 'SingletonLock'));
+      await symlink('987654321', path.join(layout.browser, 'SingletonCookie'));
+      await symlink(path.join(parent, 'SingletonSocket'), path.join(layout.browser, 'SingletonSocket'));
+      if (allowed) await open();
+      else await assert.rejects(open(), { code: 'UNSAFE_BROWSER_PROFILE' });
+    });
+  }
+});
+
+test('Linux Chromium cannot use a singleton shortcut below the profile root', { skip: process.platform !== 'linux' }, async t => {
+  const { layout, open } = await fixture(t, { defer: true, launch: () => assert.fail('nested singleton link reached Chromium') });
+  const nested = path.join(layout.browser, 'Default');
+  await mkdir(nested);
+  await symlink('/tmp/org.chromium.Chromium.aBc123/SingletonSocket', path.join(nested, 'SingletonSocket'));
+  await assert.rejects(open(), { code: 'UNSAFE_BROWSER_PROFILE' });
 });
 
 test('the synchronous request fence runs after pacing and session checks but before the source fetch', async t => {

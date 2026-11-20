@@ -177,20 +177,40 @@ jobs:
 
           docker run -d --name "$container" "${flags[@]}" "${env_vars[@]}" \
             --mount "type=bind,src=$app_root,dst=/probe" "$PROBE_IMAGE" >/dev/null
-          for attempt in $(seq 1 60); do
-            read -r running health < <(docker inspect -f '{{.State.Running}} {{.State.Health.Status}}' "$container")
-            if [[ "$health" == healthy || "$running" == false ]]; then break; fi
-            sleep 2
-          done
-          if [[ "$health" != healthy ]]; then
-            docker logs "$container"
-            exit 1
-          fi
-          docker exec "$container" node /opt/cangxia/feasibility/nas-b/scripts/health.mjs
+          require_probe_health() {
+            local attempt running health
+            for attempt in $(seq 1 60); do
+              read -r running health < <(docker inspect -f '{{.State.Running}} {{.State.Health.Status}}' "$container")
+              if [[ "$health" == healthy || "$running" == false ]]; then break; fi
+              sleep 2
+            done
+            if [[ "$health" != healthy ]]; then
+              docker logs "$container"
+              return 1
+            fi
+            docker exec "$container" node /opt/cangxia/feasibility/nas-b/scripts/health.mjs
+          }
+          require_probe_health
           [[ "$(docker exec "$container" id -u)" == "$(id -u)" ]]
           [[ "$(docker exec "$container" id -g)" == "$(id -g)" ]]
           [[ "$(stat -c '%a' "$app_root/state/access.token")" == 600 ]]
           [[ "$(stat -c '%a' "$app_root/state/server.key")" == 600 ]]
+          singleton="$app_root/browser/SingletonSocket"
+          singleton_target=$(readlink -- "$singleton")
+          singleton_pattern='^/tmp/(org[.]chromium[.]Chromium|com[.]google[.]Chrome)[.][A-Za-z0-9]{6}/SingletonSocket$'
+          [[ "$singleton_target" =~ $singleton_pattern ]]
+          docker stop --time 30 "$container" >/dev/null
+          [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
+
+          # Reuse only the observed Chromium link if graceful shutdown removed it.
+          if [[ -L "$singleton" ]]; then
+            [[ "$(readlink -- "$singleton")" == "$singleton_target" ]]
+          else
+            [[ ! -e "$singleton" ]]
+            ln -s -- "$singleton_target" "$singleton"
+          fi
+          docker start "$container" >/dev/null
+          require_probe_health
           docker stop --time 30 "$container" >/dev/null
           [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
 
@@ -212,6 +232,6 @@ jobs:
             printf -- '- Local image config: `%s`\n' "$(docker image inspect --format '{{.Id}}' "$PROBE_IMAGE")"
             printf -- '- Merged filesystem and layer ancestry: `%s`\n' "$(cat "$RUNNER_TEMP/probe-audit.json")"
             printf -- '- Post-base layer audit: `%s`\n' "$(cat "$RUNNER_TEMP/probe-layer-audit.json")"
-            printf -- '- Non-root app, TLS and disposable Linux mount smoke passed.\n'
+            printf -- '- Non-root app, TLS, same-mount restart and disposable Linux file checks passed.\n'
             printf -- '- Registry publication and NAS deployment are pending.\n'
           } >> "$GITHUB_STEP_SUMMARY"

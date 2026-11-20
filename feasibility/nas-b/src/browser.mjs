@@ -74,8 +74,11 @@ async function chromiumSingleton(directory, name) {
     case 'SingletonSocket': {
       const parent = path.dirname(link);
       const temp = path.resolve(tmpdir());
-      return path.join(parent, 'SingletonSocket') === link && path.dirname(parent) === temp &&
-        /^\.(?:org\.chromium\.Chromium|com\.google\.Chrome(?:\.[a-z-]+)?)\.[\w-]{6}$/.test(path.basename(parent));
+      const parentName = path.basename(parent);
+      const legacyName = /^\.(?:org\.chromium\.Chromium|com\.google\.Chrome(?:\.[a-z-]+)?)\.[\w-]{6}$/.test(parentName);
+      // Current Chromium uses an unhidden mkdtemp directory for its singleton socket.
+      const currentName = temp === '/tmp' && /^(?:org\.chromium\.Chromium|com\.google\.Chrome)\.[a-zA-Z0-9]{6}$/.test(parentName);
+      return path.join(parent, 'SingletonSocket') === link && path.dirname(parent) === temp && (legacyName || currentName);
     }
     default: return false;
   }
