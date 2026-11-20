@@ -7,6 +7,8 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { openBrowserGateway } from '../src/browser.mjs';
 import { ProbeError } from '../src/contracts.mjs';
+import { createLeaseManager } from '../src/lease.mjs';
+import { createReadCoordinator } from '../src/read-jobs.mjs';
 import { openProbeStore } from '../src/store.mjs';
 import { makeSandbox, sourceFixture } from './helpers.mjs';
 import { parseSourcePage } from '../src/page-parser.mjs';
@@ -713,4 +715,98 @@ test('a page that starts loading at reservation time reports a definitely unsent
   browser.readyState = 'complete';
   assert.equal((await gateway.request(detail, { authEpoch, params: { aweme_id: '1' } })).status, 200);
   assert.equal(browser.reads.length, prior + 1);
+});
+
+function workPageBody(count, id, caption) {
+  return JSON.stringify({
+    aweme_list: Array.from({ length: count }, () => ({ aweme_id: id, desc: caption })),
+    has_more: 0
+  });
+}
+
+test('a received page rejected after cookie rotation still reduces the durable NAS sample budget', async t => {
+  const { browser, gateway, store } = await fixture(t);
+  const leaseManager = createLeaseManager({ store, bootId: 'body-receipt-boot' });
+  const lease = leaseManager.acquire({ deviceId: 'device', instanceId: 'instance', operationId: 'receipt-lease' });
+  const reads = createReadCoordinator({ store, leases: leaseManager, gateway,
+    finalize: async () => ({ ok: true, pending: false, errors: [] }) });
+  const total = { kind: 'total', id: '__all__' };
+  const folder = { kind: 'collection', id: '10' };
+  async function settled(id) {
+    for (let i = 0; i < 40; i++) {
+      const job = reads.snapshot(id);
+      if (['paused', 'failed', 'complete'].includes(job.state)) return job;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.fail('The read did not reach a persisted boundary.');
+  }
+
+  const privateFixtureText = 'old-browser-reply-sentinel';
+  const initial = await gateway.verifyIdentity();
+  browser.reply = () => {
+    browser.session = 'fixture-renewed-cookie';
+    return new Response(workPageBody(272, '9991', privateFixtureText));
+  };
+  const first = reads.start({ source: total, operationId: 'old-session-source', lease, authEpoch: initial.authEpoch });
+  const fenced = await settled(first.id);
+  assert.deepEqual(fenced.reason, { code: 'STALE_AUTH_EPOCH', scope: 'global' });
+  assert.equal(store.readHead(total), null);
+  assert.equal(store.work('9991'), null);
+  const saved = store.db.prepare('SELECT value FROM runtime_meta WHERE key LIKE ?').all('read:%');
+  assert.equal(JSON.stringify(saved).includes(privateFixtureText), false);
+
+  const verifiedAgain = await gateway.verifyIdentity();
+  assert.equal(verifiedAgain.uid, initial.uid);
+  assert.notEqual(verifiedAgain.authEpoch, initial.authEpoch);
+  browser.reply = () => new Response(workPageBody(28, '9992', 'current reply'));
+  const next = reads.start({ source: folder, operationId: 'new-session-source', lease, authEpoch: verifiedAgain.authEpoch });
+  assert.equal((await settled(next.id)).savedReceived, 28);
+  assert.equal(browser.reads.at(-1).target.searchParams.get('count'), '28');
+  assert.throws(() => reads.start({ source: { kind: 'collection', id: '20' },
+    operationId: 'budget-exhausted-after-rotation', lease, authEpoch: verifiedAgain.authEpoch }), { code: 'PROBE_SAMPLE_LIMIT' });
+});
+
+test('a completed body is counted before a post-fetch cookie timeout without exposing its text', { timeout: 6000 }, async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const observed = [];
+  const sentinel = 'private-fixture-timeout-value';
+  browser.reply = () => {
+    browser.onCookies = () => new Promise(() => {});
+    return new Response(workPageBody(3, '9991', sentinel));
+  };
+  await assert.rejects(gateway.request(detail, {
+    authEpoch, params: { aweme_id: '9991' }, onReceivedRows(rows) { observed.push(rows); }
+  }), error => error.code === 'PROBE_BROWSER_TIMEOUT' && !JSON.stringify(error).includes(sentinel));
+  assert.deepEqual(observed, [3]);
+});
+
+test('a complete body delivered during fetch cancellation is accounted before rejecting', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const controller = new AbortController();
+  const observed = [];
+  browser.reply = () => {
+    controller.abort();
+    return new Response(workPageBody(4, '9991', 'private fixture data'));
+  };
+  await assert.rejects(gateway.request(detail, {
+    authEpoch, params: { aweme_id: '9991' }, signal: controller.signal,
+    onReceivedRows(rows) { observed.push(rows); }
+  }), { code: 'PROBE_BROWSER_CANCELLED' });
+  assert.deepEqual(observed, [4]);
+});
+
+test('a response with a stale page revision is accounted before it is rejected', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const observed = [];
+  browser.reply = () => {
+    browser.reads.at(-1).page.navigate(self + '?different-document=1');
+    return new Response(workPageBody(5, '9991', 'private fixture data'));
+  };
+  await assert.rejects(gateway.request(detail, {
+    authEpoch, params: { aweme_id: '9991' }, onReceivedRows(rows) { observed.push(rows); }
+  }), { code: 'PROBE_BROWSER_REQUEST' });
+  assert.deepEqual(observed, [5]);
 });

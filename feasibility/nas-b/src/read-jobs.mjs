@@ -245,10 +245,25 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
       });
     }
 
+    let receivedRows;
+    let fitsBudget;
+    function accountRows(rows) {
+      if (!worker.dispatched || receivedRows !== undefined || (rows !== null && (!Number.isSafeInteger(rows) || rows < 0))) {
+        throw error('PROBE_READ_DISPATCH', 'The source receipt is inconsistent with the outstanding request.');
+      }
+      receivedRows = rows;
+      try {
+        fitsBudget = settleBudget(rows);
+      } catch (cause) {
+        if (cause instanceof ProbeError) throw cause;
+        throw error('PROBE_READ_STORAGE', 'The received row budget could not be saved.');
+      }
+    }
+
     let reply;
     try {
       reply = await gateway.request(route, {
-        ...options, authEpoch, signal: controller.signal,
+        ...options, authEpoch, signal: controller.signal, onReceivedRows: accountRows,
         beforeDispatch() {
           let reserved = false;
           try {
@@ -277,7 +292,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
         worker.dispatched = false;
         refundUnsent();
       }
-      if (worker.dispatched && cause?.code === 'PROBE_BROWSER_RESPONSE_LIMIT') settleBudget(null);
+      if (worker.dispatched && receivedRows === undefined && cause?.code === 'PROBE_BROWSER_RESPONSE_LIMIT') accountRows(null);
       // A transport failure with no delivered body keeps the requested reservation.
       if (controller.signal.aborted) throw error(pauseReason.code, 'The read is pausing.');
       if (cause instanceof ProbeError) throw cause;
@@ -285,14 +300,15 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
     }
     if (!worker.dispatched) throw error('PROBE_READ_DISPATCH', 'The source request did not cross the dispatch fence.');
 
-    // Charge complete incoming envelopes before any work validation or page write.
-    const issue = inspectSourceResponse(reply, true);
-    if (!settleBudget(issue.rows)) throw limit();
+    const issue = inspectSourceResponse(reply, receivedRows === undefined);
+    // Alternate gateways may deliver the complete reply without a prior receipt.
+    if (receivedRows === undefined) accountRows(issue.rows);
+    if (!fitsBudget) throw limit();
     if (issue.code === 'PROBE_SOURCE_AUTH') throw error(issue.code, 'Verify the source login.');
     if (issue.code === 'PROBE_SOURCE_RATE_LIMITED') {
       throw new ProbeError(issue.code, 'The source requested a pause.', { retryAfter: issue.retryAfter });
     }
-    if (issue.rows === null) throw error('SOURCE_PAGE_INVALID', 'The source row count could not be bounded.');
+    if (receivedRows === null) throw error('SOURCE_PAGE_INVALID', 'The source row count could not be bounded.');
     const page = parseSourcePage({
       source, inputCursor: cursor, status: reply.status, text: reply.text, observedAt: new Date(clock.now()).toISOString()
     });

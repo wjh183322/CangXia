@@ -20,7 +20,7 @@ const driverTimeout = 2500;
 const maxResponseBytes = 8 * 1024 * 1024;
 const keys = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
 const pointerTypes = new Set(['click', 'move', 'down', 'up']);
-const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form', 'beforeDispatch']);
+const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form', 'beforeDispatch', 'onReceivedRows']);
 const routeParams = new Map([
   [selfRoute, []],
   [collectionRoute, []],
@@ -172,6 +172,7 @@ function approvedRead(route, options) {
   if (!params || !options || Object.keys(options).some(key => !requestFields.has(key)) ||
       (options.signal !== undefined && !(options.signal instanceof AbortSignal)) ||
       (options.beforeDispatch !== undefined && typeof options.beforeDispatch !== 'function') ||
+      (options.onReceivedRows !== undefined && typeof options.onReceivedRows !== 'function') ||
       (options.form !== undefined && route !== collectionRoute)) throw invalidRoute();
   try {
     return apiRequest(route, { method: options.method, params: readParams(options.params, params), form: readParams(options.form, ['cursor', 'count']) });
@@ -638,7 +639,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     assertNoCooldown();
   }
 
-  async function read(slot, request, signal) {
+  async function read(slot, request, signal, onReceivedRows) {
     const { page, revision } = slot;
     const key = '__cangxia_read_' + randomUUID().replaceAll('-', '');
     const timeout = AbortSignal.timeout(requestTimeout);
@@ -646,22 +647,33 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     const stop = () => {
       void page.evaluate(key => window[key]?.abort('cancelled'), key).catch(() => {});
     };
+    if (onReceivedRows) signal.addEventListener('abort', stop, { once: true });
     try {
       combined.throwIfAborted();
       if (page.isClosed() || !sourcePage(page.url(), slot.kind)) throw notDispatched();
       nextStart = clock.now() + 1100;
       const result = await abortable(page.evaluate(fetchInPage, {
         ...request, key, timeout: requestTimeout, maxBytes: maxResponseBytes
-      }), combined);
+      }), onReceivedRows ? timeout : combined);
+      const hasBody = typeof result?.text === 'string';
+      const validStatus = Number.isInteger(result?.status) && result.status >= 100 && result.status <= 599;
+      const tooLarge = result?.error === 'too-large' || hasBody && Buffer.byteLength(result.text) > maxResponseBytes;
+      // A rejected response can still consume sample rows. Report only its count
+      // before checking cancellation, page generation, or the signed-in session.
+      if (onReceivedRows && (hasBody || tooLarge)) {
+        let rows = null;
+        if (!tooLarge && validStatus) {
+          try { rows = inspectSourceResponse(result, true).rows; } catch { /* Body cannot be bounded. */ }
+        }
+        if (onReceivedRows(rows) !== undefined) throw invalidRoute();
+      }
       combined.throwIfAborted();
       // fetchInPage returns this outcome before calling fetch.
       if (result?.error === 'page-changed') throw notDispatched();
       if (result?.error === 'timeout') throw timedOut();
-      if (result?.error === 'too-large' || typeof result?.text === 'string' && Buffer.byteLength(result.text) > maxResponseBytes) {
-        throw new ProbeError('PROBE_BROWSER_RESPONSE_LIMIT', 'The source browser response exceeded the size limit.');
-      }
+      if (tooLarge) throw new ProbeError('PROBE_BROWSER_RESPONSE_LIMIT', 'The source browser response exceeded the size limit.');
       if (result?.error || revision !== slot.revision || page.isClosed() || !sourcePage(page.url(), slot.kind) ||
-          !Number.isInteger(result?.status) || result.status < 100 || result.status > 599 || typeof result.text !== 'string') {
+          !validStatus || !hasBody) {
         throw requestFailed();
       }
       const { status, text } = result;
@@ -669,11 +681,13 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       if (status === 429) rateLimit(retryAfter);
       return { status, text, retryAfter };
     } catch (error) {
-      if (combined.aborted) stop();
+      if (timeout.aborted || !onReceivedRows && combined.aborted) stop();
       if (signal.aborted) throw signal.reason;
       if (timeout.aborted) throw timedOut();
       if (error instanceof ProbeError) throw error;
       throw requestFailed();
+    } finally {
+      if (onReceivedRows) signal.removeEventListener('abort', stop);
     }
   }
 
@@ -756,31 +770,39 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   async function request(route, options = {}) {
     const query = approvedRead(route, options);
-    const { authEpoch, signal: callerSignal, beforeDispatch } = options;
+    const { authEpoch, signal: callerSignal, beforeDispatch, onReceivedRows } = options;
     assertAuthEpoch(authEpoch);
     const signals = callerSignal ? [epochController.signal, callerSignal] : [epochController.signal];
     const signal = AbortSignal.any(signals);
+    let accountingInFlight = false;
+    const queued = withSource(async () => {
+      assertAuthEpoch(authEpoch);
+      signal.throwIfAborted();
+      assertNoCooldown();
+      const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal);
+      await beforeRead(signal);
+      await assertSession(authEpoch, signal);
+      assertAuthEpoch(authEpoch);
+      // The caller may hold a separate server lease. Check it at actual dispatch.
+      if (beforeDispatch && beforeDispatch() !== undefined) throw invalidRoute();
+      accountingInFlight = Boolean(onReceivedRows);
+      const result = await read(slot, query, signal, onReceivedRows);
+      await assertSession(authEpoch, signal);
+      assertAuthEpoch(authEpoch);
+      const issue = inspectSourceResponse(result);
+      if (issue.code === 'PROBE_SOURCE_AUTH') invalidate();
+      if (issue.code === 'PROBE_SOURCE_RATE_LIMITED' && result.status === 200) rateLimit(issue.retryAfter);
+      return result;
+    });
     try {
-      return await abortable(withSource(async () => {
-        assertAuthEpoch(authEpoch);
-        signal.throwIfAborted();
-        assertNoCooldown();
-        const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal);
-        await beforeRead(signal);
-        await assertSession(authEpoch, signal);
-        assertAuthEpoch(authEpoch);
-        // The caller may hold a separate server lease. Check it at actual dispatch.
-        if (beforeDispatch && beforeDispatch() !== undefined) throw invalidRoute();
-        const result = await read(slot, query, signal);
-        await assertSession(authEpoch, signal);
-        assertAuthEpoch(authEpoch);
-        const issue = inspectSourceResponse(result);
-        if (issue.code === 'PROBE_SOURCE_AUTH') invalidate();
-        if (issue.code === 'PROBE_SOURCE_RATE_LIMITED' && result.status === 200) rateLimit(issue.retryAfter);
-        return result;
-      }), callerSignal);
+      return await abortable(queued, callerSignal);
     } catch (error) {
-      if (callerSignal?.aborted) throw new ProbeError('PROBE_BROWSER_CANCELLED', 'The source read was cancelled.');
+      if (callerSignal?.aborted) {
+        // An in-flight read gets its original deadline to account for a body
+        // already delivered by the driver. The browser fetch is cancelled immediately.
+        if (accountingInFlight) await queued.catch(() => {});
+        throw new ProbeError('PROBE_BROWSER_CANCELLED', 'The source read was cancelled.');
+      }
       if (error instanceof ProbeError) throw error;
       throw requestFailed();
     }
