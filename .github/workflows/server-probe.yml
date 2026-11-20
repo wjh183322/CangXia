@@ -70,6 +70,7 @@ jobs:
           printf 'PROBE_IMAGE=%s\nPROBE_BUILD_DIGEST=%s\n' "$image" "$build_digest" >> "$GITHUB_ENV"
 
       - name: Audit image filesystem and layer ancestry
+        id: merged_audit
         run: |
           set -euo pipefail
           docker image inspect "$PROBE_IMAGE" > "$RUNNER_TEMP/probe-inspect.json"
@@ -79,6 +80,7 @@ jobs:
             audit "$RUNNER_TEMP/probe-inspect.json" | tee "$RUNNER_TEMP/probe-audit.json"
 
       - name: Audit the filesystem changes in every post-base layer
+        id: layer_audit
         run: |
           set -euo pipefail
           archive=$(mktemp "$RUNNER_TEMP/probe-image.XXXXXXXX")
@@ -86,11 +88,24 @@ jobs:
           base_layers=$(jq -er '.baseLayerCount | select(. > 0)' "$RUNNER_TEMP/probe-audit.json")
           # Cap the temporary saved archive at 6 GiB and keep it on this runner.
           (ulimit -f 6291456; docker image save "$PROBE_IMAGE") > "$archive"
+          audit_report="$RUNNER_TEMP/probe-layer-audit.json"
+          audit_exit=0
           python3 -B feasibility/nas-b/scripts/audit_image_layers.py \
-            "$archive" "$RUNNER_TEMP/probe-inspect.json" "$PROBE_IMAGE" "$base_layers" \
-            | tee "$RUNNER_TEMP/probe-layer-audit.json"
+            "$archive" "$RUNNER_TEMP/probe-inspect.json" "$PROBE_IMAGE" "$base_layers" > "$audit_report" || audit_exit=$?
+          cat "$audit_report"
+          # Offline diagnostics can still run after exporter metadata errors. The audit stays failed.
+          if [[ "$audit_exit" == 1 ]] && jq -e '
+            .ok == false and (.problem == "IMAGE_ARCHIVE_MANIFEST_MISMATCH" or
+              .problem == "IMAGE_ARCHIVE_TAG_MISMATCH" or .problem == "IMAGE_ARCHIVE_LAYER_COUNT_MISMATCH")
+          ' "$audit_report" >/dev/null; then
+            printf 'format_only=true\n' >> "$GITHUB_OUTPUT"
+          fi
+          exit "$audit_exit"
 
       - name: Smoke test non-root app and native file operations on separate disposable mounts
+        if: >-
+          ${{ success() || (failure() && steps.merged_audit.outcome == 'success' &&
+              steps.layer_audit.outcome == 'failure' && steps.layer_audit.outputs.format_only == 'true') }}
         run: |
           set -euo pipefail
           app_root=$(mktemp -d "$RUNNER_TEMP/cangxia-probe-app.XXXXXX")

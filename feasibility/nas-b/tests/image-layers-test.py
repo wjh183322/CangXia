@@ -39,12 +39,14 @@ def archive_bytes(members):
 
 
 class LayerAuditTest(unittest.TestCase):
-    def make_archive(self, *layers, transform=None, legacy=False):
+    def make_archive(self, *layers, transform=None, legacy=False, base_members=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "fixture.tar"
         # The base belongs to the pinned, separately verified distribution.
-        base = archive_bytes([entry("etc/base/.env"), entry("root/.ssh", type=tarfile.DIRTYPE)])
+        if base_members is None:
+            base_members = [entry("etc/base/.env"), entry("root/.ssh", type=tarfile.DIRTYPE)]
+        base = archive_bytes(base_members)
         layers = [base, *[archive_bytes(layer) for layer in layers]]
         if legacy:
             blobs = [(f"{index:064x}/layer.tar", data) for index, data in enumerate(layers)]
@@ -59,7 +61,7 @@ class LayerAuditTest(unittest.TestCase):
         if transform:
             transform(manifests, inspect)
         path.write_bytes(archive_bytes([
-            *[entry(name, data) for name, data in blobs],
+            *[entry(name, data) for name, data in dict(blobs).items()],
             entry(config_path, config), entry("manifest.json", json.dumps(manifests).encode())
         ]))
         return path, inspect
@@ -155,6 +157,37 @@ class LayerAuditTest(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), {"ok": False, "problem": "UNEXPECTED_LAYER_FILES"})
         self.assertNotIn(secret_path.encode(), result.stdout)
         self.assertNotIn(PRIVATE_BYTES, result.stdout)
+
+    def test_accepts_ordered_repeated_references_to_identical_diff_ids(self):
+        layer = [entry("usr/bin/ffmpeg")]
+        result = self.audit(layer, layer)
+        self.assertEqual(result["auditedLayerCount"], 2)
+        self.assertEqual(result["layerHeaderCount"], 2)
+        self.assertEqual(result["repeatedLayerReferenceCount"], 1)
+
+    def test_rejects_repeated_reference_with_conflicting_declared_diff_ids(self):
+        def reuse_base_ref(manifest, _):
+            manifest[0]["Layers"][1] = manifest[0]["Layers"][0]
+
+        with self.assertRaisesRegex(LayerAuditError, "^IMAGE_ARCHIVE_LAYER_REFERENCE_DIFF_ID_MISMATCH$"):
+            self.audit([entry("usr/bin/ffmpeg")], transform=reuse_base_ref)
+
+    def test_audits_a_base_blob_when_also_referenced_at_a_post_base_position(self):
+        layer = [entry("etc/base/.env", PRIVATE_BYTES)]
+        with self.assertRaisesRegex(LayerAuditError, "^UNEXPECTED_LAYER_FILES$"):
+            self.audit(layer, base_members=layer)
+
+    def test_reports_fixed_subreasons_for_other_manifest_failures(self):
+        for field, value, problem in [
+            ("RepoTags", [IMAGE, "unverified-alias:tag"], "IMAGE_ARCHIVE_TAG_MISMATCH"),
+            ("Config", "bad-config", "IMAGE_ARCHIVE_CONFIG_REFERENCE_MISMATCH"),
+            ("Layers", [], "IMAGE_ARCHIVE_LAYER_COUNT_MISMATCH"),
+            ("Layers", ["bad-layer", "another-bad-layer"], "IMAGE_ARCHIVE_LAYER_REFERENCE_MISMATCH"),
+        ]:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(LayerAuditError, "^" + problem + "$"):
+                    self.audit([entry("usr/bin/ffmpeg")],
+                               transform=lambda manifest, _: manifest[0].update({field: value}))
 
     def test_rejects_archive_aliases_order_mismatch_and_inconsistent_inspect(self):
         def reverse_added_layers(manifest, _):

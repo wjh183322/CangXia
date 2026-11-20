@@ -183,12 +183,20 @@ def audit_archive(path, inspect, expected_tag, base_layers):
         entry = manifest[0]
         config_ref = entry.get("Config")
         layers = entry.get("Layers")
-        if (entry.get("RepoTags") != [expected_tag] or not isinstance(config_ref, str) or
-                not CONFIG_REF.fullmatch(config_ref) or not isinstance(layers, list) or
-                len(layers) != len(diff_ids) or
-                any(not isinstance(ref, str) or not LAYER_REF.fullmatch(ref) or ref not in entries or
-                    not entries[ref].isfile() for ref in layers) or len(set(layers)) != len(layers)):
-            raise LayerAuditError("IMAGE_ARCHIVE_MANIFEST_MISMATCH")
+        if entry.get("RepoTags") != [expected_tag]:
+            raise LayerAuditError("IMAGE_ARCHIVE_TAG_MISMATCH")
+        if not isinstance(config_ref, str) or not CONFIG_REF.fullmatch(config_ref):
+            raise LayerAuditError("IMAGE_ARCHIVE_CONFIG_REFERENCE_MISMATCH")
+        if not isinstance(layers, list) or len(layers) != len(diff_ids):
+            raise LayerAuditError("IMAGE_ARCHIVE_LAYER_COUNT_MISMATCH")
+        # Docker saves one blob per digest, with a reference at every layer position.
+        expected_by_reference = {}
+        for ref, diff_id in zip(layers, diff_ids):
+            if (not isinstance(ref, str) or not LAYER_REF.fullmatch(ref) or ref not in entries or
+                    not entries[ref].isfile()):
+                raise LayerAuditError("IMAGE_ARCHIVE_LAYER_REFERENCE_MISMATCH")
+            if expected_by_reference.setdefault(ref, diff_id) != diff_id:
+                raise LayerAuditError("IMAGE_ARCHIVE_LAYER_REFERENCE_DIFF_ID_MISMATCH")
 
         config_bytes, config = read_metadata(archive, entries, config_ref)
         if ("sha256:" + hashlib.sha256(config_bytes).hexdigest() != image_id or not isinstance(config, dict) or
@@ -199,7 +207,11 @@ def audit_archive(path, inspect, expected_tag, base_layers):
         for ref, digest in zip(layers[base_layers:], diff_ids[base_layers:]):
             with archive.extractfile(entries[ref]) as layer:
                 headers += verify_layer(layer, digest)
-        return {"auditedLayerCount": len(layers) - base_layers, "layerHeaderCount": headers}
+        return {
+            "auditedLayerCount": len(layers) - base_layers,
+            "layerHeaderCount": headers,
+            "repeatedLayerReferenceCount": len(layers) - len(expected_by_reference),
+        }
 
 
 def main():
