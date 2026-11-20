@@ -120,7 +120,7 @@ class FakeContext extends EventEmitter {
       if (fn.toString().includes('navigator.userAgent')) await context.onUserAgent?.();
       return runInNewContext(`(${fn})(arg)`, {
       arg, window, location: new URL(href), navigator: { userAgent: 'Fixture chromium' },
-      document: context.panelDocument ?? { readyState: 'complete' }, AbortController, TextDecoder, setTimeout, clearTimeout,
+      document: context.panelDocument ?? { readyState: context.readyState ?? 'complete' }, AbortController, TextDecoder, setTimeout, clearTimeout,
       scrollX: 0, scrollY: 0, innerWidth: 1000, innerHeight: 760,
       getComputedStyle: () => ({ visibility: 'visible', display: 'block', opacity: '1', borderRadius: '0px' }),
       fetch: async (url, options) => {
@@ -699,4 +699,18 @@ test('an HTTP 200 business authentication rejection invalidates the verified ses
   const reads = browser.reads.length;
   await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'STALE_AUTH_EPOCH' });
   assert.equal(browser.reads.length, reads);
+});
+
+test('a page that starts loading at reservation time reports a definitely unsent browser request', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const prior = browser.reads.length;
+  await assert.rejects(gateway.request(detail, {
+    authEpoch, params: { aweme_id: '1' },
+    beforeDispatch() { browser.readyState = 'loading'; }
+  }), { code: 'PROBE_BROWSER_NOT_DISPATCHED' });
+  assert.equal(browser.reads.length, prior);
+  browser.readyState = 'complete';
+  assert.equal((await gateway.request(detail, { authEpoch, params: { aweme_id: '1' } })).status, 200);
+  assert.equal(browser.reads.length, prior + 1);
 });

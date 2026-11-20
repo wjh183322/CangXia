@@ -555,3 +555,69 @@ test('an independent start cannot strand a linked source with an unresolved acce
   const next = f.start(folder('20'), 'next-after-recovery', link);
   assert.equal((await f.settled(next.id)).state, 'complete');
 });
+
+test('a browser network failure keeps only its requested reservation and allows an independent sample', async t => {
+  const fakeSecret = 'fixture-raw-driver-secret';
+  const f = await fixture(t, { reply: (call, dispatch) => {
+    dispatch();
+    if (call.form) return page(Array(269).fill('100'));
+    if (call.params?.collects_id === '10') {
+      throw new ProbeError('PROBE_BROWSER_REQUEST', 'Browser driver value ' + fakeSecret);
+    }
+    return page(['200']);
+  } });
+  const totalJob = f.start(total, 'near-row-limit');
+  await f.settled(totalJob.id);
+  const failed = f.start(folder('10'), 'linked-transport-failed', { afterTotalJobId: totalJob.id });
+  const failure = await f.settled(failed.id);
+  assert.deepEqual(failure.reason, { code: 'PROBE_BROWSER_REQUEST', scope: 'source' });
+  assert.equal(f.store.readHead(folder('10')), null);
+  assert.equal(JSON.stringify(failure).includes(fakeSecret), false);
+  assert.equal(JSON.stringify(f.store.operation('linked-transport-failed')).includes(fakeSecret), false);
+  const resumed = f.launch();
+  const next = resumed.start(folder('20'), 'independent-remaining-row');
+  assert.equal((await resumed.settled(next.id)).state, 'complete');
+  assert.equal(f.calls.at(-1).params.count, 1);
+  assert.throws(() => resumed.start(author('remaining-author'), 'no-rows-left'), { code: 'PROBE_SAMPLE_LIMIT' });
+});
+
+test('a gateway-confirmed unsent page refunds its row and source dispatch reservation', async t => {
+  let refuse = true;
+  const f = await fixture(t, { reply: (call, dispatch) => {
+    dispatch();
+    if (call.form) return page(Array(269).fill('100'));
+    if (refuse) {
+      refuse = false;
+      throw new ProbeError('PROBE_BROWSER_NOT_DISPATCHED', 'The source page changed before sending a request.');
+    }
+    return call.cursor === '0' ? page(['110'], '30') : page(['120']);
+  } });
+  const totalJob = f.start(total, 'before-refund');
+  await f.settled(totalJob.id);
+  const failed = f.start(folder('10'), 'unsent-source-page');
+  const failure = await f.settled(failed.id);
+  assert.deepEqual(failure.reason, { code: 'PROBE_BROWSER_NOT_DISPATCHED', scope: 'source' });
+  assert.equal(f.store.readHead(folder('10')), null);
+  f.reads.resume(failed.id, 'recover-unsent-source-page', f.opts());
+  const complete = await f.settled(failed.id);
+  assert.equal(complete.state, 'complete');
+  assert.equal(complete.savedPages, 2);
+  assert.deepEqual(f.calls.filter(call => call.params?.collects_id === '10').map(call => [call.cursor, call.params.count]), [
+    ['0', 30], ['0', 30], ['30', 30]
+  ]);
+});
+
+test('a received oversized browser body still seals the persisted row budget', async t => {
+  const fakeSecret = 'fixture-oversized-body-content';
+  const f = await fixture(t, { reply: (_call, dispatch) => {
+    dispatch();
+    throw new ProbeError('PROBE_BROWSER_RESPONSE_LIMIT', 'Browser driver value ' + fakeSecret);
+  } });
+  const job = f.start(total, 'oversized-browser-body');
+  const failure = await f.settled(job.id);
+  assert.deepEqual(failure.reason, { code: 'PROBE_BROWSER_RESPONSE_LIMIT', scope: 'source' });
+  assert.equal(JSON.stringify(failure).includes(fakeSecret), false);
+  assert.equal(f.store.readHead(total), null);
+  const reopened = f.launch();
+  assert.throws(() => reopened.start(folder('10'), 'blocked-oversize'), { code: 'PROBE_SAMPLE_LIMIT' });
+});

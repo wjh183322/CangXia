@@ -45,6 +45,7 @@ const panelRequired = () => new ProbeError('PROBE_VERIFICATION_PANEL_REQUIRED', 
 const restartRequired = () => new ProbeError('PROBE_BROWSER_RESTART_REQUIRED', 'Restart the probe browser to restore verification access.');
 const invalidInput = () => new ProbeError('INVALID_BROWSER_INPUT', 'The verification input is outside the supported controls.');
 const invalidRoute = () => new ProbeError('PROBE_BROWSER_ROUTE', 'The probe only accepts supported read-only browser requests.');
+const notDispatched = () => new ProbeError('PROBE_BROWSER_NOT_DISPATCHED', 'The source page changed before sending a request.');
 const requestFailed = () => new ProbeError('PROBE_BROWSER_REQUEST', 'The source browser request failed.');
 const timedOut = () => new ProbeError('PROBE_BROWSER_TIMEOUT', 'The source browser operation timed out.');
 
@@ -647,11 +648,14 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     };
     try {
       combined.throwIfAborted();
+      if (page.isClosed() || !sourcePage(page.url(), slot.kind)) throw notDispatched();
       nextStart = clock.now() + 1100;
       const result = await abortable(page.evaluate(fetchInPage, {
         ...request, key, timeout: requestTimeout, maxBytes: maxResponseBytes
       }), combined);
       combined.throwIfAborted();
+      // fetchInPage returns this outcome before calling fetch.
+      if (result?.error === 'page-changed') throw notDispatched();
       if (result?.error === 'timeout') throw timedOut();
       if (result?.error === 'too-large' || typeof result?.text === 'string' && Buffer.byteLength(result.text) > maxResponseBytes) {
         throw new ProbeError('PROBE_BROWSER_RESPONSE_LIMIT', 'The source browser response exceeded the size limit.');

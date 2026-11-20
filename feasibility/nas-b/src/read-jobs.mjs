@@ -21,7 +21,7 @@ const stopReason = { code: 'PROBE_READ_STOPPED', scope: 'global' };
 const authCodes = new Set(['PROBE_AUTH_REQUIRED', 'STALE_AUTH_EPOCH', 'PROBE_SOURCE_AUTH']);
 const storageCode = /SQLITE|^(ENOSPC|EIO|EROFS|EPERM|EACCES|EBUSY|UNSAFE_PROBE_DB|PROBE_READ_STORAGE|PROBE_DB_OPEN_FAILED)$/;
 const sourceCodes = new Set(['SOURCE_PAGE_INVALID', 'SOURCE_HTTP', 'PROBE_PAGE_CONFLICT',
-  'PROBE_BROWSER_RESPONSE_LIMIT', 'PROBE_BROWSER_REQUEST', 'PROBE_BROWSER_TIMEOUT']);
+  'PROBE_BROWSER_RESPONSE_LIMIT', 'PROBE_BROWSER_REQUEST', 'PROBE_BROWSER_TIMEOUT', 'PROBE_BROWSER_NOT_DISPATCHED']);
 
 function requestFor({ source, cursor }, count) {
   switch (source.kind) {
@@ -216,6 +216,18 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
       gateway.assertAuthEpoch(authEpoch);
     };
 
+    function refundUnsent() {
+      try {
+        store.withWrite(db => {
+          owningJob(db, run);
+          putMeta(db, receivedKey, usedRows(db) - count);
+          putMeta(db, dispatchKey(source), sourceDispatches(db, source) - 1);
+        });
+      } catch {
+        // A newer boot or unavailable disk keeps the conservative reservation.
+      }
+    }
+
     function settleBudget(rows) {
       return store.withWrite(db => {
         const current = owningJob(db, run);
@@ -253,17 +265,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
             // SQLite's commit may outlast a lease or race an authorization change.
             assertOrigin();
           } catch (cause) {
-            if (reserved) {
-              try {
-                store.withWrite(db => {
-                  owningJob(db, run);
-                  putMeta(db, receivedKey, usedRows(db) - count);
-                  putMeta(db, dispatchKey(source), sourceDispatches(db, source) - 1);
-                });
-              } catch {
-                // A newer boot or unavailable disk keeps the conservative reservation.
-              }
-            }
+            if (reserved) refundUnsent();
             if (cause instanceof ProbeError) throw cause;
             throw error('PROBE_READ_STORAGE', 'The sample budget could not be reserved.');
           }
@@ -271,7 +273,12 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
         }
       });
     } catch (cause) {
-      if (worker.dispatched) settleBudget(null);
+      if (worker.dispatched && cause?.code === 'PROBE_BROWSER_NOT_DISPATCHED') {
+        worker.dispatched = false;
+        refundUnsent();
+      }
+      if (worker.dispatched && cause?.code === 'PROBE_BROWSER_RESPONSE_LIMIT') settleBudget(null);
+      // A transport failure with no delivered body keeps the requested reservation.
       if (controller.signal.aborted) throw error(pauseReason.code, 'The read is pausing.');
       if (cause instanceof ProbeError) throw cause;
       throw error('PROBE_SOURCE_UNAVAILABLE', 'The source request could not be completed.');
