@@ -80,6 +80,23 @@ class LayerAuditTest(unittest.TestCase):
                 self.assertEqual(result["auditedLayerCount"], 1)
                 self.assertEqual(result["layerHeaderCount"], 4)
 
+    def test_accepts_debian_multiarch_names_and_links(self):
+        package = "var/lib/dpkg/info/libavcodec60:amd64"
+        result = self.audit([
+            entry(package + ".list"),
+            entry(package + ".md5sums"),
+            entry("var/lib/dpkg/info/cangxia-test-link", type=tarfile.SYMTYPE, linkname="libavcodec60:amd64.list"),
+        ])
+        self.assertEqual(result["layerHeaderCount"], 3)
+
+    def test_rejects_windows_drive_prefixes_in_member_names_and_links(self):
+        for name in ("C:/Windows/private", "d:relative", "./Z:/nested"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(LayerAuditError, "^INVALID_LAYER_PATH$"):
+                    self.audit([entry(name)])
+                with self.assertRaisesRegex(LayerAuditError, "^INVALID_LAYER_PATH$"):
+                    self.audit([entry("usr/share/test-link", type=tarfile.SYMTYPE, linkname=name)])
+
     def test_rejects_an_earlier_token_hidden_by_a_later_opaque_whiteout(self):
         final = [entry("opt/vendor/.wh..wh..opq"), entry("opt/vendor/public")]
         self.assertEqual(self.audit(final)["auditedLayerCount"], 1)

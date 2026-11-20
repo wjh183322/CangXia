@@ -18,6 +18,7 @@ MAX_LAYER_BYTES = 2 * 1024**3
 MAX_METADATA_BYTES = 1024**2
 MAX_HEADERS = 100_000
 DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
+WINDOWS_DRIVE_PREFIX = re.compile(r"^(?:[.]/+)*[a-zA-Z]:")
 LAYER_REF = re.compile(r"(?:blobs/sha256/[a-f0-9]{64}|[a-f0-9]{64}/layer[.]tar)")
 CONFIG_REF = re.compile(r"(?:blobs/sha256/[a-f0-9]{64}|[a-f0-9]{64}[.]json)")
 SECRET_COMPONENT = re.compile(
@@ -40,7 +41,8 @@ class LayerAuditError(Exception):
 
 
 def normalized_path(name, *, root_allowed=False):
-    if (not name or len(name) > 4096 or name.startswith("/") or "\\" in name or ":" in name or
+    if (not name or len(name) > 4096 or name.startswith("/") or "\\" in name or
+            WINDOWS_DRIVE_PREFIX.match(name) or
             not name.isprintable()):
         raise LayerAuditError("INVALID_LAYER_PATH")
     if name.startswith("./"):
@@ -82,7 +84,8 @@ def verify_member(member):
         raise LayerAuditError("UNEXPECTED_LAYER_FILES")
     if member.islnk() or member.issym():
         target = member.linkname
-        if not target or len(target) > 4096 or "\\" in target or ":" in target or not target.isprintable():
+        if (not target or len(target) > 4096 or "\\" in target or
+                WINDOWS_DRIVE_PREFIX.match(target) or not target.isprintable()):
             raise LayerAuditError("INVALID_LAYER_PATH")
         if member.issym():
             # Apt and the virtualenv use relative as well as container-absolute symlinks.
