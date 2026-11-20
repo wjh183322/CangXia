@@ -20,7 +20,7 @@
 
 NAS 部署采用完整预构建镜像，从镜像库拉取并通过一个应用项目启动，不要求用户复制源码、安装依赖或构建镜像。
 
-GitHub Actions 在 `codex/server-edition` 上构建并检查 Linux amd64 试验镜像，预留 GHCR 包名 `ghcr.io/wjh183322/cangxia-server-probe`。标签绑定版本和提交，部署绑定经核对的镜像 digest。构建工作流只在临时 runner 加载镜像、运行合成测试并记录脱敏结果。镜像发布、包可见性和拉取权限单独确认。正式镜像名预留为 `ghcr.io/wjh183322/cangxia-server`。
+GitHub Actions 在 `codex/server-edition` 上构建并检查 Linux amd64 试验镜像，预留 GHCR 包名 `ghcr.io/wjh183322/cangxia-server-probe`。标签绑定版本和提交，部署绑定经核对的镜像 digest。构建工作流在临时 runner 加载镜像、运行合成测试并记录脱敏结果。镜像检查覆盖合并后的文件系统，也逐层检查基础镜像之后新增的文件头，包括后来被删除或覆盖的文件。镜像发布、包可见性和拉取权限单独确认。正式镜像名预留为 `ghcr.io/wjh183322/cangxia-server`。
 
 ## 当前状态
 

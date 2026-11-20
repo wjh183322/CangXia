@@ -49,10 +49,11 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Run probe Node tests
+      - name: Run probe tests
         run: |
           npm ci --prefix feasibility/nas-b --ignore-scripts --no-audit --no-fund
           npm test --prefix feasibility/nas-b
+          python3 -B feasibility/nas-b/tests/image-layers-test.py
 
       - name: Build the verified amd64 image and run the Python golden
         run: |
@@ -76,6 +77,18 @@ jobs:
           trap 'docker rm "$container" >/dev/null' EXIT
           docker export "$container" | tar -tf - | node feasibility/nas-b/scripts/image-inputs.mjs \
             audit "$RUNNER_TEMP/probe-inspect.json" | tee "$RUNNER_TEMP/probe-audit.json"
+
+      - name: Audit the filesystem changes in every post-base layer
+        run: |
+          set -euo pipefail
+          archive=$(mktemp "$RUNNER_TEMP/probe-image.XXXXXXXX")
+          trap 'rm -f -- "$archive"' EXIT
+          base_layers=$(jq -er '.baseLayerCount | select(. > 0)' "$RUNNER_TEMP/probe-audit.json")
+          # Cap the temporary saved archive at 6 GiB and keep it on this runner.
+          (ulimit -f 6291456; docker image save "$PROBE_IMAGE") > "$archive"
+          python3 -B feasibility/nas-b/scripts/audit_image_layers.py \
+            "$archive" "$RUNNER_TEMP/probe-inspect.json" "$PROBE_IMAGE" "$base_layers" \
+            | tee "$RUNNER_TEMP/probe-layer-audit.json"
 
       - name: Smoke test non-root app and native file operations on separate disposable mounts
         run: |
@@ -135,7 +148,8 @@ jobs:
             printf -- '- Image: `%s`\n' "$PROBE_IMAGE"
             printf -- '- Build exporter manifest digest: `%s`\n' "$PROBE_BUILD_DIGEST"
             printf -- '- Local image config: `%s`\n' "$(docker image inspect --format '{{.Id}}' "$PROBE_IMAGE")"
-            printf -- '- Filesystem and layer audit: `%s`\n' "$(cat "$RUNNER_TEMP/probe-audit.json")"
+            printf -- '- Merged filesystem and layer ancestry: `%s`\n' "$(cat "$RUNNER_TEMP/probe-audit.json")"
+            printf -- '- Post-base layer audit: `%s`\n' "$(cat "$RUNNER_TEMP/probe-layer-audit.json")"
             printf -- '- Non-root app, TLS and disposable Linux mount smoke passed.\n'
             printf -- '- Registry publication and NAS deployment are pending.\n'
           } >> "$GITHUB_STEP_SUMMARY"

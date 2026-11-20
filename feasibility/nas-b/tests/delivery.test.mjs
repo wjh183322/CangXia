@@ -144,3 +144,13 @@ test('DEPLOY-03 context allowlist and content audit exclude secrets, old app, an
   assert.match(workflow, /persist-credentials: false/);
   assert.doesNotMatch(workflow, /workflow_dispatch|packages: write|docker (?:push|login)|upload-artifact|backup-v/);
 });
+
+test('DEPLOY-01 the probe can install TLS test dependencies independently of the desktop package', () => {
+  const pkg = JSON.parse(source('../package.json'));
+  const lock = JSON.parse(source('../package-lock.json'));
+  assert.equal(pkg.devDependencies?.selfsigned, '5.5.0');
+  assert.equal(lock.packages[''].devDependencies?.selfsigned, '5.5.0');
+  assert.equal(lock.packages['node_modules/selfsigned']?.version, '5.5.0');
+  assert.equal(lock.packages['node_modules/selfsigned']?.dev, true);
+  assert.equal(pkg.dependencies.selfsigned, undefined);
+});

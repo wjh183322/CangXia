@@ -109,7 +109,8 @@ export function auditImageManifest({ paths, inspect, inputs } = {}) {
         layers.some(digest => !/^sha256:[a-f0-9]{64}$/.test(digest))) problems.push('IMAGE_LAYERS_MISMATCH');
   }
   // File names from an unknown build may themselves contain credentials.
-  return { ok: !problems.length, problems, fileCount: files.size, unexpectedFileCount, missingRuntimeFiles, layerCount };
+  return { ok: !problems.length, problems, fileCount: files.size, unexpectedFileCount, missingRuntimeFiles, layerCount,
+    baseLayerCount: inputs && baseLayers.length };
 }
 
 async function cli() {
