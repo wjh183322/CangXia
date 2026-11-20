@@ -96,15 +96,62 @@ jobs:
           app_root=$(mktemp -d "$RUNNER_TEMP/cangxia-probe-app.XXXXXX")
           volume_root=$(mktemp -d "$RUNNER_TEMP/cangxia-probe-volume.XXXXXX")
           container="cangxia-probe-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          diagnostic="cangxia-probe-chroot-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          baseline=
           cleanup() {
-            docker rm -f "$container" >/dev/null 2>&1 || true
+            docker rm -f "$container" "$diagnostic" >/dev/null 2>&1 || true
+            if [[ -n "$baseline" ]]; then rm -f -- "$baseline"; fi
           }
           trap cleanup EXIT
           user="$(id -u):$(id -g)"
           [[ "${user%%:*}" -gt 0 && "${user##*:}" -gt 0 ]]
           flags=(--network none --init --read-only --user "$user" --cap-drop ALL
-            --security-opt no-new-privileges:true --security-opt "seccomp=$PWD/feasibility/nas-b/chromium-seccomp.json"
+            --security-opt no-new-privileges:true
             --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --shm-size 536870912 --cpus 2 --memory 2147483648)
+          profile="$PWD/feasibility/nas-b/chromium-seccomp.json"
+          diagnose_chroot() {
+            local label=$1 seccomp=$2 result
+            if ! result=$(timeout -k 2s 15s docker run --rm -i --name "$diagnostic" "${flags[@]}" \
+              --security-opt "seccomp=$seccomp" --entrypoint /bin/sh "$PROBE_IMAGE" -eu -s 2>/dev/null <<'DIAGNOSTIC'
+          mkdir -m 0700 /tmp/cangxia-chroot
+          check='
+          import os
+          try:
+              os.chroot("/tmp/cangxia-chroot")
+          except PermissionError:
+              print("denied")
+          except OSError:
+              print("check-error")
+          else:
+              os.chdir("/")
+              print("allowed")
+          '
+          outside=$(python3 -I -S -c "$check") || outside=check-error
+          if unshare --user --map-root-user true; then
+            inside=$(unshare --user --map-root-user python3 -I -S -c "$check") || inside=check-error
+          else
+            inside=userns-unavailable
+          fi
+          printf '%s:%s\n' "$outside" "$inside"
+          DIAGNOSTIC
+            ); then
+              result=diagnostic-unavailable
+            fi
+            if [[ ! "$result" =~ ^(denied|allowed|check-error):(denied|allowed|check-error|userns-unavailable)$ ]]; then
+              result=diagnostic-unavailable
+            fi
+            timeout -k 1s 3s docker rm -f "$diagnostic" >/dev/null 2>&1 || true
+            printf 'Sandbox chroot (%s, outside:inside): %s\n' "$label" "$result"
+          }
+          if baseline=$(mktemp "$RUNNER_TEMP/probe-seccomp-baseline.XXXXXXXX") &&
+            jq 'del(.syscalls[] | select(.names == ["chroot"] and .includes == null))' "$profile" > "$baseline"; then
+            diagnose_chroot baseline "$baseline"
+            diagnose_chroot current "$profile"
+          else
+            printf 'Sandbox chroot diagnostic setup unavailable.\n'
+          fi
+
+          flags+=(--security-opt "seccomp=$profile")
           env_vars=(-e PROBE_MODE=feasibility -e PROBE_ROOT=/probe -e PROBE_PORT=8443
             -e PROBE_RUN_ID=ci-smoke -e PROBE_LIBRARY_ID=ci-fixture -e PROBE_ACCESS_HOST=cangxia-ci.local)
 

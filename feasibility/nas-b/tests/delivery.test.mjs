@@ -166,3 +166,19 @@ test('DEPLOY-01 the probe can install TLS test dependencies independently of the
   assert.equal(lock.packages['node_modules/selfsigned']?.dev, true);
   assert.equal(pkg.dependencies.selfsigned, undefined);
 });
+
+test('DEPLOY-01 the sandbox rule allows chroot without adding container capabilities', () => {
+  const seccomp = JSON.parse(source('../chromium-seccomp.json'));
+  const chrootRules = seccomp.syscalls.filter(rule => rule.names?.includes('chroot'));
+  assert.deepEqual(chrootRules.map(({ comment, ...rule }) => rule), [
+    { names: ['chroot'], action: 'SCMP_ACT_ALLOW' },
+    { names: ['chroot'], action: 'SCMP_ACT_ALLOW', includes: { caps: ['CAP_SYS_CHROOT'] } }
+  ]);
+  const { compose } = renderDeployment({ environment, image, runId: environment.runId });
+  const workflow = source('../../../.github/workflows/server-probe.yml');
+  assert.match(compose, /cap_drop: \[ALL\]/);
+  assert.match(workflow, /--network none .*--read-only .*--cap-drop ALL/);
+  assert.match(workflow, /--security-opt no-new-privileges:true/);
+  assert.match(workflow, /unshare --user --map-root-user/);
+  assert.doesNotMatch(compose + workflow, /cap_add:|--cap-add|apparmor=unconfined|seccomp=unconfined|--privileged|--no-sandbox/);
+});

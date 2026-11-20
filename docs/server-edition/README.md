@@ -42,4 +42,4 @@ GitHub Actions 在 `codex/server-edition` 上构建并检查 Linux amd64 试验�
 
 CI 的完整应用使用非 root、只读容器文件系统和独立试验挂载，以临时 HTTPS 证书自检。独立夹具挂载运行文件原子操作测试。Linux runner 上的结果和 NAS ext4 上的现场结果分别记录。
 
-在 `feasibility/nas-b` 可运行 `npm run test:delivery` 检查构建和交付边界。 `render-deployment.mjs` 从标准输入读取审核过的现场参数及发布证明。现场尚未确认或镜像尚未验证可拉取时只报告受阻项。生成的包包含一个 Compose 项目和 Chromium 沙箱的 seccomp 文件。使用 Moby 固定版本的默认拒绝配置，并增加 Playwright 建议的用户命名空间调用。需要 NAS 的运行时支持该配置与用户命名空间。 [Moby seccomp 配置](https://github.com/moby/profiles/blob/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/seccomp/default.json) [Playwright Docker 文档](https://github.com/microsoft/playwright/blob/v1.65.1/docs/src/docker.md)
+在 `feasibility/nas-b` 可运行 `npm run test:delivery` 检查构建和交付边界。 `render-deployment.mjs` 从标准输入读取审核过的现场参数及发布证明。现场尚未确认或镜像尚未验证可拉取时只报告受阻项。生成的包包含一个 Compose 项目和 Chromium 沙箱的 seccomp 文件。使用 Moby 固定版本的默认拒绝配置，增加 Playwright 建议的用户命名空间调用，并允许 Chromium 沙箱发起由 Linux 按命名空间核验权限的 `chroot`。容器保持非 root 并移除外层 capabilities。需要 NAS 的运行时支持该配置与用户命名空间。 [Moby seccomp 配置](https://github.com/moby/profiles/blob/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/seccomp/default.json) [Playwright Docker 文档](https://github.com/microsoft/playwright/blob/v1.65.1/docs/src/docker.md)

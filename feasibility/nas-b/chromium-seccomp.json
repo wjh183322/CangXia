@@ -65,6 +65,11 @@
 			"comment": "Allow Chromium sandbox user namespaces per Playwright Docker guidance"
 		},
 		{
+			"names": ["chroot"],
+			"action": "SCMP_ACT_ALLOW",
+			"comment": "Allow Chromium sandbox chroot. Linux checks CAP_SYS_CHROOT in the caller's user namespace."
+		},
+		{
 			"names": [
 				"accept",
 				"accept4",
