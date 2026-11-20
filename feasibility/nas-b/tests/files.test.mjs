@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { link, lstat, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -256,10 +256,12 @@ test('a queued job paused while waiting for the work lock stays paused', async t
 for (const change of ['in-place edit', 'new inode']) {
   test('metadata update preserves a raced external ' + change, async t => {
     let armed = false;
+    let displaced;
     const edited = Buffer.from('external version must survive');
-    const f = await fixture(t, { beforeMetadataEscrow({ file }) {
+    const f = await fixture(t, { beforeMetadataExchange({ file, displaced: backup }) {
       if (!armed) return;
       armed = false;
+      displaced = backup;
       if (change === 'new inode') renameSync(file, file + '.external');
       writeFileSync(file, edited, change === 'new inode' ? { flag: 'wx' } : undefined);
     } });
@@ -270,51 +272,95 @@ for (const change of ['in-place edit', 'new inode']) {
     armed = true;
     const result = await reconcileWork({ store: f.store, layout: f.layout, workId: id });
     assert.equal(result.errors[0]?.code, 'PROBE_FILE_REVIEW');
-    assert.deepEqual(await readFile(file), edited);
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).caption, '说明变化');
+    assert.deepEqual(await readFile(displaced), edited);
     if (change === 'new inode') assert.deepEqual(await readFile(file + '.external'), oldBytes);
     assert.equal(f.store.resources(id).find(row => row.key === 'metadata').sha256, hash(oldBytes));
   });
 }
 
-test('metadata recovery completes an interrupted durable escrow and preserves the displaced version', async t => {
-  let displaced;
-  const f = await fixture(t, { afterMetadataEscrow({ escrow }) {
-    displaced = escrow;
-    throw Error('fixture stopped after escrow');
-  } });
+test('metadata is always present at the swap interruption and recovery retains both inodes', async t => {
+  const f = await fixture(t);
   await f.downloads.run();
   const { file } = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata' });
   const oldBytes = await readFile(file);
   f.store.db.prepare("UPDATE records SET body=json_set(body,'$.caption',?) WHERE kind='works' AND id=?").run('恢复说明', id);
-  assert.equal((await reconcileWork({ store: f.store, layout: f.layout, workId: id })).pending, true);
-  assert.deepEqual(await readFile(displaced), oldBytes);
-  await assert.rejects(readFile(file), { code: 'ENOENT' });
   f.store.close();
+  const child = [
+    'import path from "node:path";',
+    'import { lstatSync } from "node:fs";',
+    'import { openProbeStore } from ' + JSON.stringify(new URL('../src/store.mjs', import.meta.url)) + ';',
+    'import { reconcileWork } from ' + JSON.stringify(new URL('../src/files.mjs', import.meta.url)) + ';',
+    'const layout = JSON.parse(process.argv[1]);',
+    'const store = openProbeStore({ file: path.join(layout.state, "fixture.sqlite"), libraryId: process.argv[2],',
+    '  testHooks: { afterMetadataExchange({ file, displaced }) {',
+    '    if (lstatSync(file, { bigint: true }).ino === lstatSync(displaced, { bigint: true }).ino) process.exit(62);',
+    '    process.exit(63);',
+    '  } } });',
+    'await reconcileWork({ store, layout, workId: process.argv[3] });'
+  ].join('\n');
+  await assert.rejects(execute(process.execPath, ['--input-type=module', '-e', child, JSON.stringify(f.layout),
+    f.sandbox.config.libraryId, id], { timeout: 15000 }), { code: 63 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).caption, '恢复说明');
+  const atInterruption = (await lstat(file, { bigint: true })).ino;
   assert.deepEqual(await f.sandbox.prepare(), f.layout);
   const reopened = f.open(false);
+  const stage = reopened.fileCommits(id).at(-1);
+  assert.equal(stage.stage, 'swapping');
+  assert.equal(reopened.resources(id).find(row => row.key === 'metadata').sha256, hash(oldBytes));
+  const displaced = path.join(f.layout.staging, 'commits', stage.id,
+    process.platform === 'win32' ? 'displaced.json' : 'payload.json');
+  assert.deepEqual(await readFile(displaced), oldBytes);
   assert.equal((await recoverFileCommits({ store: reopened, layout: f.layout })).at(0)?.stage, 'registered');
   const updated = await resolveResource({ store: reopened, layout: f.layout, workId: id, key: 'metadata', verify: true });
   assert.equal(JSON.parse(await readFile(updated.file, 'utf8')).caption, '恢复说明');
+  assert.equal((await lstat(updated.file, { bigint: true })).ino, atInterruption);
   assert.deepEqual(await readFile(displaced), oldBytes);
+  assert.deepEqual(await recoverFileCommits({ store: reopened, layout: f.layout }), []);
 });
 
-test('metadata escrow and a new canonical file are both retained when publication conflicts', async t => {
+test('the probe restores a verified old escrow left by an earlier build before starting its atomic swap', async t => {
+  let switched = false;
+  const f = await fixture(t, { beforeMetadataExchange({ file }) {
+    switched = true;
+    const stage = f.store.fileCommits(id).at(-1);
+    const backup = path.join(f.layout.staging, 'commits', stage.id, 'displaced.json');
+    renameSync(file, backup);
+    f.store.db.prepare("UPDATE file_commits SET stage='escrowing' WHERE id=?").run(stage.id);
+    throw Error('fixture represents a prior build stopped after the old file moved');
+  } });
+  await f.downloads.run();
+  const { file } = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata' });
+  f.store.db.prepare("UPDATE records SET body=json_set(body,'$.caption',?) WHERE kind='works' AND id=?").run('旧阶段恢复', id);
+  assert.equal((await reconcileWork({ store: f.store, layout: f.layout, workId: id })).pending, true);
+  assert.equal(switched, true);
+  await assert.rejects(readFile(file), { code: 'ENOENT' });
+  f.store.close();
+  const reopened = f.open(false);
+  assert.equal((await recoverFileCommits({ store: reopened, layout: f.layout })).at(0)?.stage, 'registered');
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).caption, '旧阶段恢复');
+});
+
+test('the displaced original, exchanged candidate and newer canonical file survive a publication conflict', async t => {
   let displaced;
-  const external = 'someone else recreated the canonical JSON';
-  const f = await fixture(t, { afterMetadataEscrow({ file, escrow }) {
-    displaced = escrow;
+  const external = 'someone else replaced the canonical JSON';
+  const f = await fixture(t, { afterMetadataExchange({ file, displaced: backup }) {
+    displaced = backup;
+    renameSync(file, file + '.published');
     writeFileSync(file, external, { flag: 'wx' });
   } });
   await f.downloads.run();
   const { file } = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata' });
   const oldBytes = await readFile(file);
   f.store.db.prepare("UPDATE records SET body=json_set(body,'$.caption',?) WHERE kind='works' AND id=?").run('新说明', id);
-  assert.equal((await reconcileWork({ store: f.store, layout: f.layout, workId: id })).errors[0]?.code, 'PROBE_FILE_REVIEW');
+  assert.equal((await reconcileWork({ store: f.store, layout: f.layout, workId: id })).pending, true);
   assert.equal(await readFile(file, 'utf8'), external);
   assert.deepEqual(await readFile(displaced), oldBytes);
+  assert.equal(JSON.parse(await readFile(file + '.published', 'utf8')).caption, '新说明');
+  assert.equal(f.store.fileCommits(id).at(-1).stage, 'review');
   f.store.close();
   const reopened = f.open(false);
-  assert.equal((await recoverFileCommits({ store: reopened, layout: f.layout })).at(0)?.stage, 'review');
+  assert.deepEqual(await recoverFileCommits({ store: reopened, layout: f.layout }), []);
   assert.equal(await readFile(file, 'utf8'), external);
   assert.deepEqual(await readFile(displaced), oldBytes);
 });
@@ -366,11 +412,13 @@ test('cancellation during finalization verification prevents a new JSON stage', 
   assert.deepEqual(f.store.resources(id).map(row => row.key), ['image-0']);
 });
 
-test('a cancellation after metadata escrow settles the in-flight placement without completing the job', async t => {
+test('cancellation immediately after the swap retains the present canonical JSON and settles the registration', async t => {
   let displaced;
-  const f = await fixture(t, { afterMetadataEscrow({ escrow }) {
-    displaced = escrow;
-    assert.equal(f.downloads.cancel(f.download.id, 'cancel-after-escrow').state, 'cancelling');
+  let presentAtCancel;
+  const f = await fixture(t, { afterMetadataExchange({ file, displaced: backup }) {
+    displaced = backup;
+    presentAtCancel = JSON.parse(readFileSync(file, 'utf8')).caption;
+    assert.equal(f.downloads.cancel(f.download.id, 'cancel-after-exchange').state, 'cancelling');
   } });
   await f.downloads.run();
   const previous = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata' });
@@ -379,6 +427,7 @@ test('a cancellation after metadata escrow settles the in-flight placement witho
   f.downloads.enqueue({ workIds: [id], operationId: 'check-again' });
   await f.downloads.run();
   assert.equal(f.downloads.snapshot().jobs[0].state, 'cancelled');
+  assert.equal(presentAtCancel, '已开始保存');
   assert.deepEqual(await readFile(displaced), bytes);
   const current = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata', verify: true });
   assert.equal(JSON.parse(await readFile(current.file, 'utf8')).caption, '已开始保存');

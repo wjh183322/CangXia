@@ -26,18 +26,22 @@ const lower = value => value.replaceAll('\\', '/').toLowerCase();
 const storageCodes = ['ENOSPC', 'EIO', 'EACCES', 'EPERM', 'EROFS', 'EMFILE', 'ENFILE', 'EDQUOT', 'EBUSY'];
 const photoExtensions = ['.jpg', '.png', '.webp', '.avif'];
 const execute = promisify(execFile);
-const renameNoReplace = [
+const renameAt2 = [
   'import ctypes, errno, os, sys',
   'libc = ctypes.CDLL(None, use_errno=True)',
   'rename = getattr(libc, "renameat2", None)',
   'if rename is None: sys.exit(errno.ENOSYS)',
   'rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]',
   'rename.restype = ctypes.c_int',
-  'result = rename(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 1)',
+  'result = rename(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), int(sys.argv[3]))',
   'sys.exit(ctypes.get_errno() if result else 0)'
 ].join('\n');
 const winMoveFile = Buffer.from([
   'try { [System.IO.File]::Move($env:CANGXIA_PROBE_MOVE_FROM, $env:CANGXIA_PROBE_MOVE_TO); exit 0 }',
+  'catch { exit ($_.Exception.InnerException.HResult -band 65535) }'
+].join('\n'), 'utf16le').toString('base64');
+const winReplaceFile = Buffer.from([
+  'try { [System.IO.File]::Replace($env:CANGXIA_PROBE_MOVE_FROM, $env:CANGXIA_PROBE_MOVE_TO, $env:CANGXIA_PROBE_DISPLACED); exit 0 }',
   'catch { exit ($_.Exception.InnerException.HResult -band 65535) }'
 ].join('\n'), 'utf16le').toString('base64');
 
@@ -120,16 +124,32 @@ async function syncDirectory(dir) {
   } finally { await handle?.close(); }
 }
 
+async function runLinuxRename(from, to, flags, unsupported) {
+  if (process.platform !== 'linux') throw unsupported;
+  try { await execute('python3', ['-I', '-S', '-c', renameAt2, from, to, String(flags)], { timeout: 5000 }); }
+  catch (error) {
+    const code = Number.isInteger(error.code) && error.code > 0 ? getSystemErrorName(-error.code) : error.code;
+    if (['EEXIST', 'ENOENT', 'ENOTEMPTY', 'ENOTDIR', 'EISDIR'].includes(code)) throw review();
+    if (storageCodes.includes(code)) throw Object.assign(new Error('Native file rename failed.'), { code });
+    throw unsupported;
+  }
+}
+
+function runWindowsRename(command, from, to, displaced) {
+  return execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', command], {
+    env: { ...process.env, CANGXIA_PROBE_MOVE_FROM: from, CANGXIA_PROBE_MOVE_TO: to,
+      ...(displaced && { CANGXIA_PROBE_DISPLACED: displaced }) },
+    timeout: 5000, windowsHide: true
+  });
+}
+
 async function moveExclusive(from, to, { directory = false } = {}) {
   // Windows rejects renaming a directory over an existing directory. Linux
   // needs the exclusive flag even for a target that appears empty.
   if (process.platform === 'win32') {
     if (directory) return fs.rename(from, to);
     try {
-      await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', winMoveFile], {
-        env: { ...process.env, CANGXIA_PROBE_MOVE_FROM: from, CANGXIA_PROBE_MOVE_TO: to },
-        timeout: 5000, windowsHide: true
-      });
+      await runWindowsRename(winMoveFile, from, to);
       return;
     } catch (error) {
       if (await status(to)) throw review();
@@ -137,15 +157,18 @@ async function moveExclusive(from, to, { directory = false } = {}) {
       throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive file move.');
     }
   }
-  if (process.platform !== 'linux') {
-    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'Exclusive moves are unavailable on this host.');
-  }
-  try { await execute('python3', ['-I', '-S', '-c', renameNoReplace, from, to], { timeout: 5000 }); }
+  return runLinuxRename(from, to, 1,
+    problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive move.'));
+}
+
+async function exchangeMetadata(staged, formal, displaced) {
+  const unsupported = problem('PROBE_FILE_EXCHANGE_UNSUPPORTED', 'The probe volume could not atomically replace the work metadata.');
+  if (process.platform !== 'win32') return runLinuxRename(staged, formal, 2, unsupported);
+  try { await runWindowsRename(winReplaceFile, staged, formal, displaced); }
   catch (error) {
-    const code = Number.isInteger(error.code) ? getSystemErrorName(-error.code) : error.code;
-    if (['EEXIST', 'ENOTEMPTY'].includes(code)) throw review();
-    if (storageCodes.includes(code)) throw Object.assign(new Error('Exclusive move failed.'), { code });
-    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive move.');
+    if ([5, 32].includes(error.code)) throw Object.assign(new Error('Atomic file replacement failed.'), { code: 'EACCES' });
+    if ([2, 3, 80, 183].includes(error.code)) throw review();
+    throw unsupported;
   }
 }
 
@@ -476,44 +499,93 @@ async function registerFile(store, commit) {
   });
 }
 
-async function escrowMetadata({ store, commit, dir, destination, recoverOnly, guard }) {
-  const escrow = path.join(dir, metadataEscrow);
-  let stat = await status(escrow);
-  let displacedHere = false;
-  if (!stat) {
-    if (commit.stage === 'escrowed') throw review();
-    if (recoverOnly) return false;
-    await assertDigest(destination, commit.body.previous);
-    await retry(async () => {
-      if (!same(await status(destination.file), commit.body.previous.identity)) throw review();
-      store.fileHook('beforeMetadataEscrow', { file: destination.file, escrow });
-      guard?.();
-      if (commit.stage !== 'escrowing') updateCommit(store, commit, 'escrowing');
-      await moveExclusive(destination.file, escrow);
-      displacedHere = true;
-    });
-    await syncDirectory(dir);
-    await syncDirectory(destination.parent.file);
-    store.fileHook('afterMetadataEscrow', { file: destination.file, escrow });
-    stat = await status(escrow);
-  } else if (!['escrowing', 'escrowed'].includes(commit.stage)) throw review();
-  try { await assertDigest({ file: escrow, stat }, commit.body.previous); }
-  catch (error) {
-    if (error.code !== 'PROBE_FILE_REVIEW') throw error;
-    // Whoever changed the old JSON keeps every version. Restore the displaced
-    // entry only when its original name is still empty.
-    if (displacedHere && stat && !await status(destination.file)) {
-      try {
-        await moveExclusive(escrow, destination.file);
-        await syncDirectory(dir);
-        await syncDirectory(destination.parent.file);
-      } catch { /* Keep the displaced entry when exclusive restoration fails. */ }
+async function restoreMissingMetadata({ dir, destination, displaced, previous }) {
+  if (await status(destination.file)) throw review();
+  await assertDigest({ file: displaced, stat: await status(displaced) }, previous);
+  await moveExclusive(displaced, destination.file);
+  await syncDirectory(dir);
+  await syncDirectory(destination.parent.file);
+  destination.stat = await status(destination.file);
+  await assertDigest(destination, previous);
+}
+
+async function placeMetadataReplacement({ store, commit, dir, destination, staged, recoverOnly, guard }) {
+  const { body } = commit;
+  if (body.kind !== 'metadata') throw review();
+  const legacyDisplaced = path.join(dir, metadataEscrow);
+  // Previous probe builds could leave an unfinished two-step publication.
+  if (!body.exchange && ['escrowing', 'escrowed', 'placed'].includes(commit.stage)) {
+    const old = await status(legacyDisplaced);
+    if (same(destination.stat, body.identity)) {
+      await assertDigest({ file: legacyDisplaced, stat: old }, body.previous);
+      return settlePlacement({ store, commit, destination, dir, staged });
     }
-    updateCommit(store, commit, 'review');
+    if (old && !destination.stat) {
+      await restoreMissingMetadata({ dir, destination, displaced: legacyDisplaced, previous: body.previous });
+    } else if (old || commit.stage !== 'escrowing') throw review();
+    updateCommit(store, commit, 'verified');
+  }
+
+  const windows = process.platform === 'win32';
+  const mode = windows ? 'windows-replace' : 'linux-exchange';
+  if (body.exchange && body.exchange !== mode) throw review();
+  const displaced = windows ? legacyDisplaced : staged.file;
+  try {
+    if (!same(destination.stat, body.identity)) {
+      if (commit.stage === 'placed') throw review();
+      const backup = windows && await status(displaced);
+      if (backup && !destination.stat && commit.stage === 'swapping') {
+        // ReplaceFileW can report a native partial failure after creating its backup.
+        await restoreMissingMetadata({ dir, destination, displaced, previous: body.previous });
+        throw review();
+      }
+      if (backup) throw review();
+      await assertDigest(destination, body.previous);
+      await assertDigest(staged, body);
+      if (recoverOnly) return null;
+      store.fileHook('beforeMetadataExchange', { file: destination.file, displaced });
+      if (windows && await status(displaced)) throw review();
+      guard?.();
+      body.exchange = mode;
+      if (commit.stage !== 'swapping') updateCommit(store, commit, 'swapping');
+      try { await exchangeMetadata(staged.file, destination.file, displaced); }
+      catch (error) {
+        if (windows && !await status(destination.file) && await status(displaced)) {
+          await restoreMissingMetadata({ dir, destination, displaced, previous: body.previous });
+          throw review();
+        }
+        throw error;
+      }
+      await syncDirectory(dir);
+      await syncDirectory(destination.parent.file);
+      store.fileHook('afterMetadataExchange', { file: destination.file, displaced });
+    }
+    if (!body.exchange || !['swapping', 'placed'].includes(commit.stage)) throw review();
+    await assertDigest({ file: displaced, stat: await status(displaced) }, body.previous);
+    return await settlePlacement({ store, commit, destination, dir });
+  } catch (error) {
+    if (error.code === 'PROBE_FILE_REVIEW') updateCommit(store, commit, 'review');
     throw error;
   }
-  if (commit.stage !== 'escrowed') updateCommit(store, commit, 'escrowed');
-  return true;
+}
+
+async function settlePlacement({ store, commit, destination, dir, staged }) {
+  const { body } = commit;
+  destination.stat = await status(destination.file);
+  const stagingAlias = staged && await status(staged.file);
+  if (destination.stat?.nlink === 2n && (!same(stagingAlias, body.identity) || stagingAlias.nlink !== 2n)) throw review();
+  if (stagingAlias && !same(stagingAlias, body.identity)) throw review();
+  await assertDigest(destination, body, stagingAlias ? 2 : 1);
+  await syncDirectory(destination.parent.file);
+  if (stagingAlias) {
+    await retry(async () => {
+      if (!same(await status(staged.file), body.identity)) throw review();
+      await fs.unlink(staged.file);
+    });
+    await syncDirectory(dir);
+  }
+  updateCommit(store, commit, 'placed');
+  return registerFile(store, commit);
 }
 
 async function placeVerified({ store, layout, commit, recoverOnly = false, guard }) {
@@ -526,41 +598,19 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
   const { media } = await roots(layout);
   const destination = await fileAt(media.file, body.relative);
   if (!same(destination.parent.stat, body.homeIdentity)) throw review();
-  const replacesMetadata = body.previous && !body.previous.missing;
-
+  if (body.previous && !body.previous.missing) {
+    return placeMetadataReplacement({ store, commit, dir, destination, staged, recoverOnly, guard });
+  }
   if (!same(destination.stat, body.identity)) {
-    if (commit.stage === 'placed') throw review();
-    if (recoverOnly && !replacesMetadata) return null;
+    if (commit.stage === 'placed' || destination.stat) throw review();
+    if (recoverOnly) return null;
     await assertDigest(staged, body);
-    if (replacesMetadata) {
-      if (body.kind !== 'metadata') throw review();
-      if (!await escrowMetadata({ store, commit, dir, destination, recoverOnly, guard })) return null;
-    } else {
-      if (destination.stat) throw review();
-      guard?.();
-    }
-    // An escrowed replacement has already begun. Finish its verified placement
-    // even if cancellation arrived after the prior name was moved.
+    guard?.();
     try { await fs.link(staged.file, destination.file); }
     catch (error) { if (error.code === 'EEXIST') throw review(); throw error; }
     store.fileHook('afterFilePlacement', { workId: commit.workId, kind: body.kind, file: destination.file, staged: staged.file });
-  } else if (replacesMetadata && !['escrowed', 'placed'].includes(commit.stage)) throw review();
-
-  destination.stat = await status(destination.file);
-  staged.stat = await status(staged.file);
-  if (destination.stat?.nlink === 2n && (!same(staged.stat, body.identity) || staged.stat.nlink !== 2n)) throw review();
-  if (staged.stat && !same(staged.stat, body.identity)) throw review();
-  await assertDigest(destination, body, staged.stat ? 2 : 1);
-  await syncDirectory(destination.parent.file);
-  if (staged.stat) {
-    await retry(async () => {
-      if (!same(await status(staged.file), body.identity)) throw review();
-      await fs.unlink(staged.file);
-    });
-    await syncDirectory(dir);
   }
-  updateCommit(store, commit, 'placed');
-  return registerFile(store, commit);
+  return settlePlacement({ store, commit, destination, dir, staged });
 }
 
 export function mediaUsage(store) {
@@ -697,7 +747,7 @@ export async function recoverFileCommits({ store, layout, workId }) {
   await checkRecoveryLinks({ store, layout });
   const results = [];
   for (const commit of store.fileCommits(workId)) {
-    if (!['verified', 'escrowing', 'escrowed', 'placed', 'moving'].includes(commit.stage)) continue;
+    if (!['verified', 'swapping', 'escrowing', 'escrowed', 'placed', 'moving'].includes(commit.stage)) continue;
     try {
       const result = await withWorkFiles(layout, commit.workId, () => {
         const isStopping = () => {

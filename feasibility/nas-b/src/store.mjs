@@ -609,7 +609,7 @@ export function openProbeStore({ file, libraryId, initialize = false, testHooks 
   }
   for (const hook of [testHooks.afterWorkWrite, testHooks.afterPageCommit, testHooks.beforeFileWrite,
     testHooks.afterFilePlacement, testHooks.beforeFileCleanup, testHooks.beforeFileMove, testHooks.beforeResourceVerify,
-    testHooks.beforeDownloadWorkLock, testHooks.beforeMetadataEscrow, testHooks.afterMetadataEscrow]) {
+    testHooks.beforeDownloadWorkLock, testHooks.beforeMetadataExchange, testHooks.afterMetadataExchange]) {
     if (hook !== undefined) assertCallback(hook);
   }
   return new ProbeStore(openDatabase(file, libraryId, initialize === true), testHooks);
