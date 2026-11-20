@@ -17,6 +17,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ffmpeg openssl python3.12-venv xvfb; \
     rm -rf /var/lib/apt/lists/*; \
+    rmdir /root/.ssh; \
     python3.12 -m venv /opt/cover-runtime; \
     /opt/cover-runtime/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
         --only-binary=:all: --require-hashes -r /opt/cangxia/feasibility/nas-b/cover-runtime.lock; \

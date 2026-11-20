@@ -44,7 +44,7 @@ class LayerAuditTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "fixture.tar"
         # The base belongs to the pinned, separately verified distribution.
-        base = archive_bytes([entry("etc/base/.env")])
+        base = archive_bytes([entry("etc/base/.env"), entry("root/.ssh", type=tarfile.DIRTYPE)])
         layers = [base, *[archive_bytes(layer) for layer in layers]]
         if legacy:
             blobs = [(f"{index:064x}/layer.tar", data) for index, data in enumerate(layers)]
@@ -79,6 +79,23 @@ class LayerAuditTest(unittest.TestCase):
                 ], legacy=legacy)
                 self.assertEqual(result["auditedLayerCount"], 1)
                 self.assertEqual(result["layerHeaderCount"], 4)
+
+    def test_accepts_the_exact_empty_regular_whiteout_for_the_pinned_base_ssh_directory(self):
+        self.assertEqual(self.audit([entry("root/.wh..ssh")])["layerHeaderCount"], 1)
+
+    def test_rejects_ssh_content_and_malformed_or_other_ssh_whiteouts(self):
+        for member, problem in [
+            (entry("root/.ssh", type=tarfile.DIRTYPE), "UNEXPECTED_LAYER_FILES"),
+            (entry("root/.ssh/private", PRIVATE_BYTES), "UNEXPECTED_LAYER_FILES"),
+            (entry("home/pwuser/.wh..ssh"), "UNEXPECTED_LAYER_FILES"),
+            (entry("root/.wh..ssh", PRIVATE_BYTES), "INVALID_LAYER_MEMBER"),
+            (entry("root/.wh..ssh", type=tarfile.DIRTYPE), "INVALID_LAYER_MEMBER"),
+            (entry("root/.wh..ssh", type=tarfile.SYMTYPE, linkname="/root/.ssh"), "INVALID_LAYER_MEMBER"),
+            (entry("root/.wh..ssh", linkname="/root/.ssh"), "UNEXPECTED_LAYER_FILES"),
+        ]:
+            with self.subTest(name=member[0].name, type=member[0].type):
+                with self.assertRaisesRegex(LayerAuditError, "^" + problem + "$"):
+                    self.audit([member])
 
     def test_accepts_debian_multiarch_names_and_links(self):
         package = "var/lib/dpkg/info/libavcodec60:amd64"

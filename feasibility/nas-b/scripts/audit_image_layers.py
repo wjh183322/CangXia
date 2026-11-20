@@ -78,6 +78,10 @@ def verify_member(member):
     if leaf.startswith(".wh."):
         if not member.isreg() or member.size or leaf == ".wh.":
             raise LayerAuditError("INVALID_LAYER_MEMBER")
+        # The pinned base ships an empty root SSH directory. Accept only its removal marker.
+        if (name == "root/.wh..ssh" and member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and
+                not member.linkname):
+            return name
         name = parent if leaf == ".wh..wh..opq" else normalized_path(posixpath.join(parent, leaf[4:]))
     probe_mountpoint = name == "probe" and member.isdir()
     if not probe_mountpoint and sensitive(name, public_cert_link=member.issym()):
