@@ -1,0 +1,8 @@
+
+# Linux/amd64 wheels for CPython 3.12. Distribution licenses stay in their installed dist-info directories.
+# NumPy BSD-3-Clause and bundled library notices.
+numpy==2.2.6 \
+    --hash=sha256:fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249
+# OpenCV wheel packaging MIT, OpenCV Apache-2.0, and bundled third-party notices.
+opencv-python-headless==4.11.0.86 \
+    --hash=sha256:0e0a27c19dd1f40ddff94976cfe43066fbbe9dfbb2ec1907d66c19caef42a57b

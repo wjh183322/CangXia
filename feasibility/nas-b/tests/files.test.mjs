@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { link, lstat, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
@@ -210,11 +210,15 @@ test('a target directory appearing after the last precheck is never replaced', a
   } });
   await f.downloads.run();
   const asset = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'image-0' });
+  const sourceDirectory = path.dirname(asset.file);
+  const sourceInode = (await lstat(sourceDirectory, { bigint: true })).ino;
   f.store.db.prepare("UPDATE records SET body=json_set(body,'$.name',?) WHERE kind='works' AND id=?").run('竞争', id);
   const result = await reconcileWork({ store: f.store, layout: f.layout, workId: id });
   assert.equal(result.pending, true);
   assert.equal(result.errors[0].code, 'PROBE_FILE_REVIEW');
   assert.equal((await lstat(target, { bigint: true })).ino, inode);
+  assert.equal((await lstat(sourceDirectory, { bigint: true })).ino, sourceInode);
+  assert.deepEqual(await readdir(target), []);
   assert.deepEqual(await readFile(asset.file), png);
 });
 
@@ -284,6 +288,7 @@ test('metadata is always present at the swap interruption and recovery retains b
   await f.downloads.run();
   const { file } = await resolveResource({ store: f.store, layout: f.layout, workId: id, key: 'metadata' });
   const oldBytes = await readFile(file);
+  const oldInode = (await lstat(file, { bigint: true })).ino;
   f.store.db.prepare("UPDATE records SET body=json_set(body,'$.caption',?) WHERE kind='works' AND id=?").run('恢复说明', id);
   f.store.close();
   const child = [
@@ -303,6 +308,7 @@ test('metadata is always present at the swap interruption and recovery retains b
     f.sandbox.config.libraryId, id], { timeout: 15000 }), { code: 63 });
   assert.equal(JSON.parse(await readFile(file, 'utf8')).caption, '恢复说明');
   const atInterruption = (await lstat(file, { bigint: true })).ino;
+  const newBytes = await readFile(file);
   assert.deepEqual(await f.sandbox.prepare(), f.layout);
   const reopened = f.open(false);
   const stage = reopened.fileCommits(id).at(-1);
@@ -311,10 +317,12 @@ test('metadata is always present at the swap interruption and recovery retains b
   const displaced = path.join(f.layout.staging, 'commits', stage.id,
     process.platform === 'win32' ? 'displaced.json' : 'payload.json');
   assert.deepEqual(await readFile(displaced), oldBytes);
+  assert.equal((await lstat(displaced, { bigint: true })).ino, oldInode);
   assert.equal((await recoverFileCommits({ store: reopened, layout: f.layout })).at(0)?.stage, 'registered');
   const updated = await resolveResource({ store: reopened, layout: f.layout, workId: id, key: 'metadata', verify: true });
   assert.equal(JSON.parse(await readFile(updated.file, 'utf8')).caption, '恢复说明');
   assert.equal((await lstat(updated.file, { bigint: true })).ino, atInterruption);
+  assert.deepEqual(await readFile(updated.file), newBytes);
   assert.deepEqual(await readFile(displaced), oldBytes);
   assert.deepEqual(await recoverFileCommits({ store: reopened, layout: f.layout }), []);
 });

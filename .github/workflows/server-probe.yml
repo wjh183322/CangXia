@@ -1,0 +1,141 @@
+
+name: Build and verify server probe
+
+on:
+  push:
+    branches: [codex/server-edition]
+    paths:
+      - 'feasibility/nas-b/**'
+      - 'electron/account-identity.mjs'
+      - 'electron/api-pagination.mjs'
+      - 'electron/audio-info.mjs'
+      - 'electron/browser-api.mjs'
+      - 'electron/filter.mjs'
+      - 'electron/hd-cover.mjs'
+      - 'electron/media-info.mjs'
+      - 'electron/model.mjs'
+      - 'electron/qr-page.mjs'
+      - 'electron/resumable-transfer.mjs'
+      - 'electron/verification-panel.mjs'
+      - 'electron/work-audio.mjs'
+      - 'shared/backup-protocol.mjs'
+      - 'shared/creators.mjs'
+      - 'shared/douyin-web.mjs'
+      - 'shared/music.mjs'
+      - 'shared/source-state.mjs'
+      - 'scripts/cover-frame.py'
+      - 'tests/cover-frame-test.py'
+      - '.github/workflows/server-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    if: github.ref == 'refs/heads/codex/server-edition'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PROBE_ARCH: amd64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Run probe Node tests
+        run: |
+          npm ci --prefix feasibility/nas-b --ignore-scripts --no-audit --no-fund
+          npm test --prefix feasibility/nas-b
+
+      - name: Build the verified amd64 image and run the Python golden
+        run: |
+          set -euo pipefail
+          plan=$(node feasibility/nas-b/scripts/image-inputs.mjs plan)
+          version=$(jq -er .tag <<< "$plan")
+          image="$(jq -er .repository <<< "$plan"):$version"
+
+          docker buildx build --load --platform linux/amd64 --provenance=false --sbom=false \
+            --build-arg "PROBE_REVISION=$GITHUB_SHA" --build-arg "PROBE_VERSION=$version" \
+            --metadata-file "$RUNNER_TEMP/probe-build.json" \
+            -t "$image" -f feasibility/nas-b/Dockerfile .
+          build_digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/probe-build.json")
+          printf 'PROBE_IMAGE=%s\nPROBE_BUILD_DIGEST=%s\n' "$image" "$build_digest" >> "$GITHUB_ENV"
+
+      - name: Audit image filesystem and layer ancestry
+        run: |
+          set -euo pipefail
+          docker image inspect "$PROBE_IMAGE" > "$RUNNER_TEMP/probe-inspect.json"
+          container=$(docker create "$PROBE_IMAGE")
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker export "$container" | tar -tf - | node feasibility/nas-b/scripts/image-inputs.mjs \
+            audit "$RUNNER_TEMP/probe-inspect.json" | tee "$RUNNER_TEMP/probe-audit.json"
+
+      - name: Smoke test non-root app and native file operations on separate disposable mounts
+        run: |
+          set -euo pipefail
+          app_root=$(mktemp -d "$RUNNER_TEMP/cangxia-probe-app.XXXXXX")
+          volume_root=$(mktemp -d "$RUNNER_TEMP/cangxia-probe-volume.XXXXXX")
+          container="cangxia-probe-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          user="$(id -u):$(id -g)"
+          [[ "${user%%:*}" -gt 0 && "${user##*:}" -gt 0 ]]
+          flags=(--network none --init --read-only --user "$user" --cap-drop ALL
+            --security-opt no-new-privileges:true --security-opt "seccomp=$PWD/feasibility/nas-b/chromium-seccomp.json"
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --shm-size 536870912 --cpus 2 --memory 2147483648)
+          env_vars=(-e PROBE_MODE=feasibility -e PROBE_ROOT=/probe -e PROBE_PORT=8443
+            -e PROBE_RUN_ID=ci-smoke -e PROBE_LIBRARY_ID=ci-fixture -e PROBE_ACCESS_HOST=cangxia-ci.local)
+
+          if message=$(docker run --rm "${flags[@]}" "${env_vars[@]}" "$PROBE_IMAGE" 2>&1); then
+            exit 1
+          fi
+          grep -qx UNSAFE_PROBE_MOUNT <<< "$message"
+
+          docker run -d --name "$container" "${flags[@]}" "${env_vars[@]}" \
+            --mount "type=bind,src=$app_root,dst=/probe" "$PROBE_IMAGE" >/dev/null
+          for attempt in $(seq 1 60); do
+            read -r running health < <(docker inspect -f '{{.State.Running}} {{.State.Health.Status}}' "$container")
+            if [[ "$health" == healthy || "$running" == false ]]; then break; fi
+            sleep 2
+          done
+          if [[ "$health" != healthy ]]; then
+            docker logs "$container"
+            exit 1
+          fi
+          docker exec "$container" node /opt/cangxia/feasibility/nas-b/scripts/health.mjs
+          [[ "$(docker exec "$container" id -u)" == "$(id -u)" ]]
+          [[ "$(docker exec "$container" id -g)" == "$(id -g)" ]]
+          [[ "$(stat -c '%a' "$app_root/state/access.token")" == 600 ]]
+          [[ "$(stat -c '%a' "$app_root/state/server.key")" == 600 ]]
+          docker stop --time 30 "$container" >/dev/null
+          [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
+
+          # Read-only, individually named synthetic inputs; the fixture scratch is on the disposable bind.
+          docker run --rm "${flags[@]}" -e TMPDIR=/probe \
+            --mount "type=bind,src=$volume_root,dst=/probe" \
+            --mount "type=bind,src=$PWD/feasibility/nas-b/tests/files.test.mjs,dst=/opt/cangxia/feasibility/nas-b/tests/files.test.mjs,readonly" \
+            --mount "type=bind,src=$PWD/feasibility/nas-b/tests/helpers.mjs,dst=/opt/cangxia/feasibility/nas-b/tests/helpers.mjs,readonly" \
+            --mount "type=bind,src=$PWD/feasibility/nas-b/fixtures/source-pages.json,dst=/opt/cangxia/feasibility/nas-b/fixtures/source-pages.json,readonly" \
+            --entrypoint node "$PROBE_IMAGE" --test tests/files.test.mjs
+
+      - name: Report local build evidence
+        run: |
+          set -euo pipefail
+          {
+            printf '### Server probe build\n\n'
+            printf -- '- Image: `%s`\n' "$PROBE_IMAGE"
+            printf -- '- Build exporter manifest digest: `%s`\n' "$PROBE_BUILD_DIGEST"
+            printf -- '- Local image config: `%s`\n' "$(docker image inspect --format '{{.Id}}' "$PROBE_IMAGE")"
+            printf -- '- Filesystem and layer audit: `%s`\n' "$(cat "$RUNNER_TEMP/probe-audit.json")"
+            printf -- '- Non-root app, TLS and disposable Linux mount smoke passed.\n'
+            printf -- '- Registry publication and NAS deployment are pending.\n'
+          } >> "$GITHUB_STEP_SUMMARY"

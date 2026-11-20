@@ -20,11 +20,11 @@
 
 NAS 部署采用完整预构建镜像，从镜像库拉取并通过一个应用项目启动，不要求用户复制源码、安装依赖或构建镜像。
 
-拟采用 GitHub Actions 构建并交付 GHCR：测试镜像名 `ghcr.io/wjh183322/cangxia-server-probe`，正式镜像名 `ghcr.io/wjh183322/cangxia-server`。目前它们只是交付命名约定，尚未构建或发布；镜像可见性在发布前明确。使用固定版本和提交/digest，不用未完成测试包冒充正式版本。
+GitHub Actions 在 `codex/server-edition` 上构建并检查 Linux amd64 试验镜像，预留 GHCR 包名 `ghcr.io/wjh183322/cangxia-server-probe`。标签绑定版本和提交，部署绑定经核对的镜像 digest。构建工作流只在临时 runner 加载镜像、运行合成测试并记录脱敏结果。镜像发布、包可见性和拉取权限单独确认。正式镜像名预留为 `ghcr.io/wjh183322/cangxia-server`。
 
 ## 当前状态
 
-当前只完成设计与新分支准备，未实现服务版程序或发布镜像。原程序代码保留基线，根 package 版本不会因这份说明就被标为已完成的新版本。
+独立的验证原型、容器定义和构建检查已进入开发分支。正式版本仍以备份版为业务对照，实际 NAS 卷、浏览器沙箱和交付结果以现场验收为准。
 
 开发和后续相关工作流只在本分支推进，保护现有 main、备份版及旧 NAS 分支。不得提交用户资料库、媒体、恢复副本、登录会话、令牌、真实采集响应或个人调查附件。
 
@@ -35,3 +35,11 @@ NAS 部署采用完整预构建镜像，从镜像库拉取并通过一个应用�
 配置检查要求显式试验模式、专用根目录及匹配的试验标识。NAS 的实际宿主挂载、端口可用性、运行身份和资源余量由部署前的现场核对确认。缺少现场输入时暂停部署。
 
 业务和后续正式界面对照沿用备份版 0.3.46 的源码、现有测试及相同窗口尺寸、显示缩放。验证控台、试验样本上限及测试网络配置仅用于可行性验证。
+
+## 容器检查和现场配置
+
+构建使用固定的 Playwright Noble amd64 镜像清单。容器内含匹配的 Playwright Core、Chromium、Xvfb、OpenSSL、FFmpeg/ffprobe、Node/SQLite 和 CPython 3.12 的 OpenCV/NumPy wheels。Ubuntu 工具由安装包分发，Python 依赖锁校验固定 wheel 的 SHA256。Node、Python 和系统包的许可证保留在发行包目录中。
+
+CI 的完整应用使用非 root、只读容器文件系统和独立试验挂载，以临时 HTTPS 证书自检。独立夹具挂载运行文件原子操作测试。Linux runner 上的结果和 NAS ext4 上的现场结果分别记录。
+
+在 `feasibility/nas-b` 可运行 `npm run test:delivery` 检查构建和交付边界。 `render-deployment.mjs` 从标准输入读取审核过的现场参数及发布证明。现场尚未确认或镜像尚未验证可拉取时只报告受阻项。生成的包包含一个 Compose 项目和 Chromium 沙箱的 seccomp 文件。使用 Moby 固定版本的默认拒绝配置，并增加 Playwright 建议的用户命名空间调用。需要 NAS 的运行时支持该配置与用户命名空间。 [Moby seccomp 配置](https://github.com/moby/profiles/blob/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/seccomp/default.json) [Playwright Docker 文档](https://github.com/microsoft/playwright/blob/v1.65.1/docs/src/docker.md)
