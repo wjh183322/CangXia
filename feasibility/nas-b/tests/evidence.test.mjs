@@ -178,6 +178,46 @@ test('video startup requires repeated positive measurements for every cache stat
   }
 });
 
+test('unscoped startup failures suspend release until all Windows cache states are retested', async () => {
+  const { manifest } = await import('../assess.mjs');
+  const cacheStates = ['cold-process', 'first-visit', 'cache-hit'];
+  const green = manifest.flatMap(spec => {
+    const fields = {
+      checks: spec.checks ?? [],
+      measurements: Object.fromEntries(Object.entries(spec.measurements ?? {}).map(([metric, rule]) =>
+        [metric, rule.min ?? rule.max ?? 1]))
+    };
+    if (spec.requireImageDigest) fields.imageDigest = 'sha256:' + 'a'.repeat(64);
+    if (spec.requireWanPath) fields.wanPath = 'tailscale-direct';
+    if (spec.requireCacheStates) return ['nas', 'windows-product'].flatMap(kind =>
+      cacheStates.map(cacheState => result(spec.id, kind, { ...fields, cacheState })));
+    if (spec.id === 'PERF-04') return ['nas', 'windows-product'].map(kind => result(spec.id, kind, fields));
+    if (spec.id === 'LOCK-06') fields.checks = ['sleep-resumed'];
+    return [result(spec.id, spec.id.startsWith('LOCK-') ? 'two-windows' : spec.kinds[0], fields)];
+  });
+  green.push(result('MIGRATION', 'migration-rehearsal', { checks: ['migration-rehearsed', 'rollback-rehearsed'] }));
+  assert.equal((await assessment(green)).release.status, 'passed');
+
+  for (const [caseId, status, releaseStatus] of [
+    ['PERF-02', 'failed', 'blocked'], ['PERF-03', 'blocked', 'pending']
+  ]) {
+    const adverse = result(caseId, 'windows-product', { status, timestamp: '2026-01-02T04:00:00Z' });
+    const scopedRetests = green.filter(entry => entry.caseId === caseId && entry.kind === 'windows-product')
+      .map(entry => ({ ...entry, timestamp: '2026-01-02T04:01:00Z' }));
+    const unresolved = await assessment([...green, adverse, ...scopedRetests.slice(0, 2)]);
+    assert.equal(unresolved.release.gates['windows-latency'], status, caseId);
+    assert.equal(unresolved.release.status, releaseStatus, caseId);
+    assert.equal(unresolved.development.status, 'passed', caseId);
+    assert.equal(row(unresolved, caseId).status, 'passed', caseId);
+    assert.ok(row(unresolved, caseId).attempts.some(entry => entry.kind === 'windows-product' && entry.status === status));
+    assert.equal((await assessment([...green, adverse, ...scopedRetests])).release.status, 'passed', caseId);
+    const simultaneous = scopedRetests.map(entry => ({ ...entry, timestamp: adverse.timestamp }));
+    assert.equal((await assessment([...green, adverse, ...simultaneous])).release.gates['windows-latency'], status, caseId);
+    const unrelated = { ...adverse, kind: 'hosted-linux' };
+    assert.equal((await assessment([...green, unrelated])).release.status, 'passed', caseId);
+  }
+});
+
 test('scale evidence requires the synthetic run and an independent representative copy', async () => {
   const synthetic = result('PERF-01', 'nas', {
     checks: ['representative-scale'], measurements: { workCount: 50000 }

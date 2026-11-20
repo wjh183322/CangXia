@@ -65,8 +65,10 @@ function latestResult(row, relevant) {
 }
 
 function latencyResult(row, attempts) {
-  const scopes = cacheStates.map(scope => latestResult(row, attempts.filter(entry => entry.cacheState === scope)));
-  const missingScopes = cacheStates.filter((_, index) => scopes[index].status === 'unrun');
+  // Startup can fail before a cache state is known. Each state needs a newer result for this client kind.
+  const scopes = cacheStates.map(scope => latestResult(row, attempts.filter(entry =>
+    entry.cacheState === scope || (entry.cacheState === undefined && entry.status !== 'passed'))));
+  const missingScopes = cacheStates.filter(scope => !attempts.some(entry => entry.cacheState === scope));
   const status = takeWorst(scopes.map(scope => scope.status));
   return {
     status: status === 'unrun' ? 'blocked' : status, missingScopes,
