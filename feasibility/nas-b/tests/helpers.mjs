@@ -4,10 +4,15 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { prepareDataRoot, readProbeConfig } from '../src/config.mjs';
+import { openProbeStore } from '../src/store.mjs';
 
 export async function makeSandbox(t) {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), 'cangxia-probe-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const cleanups = [];
+  t.after(async () => {
+    for (const cleanup of cleanups.reverse()) await cleanup();
+    await rm(root, { recursive: true, force: true });
+  });
 
   const config = Object.freeze({
     ...readProbeConfig({
@@ -36,6 +41,7 @@ export async function makeSandbox(t) {
   return {
     root,
     config,
+    onCleanup: cleanup => cleanups.push(cleanup),
     prepare: changes => prepareDataRoot({ ...config, ...changes }, { fixtureRoot: root }),
     exists,
     read: relative => readFile(target(relative), 'utf8'),
@@ -69,6 +75,23 @@ export function sourceFixture(kind) {
     text: JSON.stringify(sourcePages[kind]),
     observedAt: '2026-01-01T00:00:00.000Z'
   };
+}
+
+export async function makeStoreFixture(t, { testHooks, source = { kind: 'total', id: '__all__' } } = {}) {
+  const sandbox = await makeSandbox(t);
+  const layout = await sandbox.prepare();
+  const file = path.join(layout.state, 'library.sqlite');
+  const libraryId = sandbox.config.libraryId;
+  const reopen = options => {
+    const opened = openProbeStore({ file, libraryId, ...options });
+    sandbox.onCleanup(() => opened.close());
+    return opened;
+  };
+  const store = reopen({ initialize: true, testHooks });
+  const job = store.createReadJob({ id: 'fixture-job', source, epoch: 1, authEpoch: 2 });
+  const opId = 'fixture-page';
+  const command = page => ({ jobId: job.id, epoch: job.epoch, authEpoch: job.authEpoch, operationId: opId, page });
+  return { store, file, libraryId, job, opId, command, reopen };
 }
 
 const sourcePages = JSON.parse(
