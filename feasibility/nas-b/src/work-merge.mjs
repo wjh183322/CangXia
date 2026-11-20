@@ -1,10 +1,8 @@
 import { mergeCreator, sameCreator } from '../../../shared/creators.mjs';
 
 const stable = creator => creator?.uid || creator?.secUid;
-const updateKeys = [
-  'title', 'caption', 'description', 'videoUrls', 'duration', 'width', 'height', 'publishedAt'
-];
-const coverOrder = ['origin_cover', 'cover_original_scale', 'cover'];
+const updateKeys = ['title', 'caption', 'description', 'publishedAt'];
+const videoParams = ['duration', 'width', 'height'];
 
 function mergeMusic(previous, next, fields) {
   if (!previous) return next;
@@ -26,23 +24,63 @@ function mergeMusic(previous, next, fields) {
   };
 }
 
-function mergeCover(merged, previous, next, fields) {
-  if (fields.has('coverVariants')) {
-    const bySource = new Map([...(previous.coverVariants ?? []), ...next.coverVariants]
-      .map(variant => [variant.source, variant]));
-    merged.coverVariants = coverOrder.filter(source => bySource.has(source)).map(source => bySource.get(source));
+function coversCandidate(previous, next) {
+  return next && next.urls.length >= previous.urls.length &&
+    Number(next.width ?? 0) >= Number(previous.width ?? 0) &&
+    Number(next.height ?? 0) >= Number(previous.height ?? 0);
+}
+
+function mergeMedia(merged, previous, observed, fields) {
+  // Choose a coherent snapshot for each media family. Shorter or lower-quality
+  // observations retain the prior family without mixing candidate versions.
+  const oldQuality = previous.mediaQuality ?? {};
+  const incoming = observed.mediaQuality ?? {};
+  const quality = { ...oldQuality };
+  const byIndex = new Map(observed.images.map(image => [image.index, image]));
+  const imagesComplete = fields.has('images') && (previous.images ?? []).every(image =>
+    coversCandidate(image, byIndex.get(image.index)) &&
+    (incoming.imageOriginals?.[image.index] ?? 0) >= (oldQuality.imageOriginals?.[image.index] ?? 0)
+  );
+  if (imagesComplete) {
+    merged.images = observed.images;
+    merged.type = observed.type;
+    quality.imageOriginals = incoming.imageOriginals ?? {};
   }
 
-  const previousPriority = coverOrder.indexOf(previous.coverSource);
-  const incomingPriority = coverOrder.indexOf(next.coverSource);
-  if (fields.has('coverUrls') && (!previous.coverUrls?.length || incomingPriority <= previousPriority)) {
-    merged.coverUrls = next.coverUrls;
-    merged.coverSource = next.coverSource;
+  const hasVideo = fields.has('videoUrls');
+  const pixels = incoming.videoPixels ?? 0;
+  const previousPixels = oldQuality.videoPixels ?? 0;
+  const bitRate = incoming.videoBitRate ?? 0;
+  const previousVideos = previous.videoUrls?.length ?? 0;
+  const hasVideoMetadata = !previousVideos ||
+    ((!previous.duration || fields.has('duration')) &&
+      ['width', 'height'].every(key => Number(observed[key] ?? 0) >= Number(previous[key] ?? 0)));
+  const videoComplete = hasVideo && hasVideoMetadata && observed.videoUrls.length >= previousVideos &&
+    (incoming.videoRanked ?? 0) >= (oldQuality.videoRanked ?? 0) &&
+    (pixels > previousPixels || (pixels === previousPixels && bitRate >= (oldQuality.videoBitRate ?? 0)));
+  if (videoComplete) {
+    merged.videoUrls = observed.videoUrls;
+    quality.videoRanked = incoming.videoRanked ?? 0;
+    quality.videoPixels = pixels;
+    quality.videoBitRate = bitRate;
   }
-  if (fields.has('thumbnail')) {
-    merged.thumbnail = merged.coverVariants?.find(variant => variant.source === 'cover')?.urls[0] ||
-      merged.coverUrls?.[0] || next.thumbnail;
+  for (const key of videoParams) {
+    if (fields.has(key) && (videoComplete || (!hasVideo && !previous[key]))) merged[key] = observed[key];
   }
+
+  const bySource = new Map(observed.coverVariants.map(variant => [variant.source, variant]));
+  const coverComplete = fields.has('coverUrls') &&
+    observed.coverUrls.length >= (previous.coverUrls?.length ?? 0) &&
+    (previous.coverVariants ?? []).every(variant => coversCandidate(variant, bySource.get(variant.source)));
+  if (coverComplete) {
+    merged.coverVariants = observed.coverVariants;
+    merged.coverUrls = observed.coverUrls;
+    merged.coverSource = observed.coverSource;
+    merged.thumbnail = observed.thumbnail;
+  } else if (imagesComplete && !previous.coverUrls?.length) {
+    merged.thumbnail = observed.images[0]?.urls[0] || previous.thumbnail;
+  }
+  merged.mediaQuality = quality;
 }
 
 export function mergeObservedWork(previous, observed) {
@@ -85,11 +123,7 @@ export function mergeObservedWork(previous, observed) {
     merged.creatorsCheckedAt = observed.creatorsCheckedAt;
   }
 
-  if (fields.has('images')) {
-    merged.images = observed.images;
-    merged.type = observed.type;
-  }
-  mergeCover(merged, previous, observed, fields);
+  mergeMedia(merged, previous, observed, fields);
   if (fields.has('music')) merged.music = mergeMusic(previous.music, observed.music, fields);
   if (observed.remoteState === 'unavailable') {
     merged.remoteState = observed.remoteState;

@@ -92,8 +92,9 @@ test('matches original parsers for all fields of complete media fixtures', () =>
   assert.equal(page.nextCursor, null);
   for (const [index, raw] of items.entries()) {
     const old = parseWork(raw);
-    const { observedFields, ...work } = page.works[index];
+    const { observedFields, mediaQuality, ...work } = page.works[index];
     assert.ok(observedFields.includes('author'));
+    assert.ok(mediaQuality.videoRanked >= 0);
     old.checkedAt = input.observedAt;
     if (old.creatorsCheckedAt) old.creatorsCheckedAt = input.observedAt;
     assert.deepEqual(work, old);
@@ -189,4 +190,172 @@ test('keeps supported tag fragments and excludes arbitrary response data', () =>
   assert.throws(() => pageOf([{ aweme_id: '101', video: {
     cover: { url_list: ['https://fixture:synthetic-userinfo-secret@fixture.douyinpic.com/cover'] }
   } }]), { name: 'ProbeError' });
+});
+
+test('rejects duplicate decoded object keys and holds strict JSON limits', () => {
+  const input = sourceFixture('two-works');
+  const pages = [
+    '{"has_more":true,"has_more":false,"aweme_list":[]}',
+    String.raw`{"has_more":true,"has_\u006dore":false,"aweme_list":[]}`,
+    '{"aweme_list":[{"aweme_id":101,"aweme_id":102}],"has_more":false}',
+    '{"unused":{"x":1,"x":2},"aweme_list":[],"has_more":false}',
+    '{"aweme_list":[],"has_more":false,}',
+    '{"aweme_list":[],"has_more":false/* comment */}',
+    '{"aweme_list":[],"has_more":false,"unused":' + '['.repeat(128) + '0' + ']'.repeat(128) + '}',
+    '{"aweme_list":[],"has_more":false,"unused":"' + 'ü'.repeat(4 * 1024 * 1024) + '"}'
+  ];
+  for (const [index, text] of pages.entries()) {
+    assert.throws(() => parseSourcePage({ ...input, text }), { code: 'SOURCE_PAGE_INVALID' }, 'page ' + index);
+  }
+  assert.equal(pageOf([{ aweme_id: '101' }, { aweme_id: '102' }]).uniqueCount, 2);
+});
+
+test('rejects rounded decimal and exponent tokens in numeric identities and cursors', () => {
+  const input = sourceFixture('two-works');
+  const pages = [
+    '{"aweme_list":[{"aweme_id":100.000000000000001}],"has_more":false}',
+    '{"aweme_list":[{"awemeId":1e2}],"has_more":false}',
+    '{"aweme_list":[{"aweme_id":100,"author":{"uid":100.000000000000001}}],"has_more":false}',
+    '{"aweme_list":[{"aweme_id":100,"music":{"id":100.000000000000001}}],"has_more":false}',
+    '{"aweme_list":[{"aweme_id":100}],"has_more":true,"max_cursor":21.000000000000001}',
+    '{"aweme_list":[{"aweme_id":100}],"has_more":true,"cursor":2.1e1}'
+  ];
+  for (const text of pages) {
+    assert.throws(() => parseSourcePage({ ...input, text }), { code: 'SOURCE_PAGE_INVALID' }, text);
+  }
+});
+
+test('keeps coherent prior media when a later row supplies sparse nonempty candidates', () => {
+  const [known] = parseSourcePage(sourceFixture('media')).works;
+  const [partial] = pageOf([{
+    aweme_id: '101',
+    images: [{ url_list: ['https://fixture.douyinpic.com/new-preview'] }],
+    video: {
+      play_addr: { url_list: ['https://fixture.douyinvod.com/new-low'] },
+      origin_cover: { url_list: ['https://fixture.douyinpic.com/new-cover'] }
+    }
+  }]).works;
+  const merged = mergeObservedWork(known, partial);
+  for (const field of ['images', 'videoUrls', 'coverVariants', 'coverUrls', 'coverSource', 'thumbnail']) {
+    assert.deepEqual(merged[field], known[field], field);
+  }
+});
+
+test('retains original image candidates and ranked video when candidate counts are unchanged', () => {
+  const url = name => 'https://fixture.douyinvod.com/' + name;
+  const [known] = pageOf([{
+    aweme_id: '101',
+    images: [{ width: 512, height: 512, origin_image: { url_list: [url('original')] } }],
+    video: { play_addr_h264_1080p: { url_list: [url('high')] } }
+  }]).works;
+  const [weak] = pageOf([{
+    aweme_id: '101',
+    images: [{ width: 512, height: 512, display_image: { url_list: [url('preview')] } }],
+    video: { play_addr: { url_list: [url('low')] } }
+  }]).works;
+  assert.deepEqual(mergeObservedWork(known, weak).images, known.images);
+  assert.deepEqual(mergeObservedWork(known, weak).videoUrls, known.videoUrls);
+});
+
+test('replaces media with the exact normalized output of a complete refresh', () => {
+  const input = sourceFixture('media');
+  const [known] = parseSourcePage(input).works;
+  const refresh = parsePlatformJSON(input.text).data.aweme_list[0];
+  for (const owner of [refresh.images[0], refresh.images[1], refresh.video.origin_cover,
+    refresh.video.cover, refresh.video.cover_original_scale]) {
+    for (const key of ['url_list', 'watermark_free_download_url_list']) {
+      if (owner[key]) owner[key] = owner[key].map(url => url + '?x-signature=refresh');
+    }
+  }
+  refresh.video.bit_rate[0].play_addr.url_list = ['https://fixture.douyinvod.com/changed-encoded-video'];
+  const [updated] = pageOf([refresh]).works;
+  const merged = mergeObservedWork(known, updated);
+  for (const field of ['images', 'videoUrls', 'coverVariants', 'coverUrls', 'coverSource', 'thumbnail']) {
+    assert.deepEqual(merged[field], updated[field], field);
+  }
+  assert.notDeepEqual(merged.videoUrls, known.videoUrls);
+  assert.notDeepEqual(merged.images, known.images);
+  assert.notDeepEqual(merged.coverVariants, known.coverVariants);
+});
+
+test('keeps malformed coauthor observations unknown while honoring deliberate filter rules', () => {
+  const [known] = parseSourcePage(sourceFixture('media')).works;
+  const variants = [[{}], [null], [{ invite_status: 'broken' }], [{ uid: '111' }, {}]];
+  for (const co_creators of variants) {
+    const [partial] = pageOf([{ aweme_id: known.id, cooperation_info: { co_creators } }]).works;
+    assert.equal(partial.coAuthorsState, 'unknown');
+    assert.equal(partial.coAuthors, undefined);
+    assert.deepEqual(mergeObservedWork(known, partial).coAuthors, known.coAuthors);
+    assert.equal(mergeObservedWork(known, partial).creatorsCheckedAt, known.creatorsCheckedAt);
+  }
+
+  const [filtered] = pageOf([{
+    aweme_id: known.id, cooperation_info: { co_creators: [{ invite_status: 0 }, { invite_status: false }] }
+  }]).works;
+  assert.equal(filtered.coAuthorsState, 'verified');
+  assert.deepEqual(filtered.coAuthors, []);
+});
+
+test('rejects credentials in media URL query and fragment but retains CDN signatures', () => {
+  const base = 'https://fixture.douyinvod.com/track';
+  for (const suffix of ['?sessionid_ss=synthetic-session', '?%75ID_TT=synthetic-session',
+    '#sessionid_ss=synthetic-session', '#track?SID_GUARD=synthetic-session',
+    '#sessionid_ss=synthetic-session?name=value', '?passport_csrf_token=synthetic-session']) {
+    assert.throws(() => pageOf([{
+      aweme_id: '101', music: { id: '877', play_url: { url_list: [base + suffix] } }
+    }]), { code: 'SOURCE_PAGE_INVALID' }, suffix);
+  }
+  const signed = base + '?x-signature=synth&x-expires=99';
+  const page = pageOf([{ aweme_id: '101', video: { play_addr: { url_list: [signed] } } }]);
+  assert.deepEqual(page.works[0].videoUrls, [signed]);
+});
+
+test('keeps a compatible known music hint across duplicate rows', () => {
+  const row = (id, filename) => ({
+    aweme_id: '101',
+    music: { id, play_url: { url_list: ['https://fixture.douyinvod.com/' + filename] } }
+  });
+  const first = row('877', 'known');
+  const page = pageOf([first, row(undefined, 'unidentified')]);
+  assert.equal(page.works[0].music.id, '877');
+  assert.deepEqual(page.aux.audioSourceHints[0].sources, audioSources(first));
+  assert.deepEqual(page.aux.audioSourceHints[0].music, page.works[0].music);
+
+  const changed = row('878', 'changed');
+  const refreshed = pageOf([first, changed]);
+  assert.equal(refreshed.works[0].music.id, '878');
+  assert.deepEqual(refreshed.aux.audioSourceHints[0].sources, audioSources(changed));
+});
+
+test('keeps the higher bit rate and known same-source cover dimensions', () => {
+  const row = (rate, coverWidth) => ({
+    aweme_id: '101',
+    video: {
+      bit_rate: [{
+        bit_rate: rate,
+        play_addr: { width: 1440, height: 900, url_list: ['https://fixture.douyinvod.com/video-' + rate] }
+      }],
+      origin_cover: {
+        width: coverWidth, height: 900, url_list: ['https://fixture.douyinpic.com/cover-' + rate]
+      }
+    }
+  });
+  const [known] = pageOf([row(1400, 1440)]).works;
+  const [partial] = pageOf([row(400, undefined)]).works;
+  const merged = mergeObservedWork(known, partial);
+  assert.deepEqual(merged.videoUrls, known.videoUrls);
+  assert.deepEqual(merged.coverVariants, known.coverVariants);
+});
+
+test('preserves known video dimensions when an otherwise matching candidate is sparse', () => {
+  const row = (name, width, height) => ({
+    aweme_id: '101',
+    video: { width, height, play_addr: { url_list: ['https://fixture.douyinvod.com/' + name] } }
+  });
+  const [known] = pageOf([row('known', 1920, 1080)]).works;
+  const [partial] = pageOf([row('short', 640, undefined)]).works;
+  const merged = mergeObservedWork(known, partial);
+  assert.deepEqual(merged.videoUrls, known.videoUrls);
+  assert.equal(merged.width, 1920);
+  assert.equal(merged.height, 1080);
 });

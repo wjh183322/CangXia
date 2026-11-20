@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { visit } from 'jsonc-parser';
 import { pageResult } from '../../../electron/api-pagination.mjs';
+import { normalizeCreator, mergeCreator, sameCreator } from '../../../shared/creators.mjs';
 import { parsePlatformJSON, parseWork } from '../../../electron/model.mjs';
 import { audioSources } from '../../../electron/work-audio.mjs';
-import { mergeCreator, sameCreator } from '../../../shared/creators.mjs';
 import { ProbeError } from './contracts.mjs';
 import { mergeObservedWork } from './work-merge.mjs';
 
@@ -26,8 +27,47 @@ function validateSource(source) {
   return { kind, id };
 }
 
+const maxPageBytes = 8 * 1024 * 1024;
+const maxJsonDepth = 128;
+const integerKeys = new Set([
+  'aweme_id', 'awemeId', 'uid', 'user_id', 'short_id', 'shortId', 'unique_id', 'uniqueId',
+  'hashtag_id', 'tag_id', 'cid', 'cha_id', 'cursor', 'max_cursor', 'has_more', 'status_code', 'invite_status'
+]);
+
+// Keep the baseline parser as the value decoder. The visitor sees key repetitions
+// and exact numeric tokens before JSON.parse could discard or round them.
+function validateJson(text) {
+  const containers = [];
+  function enter(keys) {
+    if (containers.length === maxJsonDepth) throw invalid('来源响应 JSON 嵌套过深');
+    containers.push(keys);
+  }
+  visit(text, {
+    onObjectBegin: () => enter(new Set()),
+    onArrayBegin: () => enter(null),
+    onObjectEnd: () => containers.pop(),
+    onArrayEnd: () => containers.pop(),
+    onObjectProperty(key) {
+      const keys = containers.at(-1);
+      if (keys.has(key)) throw invalid('来源响应 JSON 包含重复属性');
+      keys.add(key);
+    },
+    onLiteralValue(value, offset, length, line, column, getPath) {
+      if (typeof value !== 'number') return;
+      const path = getPath();
+      const key = path.at(-1);
+      if (integerKeys.has(key) || (path.at(-2) === 'music' && ['id', 'id_str'].includes(key))) {
+        if (!isCursor(text.slice(offset, offset + length))) throw invalid('来源标识或分页数值不是十进制整数');
+      }
+    },
+    onError() { throw invalid('来源响应不是严格 JSON'); }
+  }, { disallowComments: true, allowTrailingComma: false, allowEmptyContent: false });
+}
+
 function readEnvelope(text) {
   if (!isText(text)) throw invalid('需要完整的来源响应文本');
+  if (Buffer.byteLength(text, 'utf8') > maxPageBytes) throw invalid('来源响应超过页面大小上限');
+  validateJson(text);
   let data;
   try {
     data = parsePlatformJSON(text);
@@ -78,6 +118,9 @@ function tagFragments(rows) {
     ])));
 }
 
+const imageRowsOf = raw => raw.images || raw.image_post_info?.images ||
+  raw.image_post_info?.image_list || raw.image_list;
+
 function observedFields(raw, work) {
   const video = raw.video;
   const fields = ['id', 'url', 'checkedAt'];
@@ -91,9 +134,7 @@ function observedFields(raw, work) {
   if (work.author.uid || work.author.secUid) fields.push('author');
   if (work.coAuthorsState === 'verified') fields.push('coAuthors');
 
-  const imageRows = raw.images || raw.image_post_info?.images ||
-    raw.image_post_info?.image_list || raw.image_list;
-  if (work.images.length && work.images.length === imageRows?.length) fields.push('images');
+  if (work.images.length && work.images.length === imageRowsOf(raw)?.length) fields.push('images');
   if (work.videoUrls.length) fields.push('videoUrls');
   if (work.coverVariants.length) fields.push('coverVariants');
   if (work.coverUrls.length) fields.push('coverUrls');
@@ -109,6 +150,67 @@ function observedFields(raw, work) {
   return fields;
 }
 
+function candidateUrls(address) {
+  const urls = typeof address === 'string' ? [address] : address?.url_list || address?.urlList;
+  return Array.isArray(urls) ? urls.filter(isText).map(url => url.replace(/^http:/, 'https:')) : [];
+}
+
+function mediaQuality(raw, work) {
+  const images = imageRowsOf(raw);
+  const imageOriginals = Object.fromEntries(work.images.map(({ index, urls }) => {
+    const row = images[index];
+    const original = [
+      ...candidateUrls({ url_list: row.watermark_free_download_url_list }),
+      ...candidateUrls(row.origin_image)
+    ];
+    return [index, new Set(original.filter(url => urls.includes(url))).size];
+  }));
+
+  const video = raw.video ?? {};
+  const normalized = new Set(work.videoUrls);
+  const variants = (video.bit_rate || video.bitRate || []).map(row => ({
+    address: row.play_addr || row.playAddr, ranked: true, bitRate: Number(row.bit_rate || row.bitRate || 0)
+  }));
+  const addresses = [
+    ...variants,
+    { address: video.play_addr_h264_1080p, pixels: 1080 * 1920 },
+    { address: video.play_addr_1080p, pixels: 1080 * 1920 },
+    { address: video.play_addr_h264_720p, pixels: 720 * 1280 },
+    { address: video.play_addr_720p, pixels: 720 * 1280 },
+    { address: video.play_addr_h264, ranked: true },
+    { address: video.play_addr_265, ranked: true },
+    { address: video.play_addr || video.playAddr }
+  ];
+  const rankedUrls = new Set();
+  let videoPixels = 0;
+  let videoBitRate = 0;
+  for (const { address, ranked, pixels, bitRate } of addresses) {
+    const urls = candidateUrls(address).filter(url => normalized.has(url));
+    if (!urls.length) continue;
+    if (ranked || pixels) for (const url of urls) rankedUrls.add(url);
+    const area = Number(address?.width ?? 0) * Number(address?.height ?? 0);
+    const size = (Number.isFinite(area) && area) || pixels || 0;
+    const rate = Number.isFinite(bitRate) ? bitRate : 0;
+    if (size > videoPixels) {
+      videoPixels = size;
+      videoBitRate = rate;
+    } else if (size === videoPixels) {
+      videoBitRate = Math.max(videoBitRate, rate);
+    }
+  }
+  return { imageOriginals, videoRanked: rankedUrls.size, videoPixels, videoBitRate };
+}
+
+const sessionKeys = new Set([
+  'authorization', 'cookie', 'setcookie', 'sessionid', 'sessionidss', 'uidtt', 'uidttss',
+  'sidguard', 'sidtt', 'mstoken', 'password', 'accesstoken', 'refreshtoken',
+  'passportcsrftoken', 'passportcsrftokendefault'
+]);
+
+function isSessionKey(key) {
+  return sessionKeys.has(key.toLowerCase().replace(/[^a-z0-9]/g, ''));
+}
+
 function verifyMediaReferences(work, hints) {
   const urls = [
     ...work.videoUrls, ...work.coverUrls,
@@ -117,10 +219,11 @@ function verifyMediaReferences(work, hints) {
     ...hints.flatMap(hint => hint.urls)
   ];
   for (const url of urls) {
-    const { username, password, searchParams } = new URL(url);
-    const hasSessionParameter = [...searchParams.keys()].some(key =>
-      /^(authorization|cookie|sessionid|sid_guard|msToken|password|access_token)$/i.test(key));
-    if (username || password || hasSessionParameter) throw invalid('媒体地址包含登录凭据');
+    const { username, password, searchParams, hash } = new URL(url);
+    const fragmentParams = new URLSearchParams(hash.slice(1).replaceAll('?', '&'));
+    if (username || password || [...searchParams.keys(), ...fragmentParams.keys()].some(isSessionKey)) {
+      throw invalid('媒体地址包含登录凭据');
+    }
   }
 }
 
@@ -137,6 +240,24 @@ function validateCreator(creator) {
   }
 }
 
+function verifiedCoCreators(rows) {
+  if (!Array.isArray(rows) || rows.length > 64) return false;
+  return rows.every(row => {
+    if (!isRecord(row)) return false;
+    if (row.invite_status != null) {
+      if (typeof row.invite_status !== 'boolean' && !isCursor(integerText(row.invite_status))) return false;
+      if (Number(row.invite_status) !== 1) return true;
+    }
+    try {
+      validateCreator(row);
+    } catch {
+      return false;
+    }
+    const creator = normalizeCreator(row);
+    return Boolean(creator.uid || creator.secUid);
+  });
+}
+
 function observe(raw, observedAt) {
   if (!isRecord(raw)) throw invalid('来源页包含无效作品');
   const id = integerText(raw.aweme_id ?? raw.awemeId);
@@ -146,12 +267,16 @@ function observe(raw, observedAt) {
   }
   validateCreator(raw.author);
   const coCreators = raw.cooperation_info?.co_creators;
-  if (Array.isArray(coCreators)) for (const creator of coCreators) validateCreator(creator);
+  const malformedCoCreators = coCreators != null && !verifiedCoCreators(coCreators);
 
   let work;
   let hints;
   try {
-    work = parseWork({ ...raw, aweme_id: id });
+    work = parseWork({
+      ...raw, aweme_id: id,
+      ...(malformedCoCreators ? { cooperation_info: undefined } : {})
+    });
+    if (malformedCoCreators) work.coAuthorsState = 'unknown';
     hints = audioSources(raw);
     verifyMediaReferences(work, hints);
     const dimensions = [
@@ -179,7 +304,7 @@ function observe(raw, observedAt) {
       method: 'platform', checkedAt: observedAt
     };
   }
-  return { work: { ...work, observedFields: fields }, hints };
+  return { work: { ...work, observedFields: fields, mediaQuality: mediaQuality(raw, work) }, hints };
 }
 
 function collectProfiles(works) {
@@ -196,6 +321,8 @@ function collectProfiles(works) {
   return profiles;
 }
 
+const musicIdentity = work => work?.music?.id && work.music.id !== '0' ? work.music.id : '';
+
 export function parseSourcePage({ source, inputCursor, status, text, observedAt } = {}) {
   source = validateSource(source);
   if (!isCursor(inputCursor)) throw invalid('输入游标无效');
@@ -211,12 +338,15 @@ export function parseSourcePage({ source, inputCursor, status, text, observedAt 
     const { work, hints } = observe(raw, observedAt);
     const previous = observations.get(work.id);
     const sources = previous?.sources ?? new Map();
-    if (previous?.work.music?.id && work.music?.id && previous.work.music.id !== work.music.id) {
-      sources.delete('music');
+    const mergedWork = mergeObservedWork(previous?.work, work);
+    const musicId = musicIdentity(mergedWork);
+    if (musicId !== musicIdentity(previous?.work)) sources.delete('music');
+    for (const hint of hints) {
+      if (hint.kind === 'music' && musicIdentity(work) !== musicId) continue;
+      sources.set(hint.kind, hint);
     }
-    for (const hint of hints) sources.set(hint.kind, hint);
     observations.set(work.id, {
-      work: mergeObservedWork(previous?.work, work),
+      work: mergedWork,
       rank: previous?.rank ?? rank,
       sources
     });
