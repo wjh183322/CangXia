@@ -76,12 +76,16 @@ export function auditImageManifest({ paths, inspect, inputs } = {}) {
   const missingRuntimeFiles = [...expectedFiles].filter(file => !files.has(file));
   if (missingRuntimeFiles.length) problems.push('RUNTIME_FILES_MISSING');
   let unexpectedFileCount = 0;
+  let unexpectedProjectFileCount = 0;
   for (const file of files) {
     if (!file) continue;
     if (file.startsWith(PROJECT_ROOT + '/')) {
       const packageFile = packages.some(name => file.startsWith(packageRoot + name + '/'));
       if ((!expectedFiles.has(file) && !permittedDirectories.has(file) &&
-        !packageFile && file !== packageRoot + '.package-lock.json') || secretPath.test(file)) unexpectedFileCount++;
+        !packageFile && file !== packageRoot + '.package-lock.json') || secretPath.test(file)) {
+        unexpectedFileCount++;
+        unexpectedProjectFileCount++;
+      }
     } else if (/^\.\.?\/|\/\.\.?(?:\/|$)/.test(file) ||
       /^(?:root|home)\/(?:.*\/)?\.ssh(?:\/|$)/.test(file) ||
       (protectedRoots.test(file) && file !== 'probe') ||
@@ -109,7 +113,8 @@ export function auditImageManifest({ paths, inspect, inputs } = {}) {
         layers.some(digest => !/^sha256:[a-f0-9]{64}$/.test(digest))) problems.push('IMAGE_LAYERS_MISMATCH');
   }
   // File names from an unknown build may themselves contain credentials.
-  return { ok: !problems.length, problems, fileCount: files.size, unexpectedFileCount, missingRuntimeFiles, layerCount,
+  return { ok: !problems.length, problems, fileCount: files.size, unexpectedFileCount, unexpectedProjectFileCount,
+    unexpectedGoldenMountParent: files.has(PROJECT_ROOT + '/tests'), missingRuntimeFiles, layerCount,
     baseLayerCount: inputs && baseLayers.length };
 }
 

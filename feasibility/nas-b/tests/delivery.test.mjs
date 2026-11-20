@@ -48,6 +48,8 @@ test('DEPLOY-01 build pins the official amd64 manifest and complete runtime', ()
   const locks = source('../cover-runtime.lock');
   assert.match(locks, /numpy==2\.2\.6[\s\\]+--hash=sha256:[a-f0-9]{64}/);
   assert.match(locks, /opencv-python-headless==4\.11\.0\.86[\s\\]+--hash=sha256:[a-f0-9]{64}/);
+  assert.match(dockerfile, /source=tests\/cover-frame-test[.]py,target=\/opt\/cangxia\/scripts\/cover-frame-test[.]py/);
+  assert.match(dockerfile, /python \/opt\/cangxia\/scripts\/cover-frame-test[.]py/);
   assert.doesNotMatch(dockerfile + locks, /pyinstaller|npm run start/i);
   assert.doesNotMatch(source('../nas-entrypoint.sh'), /\b(?:npm|pip|apt|getent|curl)\b/);
 });
@@ -122,6 +124,14 @@ test('DEPLOY-03 context allowlist and content audit exclude secrets, old app, an
     PROJECT_ROOT + '/feasibility/nas-b/node_modules/.bin/playwright-core');
   const manifest = { paths };
   assert.equal(auditImageManifest(manifest).ok, true);
+  assert.equal(auditImageManifest(manifest).unexpectedGoldenMountParent, false);
+  const undisclosed = PROJECT_ROOT + '/ci-unknown/fixture-private-name';
+  const oldGoldenMountParent = auditImageManifest({ paths: [...paths, './' + PROJECT_ROOT + '/tests/', undisclosed] });
+  assert.equal(oldGoldenMountParent.ok, false);
+  assert.equal(oldGoldenMountParent.unexpectedFileCount, 2);
+  assert.equal(oldGoldenMountParent.unexpectedProjectFileCount, 2);
+  assert.equal(oldGoldenMountParent.unexpectedGoldenMountParent, true);
+  assert.ok(!JSON.stringify(oldGoldenMountParent).includes(undisclosed));
   for (const extra of [
     PROJECT_ROOT + '/.evidence/run/private.json', PROJECT_ROOT + '/backup-server/index.mjs',
     PROJECT_ROOT + '/tests/auth.json', PROJECT_ROOT + '/feasibility/nas-b/node_modules/playwright-core/.env',
@@ -142,6 +152,8 @@ test('DEPLOY-03 context allowlist and content audit exclude secrets, old app, an
   assert.match(workflow, /branches: \[codex\/server-edition\]/);
   assert.match(workflow, /contents: read/);
   assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /audit_image_layers[.]py/);
+  assert.match(workflow, /Local build exporter digest/);
   assert.doesNotMatch(workflow, /workflow_dispatch|packages: write|docker (?:push|login)|upload-artifact|backup-v/);
 });
 

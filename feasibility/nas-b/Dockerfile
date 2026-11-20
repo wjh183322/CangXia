@@ -49,9 +49,9 @@ COPY --chmod=0555 feasibility/nas-b/nas-entrypoint.sh ./
 RUN mkdir /probe
 
 USER 1000:1000
-RUN --mount=type=bind,source=tests/cover-frame-test.py,target=/opt/cangxia/tests/cover-frame-test.py \
+RUN --mount=type=bind,source=tests/cover-frame-test.py,target=/opt/cangxia/scripts/cover-frame-test.py \
     --network=none set -eux; \
-    python /opt/cangxia/tests/cover-frame-test.py; \
+    python /opt/cangxia/scripts/cover-frame-test.py; \
     fixture="$(mktemp --suffix=.mp4)"; \
     trap 'rm -f "$fixture"' EXIT; \
     ffmpeg -v error -y -f lavfi -i testsrc2=size=96x54:rate=10 -frames:v 2 -c:v libx264 -pix_fmt yuv420p "$fixture"; \
