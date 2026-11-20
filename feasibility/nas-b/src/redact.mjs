@@ -1,14 +1,14 @@
 
 const REDACTED = '[redacted]';
-const sensitiveKey = /authorization|cookie|token|password|passwd|secret|credential|privatekey|apikey|accesskey|leaseproof|storage(state|path)|^(proof|stack|env|response(body|text)?|raw(body|response|text)|sourceresponse|requestbody|headers|qr(code|image)?|data(root|dir)|profile(dir|path)|host(path|name|port)|canonicalsource|lanaddress|filepath)$/;
+const sensitiveKey = /authorization|cookie|token|password|passwd|secret|credential|privatekey|apikey|accesskey|leaseproof|storage(state|path)|^(proof|stack|env|response(body|text)?|raw(body|response|text)|sourceresponse|body|requestbody|headers|qr(code|image|frame)?|data(root|dir)|profile(dir|path)|host(path|name|port)|canonicalsource|lanaddress|filepath)$/;
 
 function redactText(text) {
   return text
     .replace(/-----BEGIN [\w ]*PRIVATE KEY-----[\s\S]*?(?:-----END [\w ]*PRIVATE KEY-----|$)/g, REDACTED)
     .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi, REDACTED)
     .replace(/["'](?:[^"']*(?:cookie|token|password|secret|authorization|api[-_]?key|access[-_]?key|proof))["']\s*:\s*["'](?:\\.|[^"'\\])*["']/gi, REDACTED)
-    .replace(/\b(?:cookie|set-cookie|authorization|proxy-authorization)\s*:\s*[^\r\n]*/gi, REDACTED)
-    .replace(/\b(?:\w*(?:token|password|secret)|api[-_]?key|access[-_]?key|proof)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, REDACTED)
+    .replace(/\b(?:cookie|set-cookie|authorization|proxy-authorization)\s*[:=]\s*[^\r\n]*/gi, REDACTED)
+    .replace(/\b(?:\w*(?:token|password|passwd|secret)|api[-_]?key|access[-_]?key|proof)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, REDACTED)
     .replace(/\b[A-Za-z]:[\\/][^\r\n"'<>]*|\\\\[^\\\s]+\\[^\r\n"'<>]*|(?<![\w/])\/(?:volume\d+|Users|home|mnt|run|tmp|var|probe)(?:\/[^\r\n"'<>]*)?/gi, REDACTED);
 }
 

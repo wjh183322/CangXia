@@ -4,7 +4,7 @@ import { link, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { PROBE, LIMITS, SESSION } from '../src/contracts.mjs';
-import { prepareDataRoot, readProbeConfig, validateDeployment } from '../src/config.mjs';
+import { assertIsolatedProbeMount, prepareDataRoot, readProbeConfig, validateDeployment } from '../src/config.mjs';
 import { redact } from '../src/redact.mjs';
 import { makeSandbox } from './helpers.mjs';
 
@@ -54,6 +54,51 @@ test('rejects implicit/production modes, ambiguous roots and invalid identifiers
   }
   assert.throws(() => readProbeConfig({ ...env, PROBE_RUN_ID: '../fixture' }), { code: 'INVALID_PROBE_ID' });
   assert.throws(() => readProbeConfig({ ...env, PROBE_PORT: '18443' }), { code: 'INVALID_PROBE_PORT' });
+});
+
+test('requires the fixed container port and keeps host port independent', async t => {
+  for (const PROBE_PORT of ['8444', '24443', '08443', undefined]) {
+    assert.throws(() => readProbeConfig({ ...env, PROBE_PORT }), { code: 'INVALID_PROBE_PORT' });
+  }
+  const sandbox = await makeSandbox(t);
+  await assert.rejects(sandbox.prepare({ port: 8444 }), { code: 'INVALID_PROBE_PORT' });
+  await sandbox.assertUninitialized();
+  assert.equal(validateDeployment({ ...deployment, hostPort: 24444 }).hostPort, 24444);
+});
+
+const mainMount = '20 19 0:42 / / rw,relatime - overlay overlay rw';
+const probeMount = '21 20 8:9 /isolated-run /probe rw,nosuid - ext4 /dev/test rw';
+const siblingMount = '22 20 8:9 /other /probe-other rw shared:7 - ext4 /dev/test rw';
+const nestedMount = String.raw`23 21 8:9 /foreign /probe/browser/folder\040name rw - ext4 /dev/test rw`;
+const mountInfo = (...lines) => lines.join('\n') + '\n';
+
+test('requires one dedicated mount and denies nested and stacked mounts, including same-device binds', () => {
+  assert.doesNotThrow(() => assertIsolatedProbeMount(mountInfo(mainMount, probeMount, siblingMount)));
+  for (const info of [
+    undefined,
+    '',
+    probeMount,
+    mountInfo(mainMount, siblingMount),
+    mountInfo(mainMount, probeMount.replace('rw,nosuid', 'ro,nosuid')),
+    mountInfo(mainMount, probeMount, nestedMount),
+    mountInfo(mainMount, probeMount, '24 21 8:9 /stacked /probe rw - ext4 /dev/test rw'),
+    mountInfo(mainMount, probeMount, 'malformed unrelated row')
+  ]) {
+    assert.throws(() => assertIsolatedProbeMount(info), { code: 'UNSAFE_PROBE_MOUNT' });
+  }
+});
+
+test('runtime mount preflight rejects unsafe mount data before creating the marker or layout', async t => {
+  const sandbox = await makeSandbox(t);
+  await assert.rejects(
+    prepareDataRoot(sandbox.config, {
+      fixtureRoot: sandbox.root,
+      fixtureMountInfo: mountInfo(mainMount, probeMount, nestedMount)
+    }),
+    { code: 'UNSAFE_PROBE_MOUNT' }
+  );
+  assert.equal(await sandbox.exists(PROBE.marker), false);
+  await sandbox.assertUninitialized();
 });
 
 test('foreign root is rejected before any initialization', async t => {
@@ -205,17 +250,20 @@ test('redacts structured secrets and common secret-bearing strings', () => {
     status: 'observed', count: 2, sample: null,
     cookie: 'sensitive-cookie', details: [{ accessKey: 'sensitive-access', proof: 'sensitive-proof' }],
     sourceResponse: { marker: 'sensitive-response' }, hostPath: '/sentinel/private',
+    body: { arbitrary: 'synthetic-request-body' }, qrFrame: 'synthetic-frame',
     messages: [
       'GET https://guest:password@source.invalid/download?msToken=sensitive-url#frag',
       'Authorization: Bearer sensitive-header\nrequest accepted',
       '-----BEGIN PRIVATE KEY-----\nsensitive-pem\n-----END PRIVATE KEY-----',
       'fs error C:\\Users\\sensitive-folder\\media',
-      '{"set-cookie":"sensitive-json; Secure"}'
+      '{"set-cookie":"sensitive-json; Secure"}',
+      'password: synthetic-password',
+      'proxy-authorization=synthetic-header'
     ]
   });
   assert.equal(result.status, 'observed');
   assert.equal(result.count, 2);
   assert.equal(result.sample, null);
   assert.match(result.messages[1], /request accepted/);
-  assert.doesNotMatch(JSON.stringify(result), /sensitive-|guest|password@|sentinel\/private|msToken/);
+  assert.doesNotMatch(JSON.stringify(result), /sensitive-|guest|password@|sentinel\/private|msToken|synthetic-/);
 });

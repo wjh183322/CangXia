@@ -1,6 +1,6 @@
 
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { LIMITS, PROBE, ProbeError, SESSION } from './contracts.mjs';
@@ -33,6 +33,13 @@ function portNumber(value) {
   return port;
 }
 
+function containerPort(value) {
+  if (value !== PROBE.containerPort && value !== String(PROBE.containerPort)) {
+    throw new ProbeError('INVALID_PROBE_PORT', 'The container API must use port 8443.');
+  }
+  return PROBE.containerPort;
+}
+
 export function readProbeConfig(env) {
   const {
     PROBE_MODE: mode, PROBE_ROOT: root, PROBE_RUN_ID: runId, PROBE_LIBRARY_ID: libraryId, PROBE_PORT: port
@@ -43,7 +50,7 @@ export function readProbeConfig(env) {
   }
   assertId(runId);
   assertId(libraryId);
-  return Object.freeze({ mode, root, runId, libraryId, port: portNumber(port), limits: LIMITS, session: SESSION });
+  return Object.freeze({ mode, root, runId, libraryId, port: containerPort(port), limits: LIMITS, session: SESSION });
 }
 
 function foreignRoot() {
@@ -89,17 +96,59 @@ async function verifyMarker(markerPath, expected) {
   }
 }
 
-export async function prepareDataRoot(config, { fixtureRoot } = {}) {
+function unsafeMount() {
+  return new ProbeError('UNSAFE_PROBE_MOUNT', 'The probe requires one isolated, writable data mount.');
+}
+
+const MOUNT_ESCAPES = { '040': ' ', '011': '\t', '012': '\n', '134': '\\' };
+
+export function assertIsolatedProbeMount(mountInfo) {
+  if (typeof mountInfo !== 'string' || !mountInfo.endsWith('\n')) throw unsafeMount();
+
+  // Linux mountinfo's fifth field is the mount point in the current namespace.
+  let rootMounts = 0;
+  for (const line of mountInfo.slice(0, -1).split('\n')) {
+    const fields = line.split(' ');
+    if (fields.length < 10 || fields[fields.length - 4] !== '-' || fields.includes('') ||
+        !/^\d+$/.test(fields[0]) || !/^\d+$/.test(fields[1]) || !/^\d+:\d+$/.test(fields[2]) ||
+        !fields[3].startsWith('/') || !fields[4].startsWith('/') || /\\(?!040|011|012|134)/.test(fields[4])) {
+      throw unsafeMount();
+    }
+    const point = fields[4].replace(/\\(040|011|012|134)/g, (_, escape) => MOUNT_ESCAPES[escape]);
+    if (point.startsWith(PROBE.root + '/')) throw unsafeMount();
+    if (point === PROBE.root) {
+      if (!fields[5].split(',').includes('rw')) throw unsafeMount();
+      rootMounts++;
+    }
+  }
+  if (rootMounts !== 1) throw unsafeMount();
+}
+
+async function readRuntimeMountInfo() {
+  try {
+    return await readFile('/proc/self/mountinfo', 'utf8');
+  } catch {
+    throw unsafeMount();
+  }
+}
+
+export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } = {}) {
   const { mode, root, runId, libraryId, port } = config;
   assertMode(mode);
   assertId(runId);
   assertId(libraryId);
-  portNumber(port);
+  containerPort(port);
   // Fixture paths are supplied directly by test code. Runtime configuration only admits /probe.
   if ((fixtureRoot === undefined && process.platform !== 'linux') ||
       root !== (fixtureRoot ?? PROBE.root) || !path.isAbsolute(root) ||
       path.normalize(root) !== root || path.parse(root).root === root) {
     throw unsafeRoot();
+  }
+
+  if (fixtureRoot === undefined) {
+    assertIsolatedProbeMount(await readRuntimeMountInfo());
+  } else if (fixtureMountInfo !== undefined) {
+    assertIsolatedProbeMount(fixtureMountInfo);
   }
 
   const layout = { root };
