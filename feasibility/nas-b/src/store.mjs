@@ -145,7 +145,11 @@ function withTransaction(db, mode, callback) {
   }
 }
 
-function checkPaths(file) {
+function sameFile(actual, expected) {
+  return actual?.dev === expected.dev && actual?.ino === expected.ino;
+}
+
+function checkPaths(file, { expected, empty = false } = {}) {
   if (typeof file !== 'string' || !path.isAbsolute(file) || path.normalize(file) !== file) throw unsafeDb();
   const seen = {};
   try {
@@ -160,15 +164,18 @@ function checkPaths(file) {
   } catch {
     throw unsafeDb();
   }
-  if (!seen[''] && (seen['-wal'] || seen['-shm'] || seen['-journal'])) throw unsafeDb();
-  return seen[''];
+  const stat = seen[''];
+  const hasSidecars = seen['-wal'] || seen['-shm'] || seen['-journal'];
+  if ((!stat && hasSidecars) || (expected && !sameFile(stat, expected)) ||
+      (empty && (stat?.size !== 0n || hasSidecars))) throw unsafeDb();
+  return stat;
 }
 
 function verifyHeader(file, expected) {
   const handle = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync(handle, { bigint: true });
-    if (!stat.isFile() || stat.nlink !== 1n || stat.ino !== expected.ino || stat.dev !== expected.dev) throw unsafeDb();
+    if (!stat.isFile() || stat.nlink !== 1n || !sameFile(stat, expected)) throw unsafeDb();
     // The identity header is written in rollback-journal mode on first initialization.
     const header = Buffer.alloc(72);
     if (readSync(handle, header, 0, header.length, 0) !== header.length ||
@@ -180,31 +187,47 @@ function verifyHeader(file, expected) {
 }
 
 function verifyIdentity(db, libraryId) {
+  const application = db.prepare('PRAGMA application_id').get();
   const tag = db.prepare('PRAGMA user_version').get();
+  if (application.application_id !== APPLICATION_ID || tag.user_version !== SCHEMA_VERSION) throw foreignDb();
   const identity = db.prepare('SELECT service,library_id FROM probe_identity WHERE singleton=1').get();
   const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table'").all();
   const names = new Set(tables.map(({ name }) => name));
-  if (tag.user_version !== SCHEMA_VERSION || identity?.service !== PROBE.service ||
+  if (identity?.service !== PROBE.service ||
       identity.library_id !== libraryId || !schemaTables.every(name => names.has(name))) throw foreignDb();
 }
 
+function createDatabaseFile(file) {
+  const descriptor = openSync(file, 'wx', 0o600);
+  try {
+    const stat = fstatSync(descriptor, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || stat.size !== 0n) throw unsafeDb();
+    return stat;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function openDatabase(file, libraryId, initialize) {
-  const stat = checkPaths(file);
-  if (initialize && stat) throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
-  if (!initialize && !stat) throw error('PROBE_DB_MISSING', 'The existing probe database is missing.');
+  let expected = checkPaths(file);
+  if (initialize && expected) throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
+  if (!initialize && !expected) throw error('PROBE_DB_MISSING', 'The existing probe database is missing.');
   const uri = pathToFileURL(file).href;
   if (initialize) {
     try {
-      closeSync(openSync(file, 'wx', 0o600));
+      expected = createDatabaseFile(file);
     } catch (cause) {
+      if (cause instanceof ProbeError) throw cause;
       if (cause.code === 'EEXIST') throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
       throw error('PROBE_DB_OPEN_FAILED', 'The probe database could not be initialized.');
     }
   } else {
     try {
-      verifyHeader(file, stat);
+      verifyHeader(file, expected);
+      checkPaths(file, { expected });
       const inspection = new DatabaseSync(uri + '?mode=ro', { readOnly: true, timeout: 1000 });
       try {
+        checkPaths(file, { expected });
         verifyIdentity(inspection, libraryId);
       } finally {
         inspection.close();
@@ -216,21 +239,29 @@ function openDatabase(file, libraryId, initialize) {
 
   let db;
   try {
+    // Recheck path identity at SQLite's file-open boundaries on the dedicated mount.
+    const pathCheck = { expected, empty: initialize };
+    checkPaths(file, pathCheck);
     // mode=rw makes SQLite refuse a path that disappears during recovery.
     db = new DatabaseSync(uri + '?mode=rw', { timeout: 1000 });
+    checkPaths(file, pathCheck);
     db.exec('PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF');
     if (initialize) {
+      checkPaths(file, pathCheck);
       withTransaction(db, 'BEGIN IMMEDIATE', () => {
+        // SQLite may have created the rollback journal when it acquired its write lock.
+        if (checkPaths(file, { expected }).size !== 0n) throw unsafeDb();
         db.exec(schema);
         db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${SCHEMA_VERSION}`);
         db.prepare('INSERT INTO probe_identity VALUES (1,?,?)').run(PROBE.service, libraryId);
       });
-    } else {
-      verifyIdentity(db, libraryId);
     }
+    verifyIdentity(db, libraryId);
+    checkPaths(file, { expected });
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') {
       throw error('PROBE_DB_OPEN_FAILED', 'The probe database requires WAL mode.');
     }
+    checkPaths(file, { expected });
     return db;
   } catch (cause) {
     db?.close();
@@ -449,15 +480,15 @@ class ProbeStore {
 
   commitPage({ jobId, epoch, authEpoch, operationId, page }, guard) {
     assertCallback(guard);
-    if (!isKey(jobId) || !isKey(operationId) || !isCount(epoch) ||
-        (authEpoch !== undefined && !isCount(authEpoch))) throw error('INVALID_PROBE_JOB', 'Page command identity is invalid.');
+    if (!isKey(jobId) || !isKey(operationId) || !isCount(epoch) || !isCount(authEpoch)) {
+      throw error('INVALID_PROBE_JOB', 'Page command identity is invalid.');
+    }
     page = validatePage(page);
 
     let replay = false;
     const receipt = this.withWrite(db => {
       const job = this.readJob(jobId);
       if (!job) throw error('PROBE_JOB_UNKNOWN', 'The read job does not exist.');
-      authEpoch ??= job.authEpoch;
       if (epoch !== job.epoch || authEpoch !== job.authEpoch) throw error('STALE_JOB_EPOCH', 'The read job generation changed.');
       const kind = 'page';
       const commandHash = contentHash({ kind, jobId, epoch, authEpoch, operationId, page });

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { linkSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import fs, { linkSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
@@ -57,6 +58,54 @@ test('opens only an explicitly initialized probe database with the same library 
   const reopened = open();
   sandbox.onCleanup(() => reopened.close());
   assert.equal(reopened.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+});
+
+test('rejects a database whose effective application ID differs from its checkpointed header', async t => {
+  const f = await makeStoreFixture(t);
+  const expected = f.store.db.prepare('PRAGMA application_id').get().application_id;
+  f.store.db.exec('PRAGMA wal_autocheckpoint=0; PRAGMA application_id=1234');
+  assert.equal(readFileSync(f.file).readUInt32BE(68), expected);
+  assert.equal(f.store.db.prepare('PRAGMA application_id').get().application_id, 1234);
+  let recovered;
+  try {
+    assert.throws(() => { recovered = f.reopen(); }, { code: 'FOREIGN_PROBE_DB' });
+  } finally {
+    recovered?.close();
+  }
+  assert.equal(f.store.db.prepare('PRAGMA application_id').get().application_id, 1234);
+});
+
+test('initialization rejects a pathname replaced after exclusive creation', async t => {
+  const sandbox = await makeSandbox(t);
+  const { state } = await sandbox.prepare();
+  const file = path.join(state, 'library.sqlite');
+  const otherFile = path.join(state, 'other.sqlite');
+  const other = new DatabaseSync(otherFile);
+  other.exec("CREATE TABLE unrelated(id TEXT); INSERT INTO unrelated VALUES ('keep')");
+  other.close();
+  const foreignBytes = readFileSync(otherFile);
+  const close = fs.closeSync;
+  let replaced = false;
+  const replacingClose = t.mock.method(fs, 'closeSync', handle => {
+    close(handle);
+    if (replaced) return;
+    replaced = true;
+    fs.renameSync(file, path.join(state, 'created.sqlite'));
+    fs.renameSync(otherFile, file);
+  });
+  syncBuiltinESMExports();
+  let opened;
+  try {
+    assert.throws(() => {
+      opened = openProbeStore({ file, libraryId: sandbox.config.libraryId, initialize: true });
+    }, { code: 'UNSAFE_PROBE_DB' });
+  } finally {
+    replacingClose.mock.restore();
+    syncBuiltinESMExports();
+    opened?.close();
+  }
+  assert.equal(replaced, true);
+  assert.deepEqual(readFileSync(file), foreignBytes);
 });
 
 test('rejects preexisting empty, unknown, directory, hardlinked and orphan-sidecar database paths', async t => {
@@ -268,6 +317,19 @@ test('a page rejects mismatched generations, cursor, source, identity, reused di
   assert.throws(() => f.store.commitPage({ ...command, epoch: 2 }, allow), { code: 'PROBE_OPERATION_CONFLICT' });
   assert.deepEqual(f.store.operation(f.opId), receipt);
   assert.equal(rowCount(f.store, 'operations'), 1);
+});
+
+test('a page requires its captured authorization epoch after the job changes accounts', async t => {
+  const f = await makeStoreFixture(t);
+  const page = parse('unsafe-integer');
+  const captured = f.command(page);
+  f.store.withWrite(db => db.prepare('UPDATE source_jobs SET auth_epoch=3 WHERE id=?').run(f.job.id));
+  assert.throws(() => f.store.commitPage(captured, allow), { code: 'STALE_JOB_EPOCH' });
+  const { authEpoch, ...withoutOrigin } = captured;
+  assert.throws(() => f.store.commitPage(withoutOrigin, allow), { code: 'INVALID_PROBE_JOB' });
+  assert.equal(f.store.operation(f.opId), null);
+  assert.equal(f.store.readHead(total), null);
+  assert.equal(f.store.readJob(f.job.id).cursor, '0');
 });
 
 test('same work retains its separate collection relationships and no total relationship is invented', async t => {
