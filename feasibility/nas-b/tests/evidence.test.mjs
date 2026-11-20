@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -18,9 +18,9 @@ const result = (caseId, kind, fields = {}) => ({
   runId, revision, configFingerprint, timestamp, caseId, kind, status: 'passed', ...fields
 });
 
-async function assessment(evidence) {
+async function assessment(evidence, options = {}) {
   const { assessRun, manifest } = await import('../assess.mjs');
-  return assessRun({ manifest, evidence });
+  return assessRun({ manifest, evidence, ...options });
 }
 const row = (report, id) => report.cases.find(entry => entry.id === id);
 
@@ -84,6 +84,26 @@ test('a genuine failed challenge stays blocking after a newer controlled fallbac
   assert.equal(report.development.status, 'blocked');
 });
 
+test('a newer failed controlled interaction revokes the waiver for an unobserved challenge', async () => {
+  const report = await assessment([
+    result('AUTH-03', 'nas-live', { checks: ['challenge-not-observed'] }),
+    result('AUTH-03', 'nas-fault', { checks: ['controlled-verification'] }),
+    result('AUTH-03', 'nas-fault', { timestamp: '2026-01-02T04:00:00Z', status: 'failed' })
+  ]);
+  assert.equal(row(report, 'AUTH-03').status, 'unrun');
+  assert.equal(report.development.pending.includes('AUTH-03'), true);
+  assert.deepEqual(report.development.uncovered, []);
+});
+
+test('failed actual NAS verification cannot be hidden by a later passing attempt', async () => {
+  const report = await assessment([
+    result('AUTH-03', 'nas-live', { status: 'failed' }),
+    result('AUTH-03', 'nas-live', { timestamp: '2026-01-02T04:00:00Z', checks: ['genuine-challenge-completed'] })
+  ]);
+  assert.equal(row(report, 'AUTH-03').status, 'failed');
+  assert.ok(report.blockers.some(entry => entry.caseId === 'AUTH-03'));
+});
+
 test('NAS protocol passes leave release double-Windows and sleep unrun', async () => {
   const report = await assessment(
     Array.from({ length: 6 }, (_, index) => result('LOCK-0' + (index + 1), 'nas-two-clients'))
@@ -132,11 +152,79 @@ test('latency gate requires field measurements within the agreed targets', async
   ]);
   assert.equal(row(report, 'PERF-02').status, 'blocked');
   assert.equal(report.release.gates['actual-wan'], 'unrun');
+  const observations = ['cold-process', 'first-visit', 'cache-hit'].map(cacheState =>
+    result('PERF-02', 'nas', {
+      cacheState, checks: ['lan-cold-warm'], measurements: { lanListMs: 850, lanCoverMs: 1500, samples: 2 }
+    }));
+  assert.equal(row(await assessment(observations.slice(0, 2)), 'PERF-02').status, 'blocked');
   for (const [lanListMs, expected] of [[850, 'passed'], [1500, 'failed']]) {
-    const measured = await assessment([result('PERF-02', 'nas', {
-      checks: ['lan-cold-warm'], measurements: { lanListMs, lanCoverMs: 1500, samples: 10 }
-    })]);
-    assert.equal(row(measured, 'PERF-02').status, expected);
+    const evidence = structuredClone(observations);
+    evidence[1].measurements.lanListMs = lanListMs;
+    assert.equal(row(await assessment(evidence), 'PERF-02').status, expected);
+  }
+});
+
+test('video startup requires repeated positive measurements for every cache state', async () => {
+  const observations = ['cold-process', 'first-visit', 'cache-hit'].map(cacheState =>
+    result('PERF-03', 'nas', {
+      cacheState, checks: ['range-and-cancellation'], measurements: { videoStartMs: 2800, samples: 2 }
+    }));
+  assert.equal(row(await assessment(observations), 'PERF-03').status, 'passed');
+  for (const [fields, expected] of [[{ samples: 1 }, 'failed'], [{ videoStartMs: 0 }, 'failed']]) {
+    const evidence = structuredClone(observations);
+    Object.assign(evidence[1].measurements, fields);
+    const measured = await assessment(evidence);
+    assert.equal(row(measured, 'PERF-03').status, expected);
+  }
+});
+
+test('scale evidence requires the synthetic run and an independent representative copy', async () => {
+  const synthetic = result('PERF-01', 'nas', {
+    checks: ['representative-scale'], measurements: { workCount: 50000 }
+  });
+  assert.equal(row(await assessment([synthetic]), 'PERF-01').status, 'blocked');
+  const both = { ...synthetic, checks: ['representative-scale', 'independent-representative-copy'],
+    measurements: { workCount: 50000, copiedWorkCount: 300 } };
+  assert.equal(row(await assessment([both]), 'PERF-01').status, 'passed');
+});
+
+test('WAN acceptance requires real network path, cache and positive measured quantities', async () => {
+  const remote = result('PERF-06', 'wan', {
+    checks: ['actual-wan-path', 'wan-cache-recorded', 'wan-source-playback-separated'],
+    wanPath: 'tailscale-relay',
+    measurements: { samples: 1, wanRttMs: 95, wanThroughputMbps: 19, mediaBitrateMbps: 5 }
+  });
+  assert.equal((await assessment([remote])).release.gates['actual-wan'], 'passed');
+  const noPath = { ...remote };
+  delete noPath.wanPath;
+  assert.equal((await assessment([noPath])).release.gates['actual-wan'], 'blocked');
+  for (const metric of ['wanRttMs', 'wanThroughputMbps', 'mediaBitrateMbps']) {
+    const invalid = { ...remote, measurements: { ...remote.measurements, [metric]: 0 } };
+    assert.equal((await assessment([invalid])).release.gates['actual-wan'], 'failed');
+  }
+});
+
+test('registry approval and NAS pull require the same digest and optional policy approval', async () => {
+  const approved = 'sha256:' + 'a'.repeat(64);
+  const other = 'sha256:' + 'b'.repeat(64);
+  const pulled = result('DEPLOY-01', 'nas', { imageDigest: approved, checks: ['ghcr-digest-pulled', 'complete-image'] });
+  const reviewed = result('DEPLOY-03', 'registry', { imageDigest: approved, checks: ['reviewed-image', 'visibility-confirmed'] });
+  const matched = await assessment([pulled, reviewed], { policy: { approvedImageDigest: approved } });
+  assert.equal(row(matched, 'DEPLOY-01').status, 'passed');
+  assert.equal(row(matched, 'DEPLOY-03').status, 'passed');
+  for (const [observations, policy] of [
+    [[pulled], {}],
+    [[pulled, { ...reviewed, imageDigest: undefined }], {}],
+    [[pulled, { ...reviewed, imageDigest: other }], {}],
+    [[pulled, reviewed], { approvedImageDigest: other }],
+    [[pulled, reviewed, { ...reviewed, imageDigest: other }], {}],
+    [[pulled, reviewed, { ...reviewed, imageDigest: other, timestamp: '2026-01-02T04:00:00Z' }], {}]
+  ]) {
+    const report = await assessment(observations, { policy });
+    assert.equal(row(report, 'DEPLOY-01').status, 'blocked');
+    assert.notEqual(row(report, 'DEPLOY-03').status, 'passed');
+    assert.equal(report.development.pending.includes('DEPLOY-01'), true);
+    assert.notEqual(report.release.status, 'passed');
   }
 });
 
@@ -242,4 +330,49 @@ test('reports reject changed records and unrelated files', async t => {
   const replaced = cliRun('report', id);
   assert.equal(replaced.status, 1);
   assert.doesNotMatch(replaced.stdout + replaced.stderr, /PRIVATE_BODY_VALUE/);
+});
+
+test('a process interruption after publishing a hard link leaves the run readable and retryable', async t => {
+  const id = 'synthetic-' + randomUUID();
+  const run = join(root, id);
+  t.after(() => rm(run, { recursive: true, force: true }));
+  const input = JSON.stringify(result('ENV-01', 'nas', { runId: id }));
+  const recorded = cliRun('record', id, input);
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const { name } = JSON.parse(recorded.stdout);
+  for (const file of ['run.json', name]) {
+    await link(join(run, file), join(run, '.pending-' + file + '-' + randomUUID()));
+  }
+  const report = cliRun('report', id);
+  assert.equal(report.status, 0, report.stderr);
+  assert.ok(report.stdout.includes(name));
+  assert.equal(cliRun('record', id, input).status, 0);
+});
+
+test('an unrelated hard link is rejected even with an unrelated well-named stage file', async t => {
+  const id = 'synthetic-' + randomUUID();
+  const run = join(root, id);
+  const external = await mkdtemp(join(root, 'synthetic-inode-'));
+  t.after(async () => {
+    await rm(run, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  });
+  const recorded = cliRun('record', id, JSON.stringify(result('ENV-01', 'nas', { runId: id })));
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const { name } = JSON.parse(recorded.stdout);
+  const raw = await readFile(join(run, name));
+  await link(join(run, name), join(external, 'external'));
+  await writeFile(join(run, '.pending-' + name + '-' + randomUUID()), raw, { mode: 0o600 });
+  assert.equal(cliRun('report', id).status, 1);
+});
+
+test('assess and render cannot emit untrusted attachment paths or signed URLs', async () => {
+  const secretUrl = 'https://example.invalid?signature=PRIVATE_VALUE';
+  const index = { caseId: 'ENV-01', kind: 'nas', timestamp, sha256: '3'.repeat(64), name: secretUrl };
+  const report = await assessment([result('ENV-01', 'nas')], { indexes: [index] });
+  assert.deepEqual(report.indexes, []);
+  const { renderReport } = await import('../assess.mjs');
+  assert.doesNotMatch(renderReport({ ...report, indexes: [index] }), /PRIVATE_VALUE/);
+  const mismatched = { ...index, name: 'record-' + index.sha256 + '.json' };
+  assert.deepEqual((await assessment([result('ENV-01', 'nas')], { indexes: [mismatched] })).indexes, []);
 });

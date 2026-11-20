@@ -1,5 +1,7 @@
 import caseManifest from './case-manifest.json' with { type: 'json' };
-import { assertSameRun, validateCaseEvidence } from './src/evidence.mjs';
+import {
+  assertSameRun, attachmentIndex, cacheStates, normalizeAttachmentIndex, validateCaseEvidence, validateImageDigest
+} from './src/evidence.mjs';
 
 export const manifest = caseManifest;
 const statuses = ['passed', 'failed', 'blocked', 'unrun'];
@@ -37,24 +39,52 @@ function resultFor(row, entry) {
   if (entry.status !== 'passed') return { status: entry.status };
   const missingChecks = (row.checks ?? []).filter(check => !entry.checks.includes(check));
   const missingMeasurements = Object.keys(row.measurements ?? {}).filter(name => entry.measurements[name] === undefined);
+  if (row.requireImageDigest && !entry.imageDigest) missingChecks.push('image-digest');
+  if (row.requireWanPath && !entry.wanPath) missingChecks.push('tailscale-direct-or-relay');
   if (missingChecks.length || missingMeasurements.length) {
     return { status: 'blocked', missingChecks, missingMeasurements };
   }
   const missedTargets = Object.entries(row.measurements ?? {}).filter(([name, rule]) => {
     const value = entry.measurements[name];
-    return value < (rule.min ?? 0) || value > (rule.max ?? Infinity);
+    return (rule.positive && value <= 0) || value < (rule.min ?? 0) || value > (rule.max ?? Infinity);
   }).map(([name]) => name);
-  return missedTargets.length ? { status: 'failed', missedTargets } : { status: 'passed' };
+  if (missedTargets.length) return { status: 'failed', missedTargets };
+  return row.requireImageDigest ? { status: 'passed', imageDigest: entry.imageDigest } : { status: 'passed' };
+}
+
+function latestResult(row, relevant) {
+  if (!relevant.length) return { status: 'unrun' };
+  const latest = relevant.at(-1).timestamp;
+  // At the same observation time, a pass cannot hide a submitted failure.
+  const outcomes = relevant.filter(entry => entry.timestamp === latest).map(entry => resultFor(row, entry));
+  const outcome = outcomes.find(result => result.status === takeWorst(outcomes.map(item => item.status)));
+  if (outcome.status === 'passed' && new Set(outcomes.map(item => item.imageDigest)).size > 1) {
+    return { status: 'blocked', missingChecks: ['unambiguous-image-digest'] };
+  }
+  return outcome;
+}
+
+function latencyResult(row, attempts) {
+  const scopes = cacheStates.map(scope => latestResult(row, attempts.filter(entry => entry.cacheState === scope)));
+  const missingScopes = cacheStates.filter((_, index) => scopes[index].status === 'unrun');
+  const status = takeWorst(scopes.map(scope => scope.status));
+  return {
+    status: status === 'unrun' ? 'blocked' : status, missingScopes,
+    missingChecks: [...new Set(scopes.flatMap(scope => scope.missingChecks ?? []))],
+    missingMeasurements: [...new Set(scopes.flatMap(scope => scope.missingMeasurements ?? []))],
+    missedTargets: [...new Set(scopes.flatMap(scope => scope.missedTargets ?? []))]
+  };
 }
 
 function caseResult(row, attempts) {
   const relevant = attempts.filter(entry => row.kinds.includes(entry.kind) &&
     (row.id !== 'AUTH-03' || !entry.checks.includes('challenge-not-observed')));
-  if (!relevant.length) return { status: 'unrun' };
-  const latest = relevant.at(-1).timestamp;
-  // At the same observation time, a pass cannot hide a submitted failure.
-  const outcomes = relevant.filter(entry => entry.timestamp === latest).map(entry => resultFor(row, entry));
-  return outcomes.find(result => result.status === takeWorst(outcomes.map(item => item.status)));
+  if (!row.requireCacheStates || !relevant.length) return latestResult(row, relevant);
+  // A complete scope must come from the same type of client.
+  const results = [...new Set(relevant.map(entry => entry.kind))]
+    .map(kind => latencyResult(row, relevant.filter(entry => entry.kind === kind)));
+  return results.find(result => result.status === 'passed') ??
+    results.find(result => result.status === takeWorst(results.map(item => item.status)));
 }
 
 function assessCase(row, attempts, findings) {
@@ -66,7 +96,7 @@ function assessCase(row, attempts, findings) {
 function challengeUncovered(attempts) {
   const live = attempts.filter(entry => entry.kind === 'nas-live');
   return live.length > 0 && live.every(entry => entry.status === 'passed' && entry.checks.includes('challenge-not-observed')) &&
-    attempts.some(entry => entry.kind === 'nas-fault' && entry.status === 'passed' && entry.checks.includes('controlled-verification'));
+    latestResult({ checks: ['controlled-verification'] }, attempts.filter(entry => entry.kind === 'nas-fault')).status === 'passed';
 }
 
 function collectFindings(entries) {
@@ -74,8 +104,7 @@ function collectFindings(entries) {
   for (const entry of entries) {
     const { caseId, kind, status, timestamp } = entry;
     const codes = [...entry.blockers];
-    if (kind === 'nas-live' && status === 'failed' &&
-        (caseId === 'AUTH-01' || (caseId === 'AUTH-03' && entry.checks.includes('challenge-observed')))) {
+    if (kind === 'nas-live' && status === 'failed' && ['AUTH-01', 'AUTH-03'].includes(caseId)) {
       codes.push('auth-verification-failed');
     }
     for (const code of codes) {
@@ -83,6 +112,37 @@ function collectFindings(entries) {
     }
   }
   return [...findings.values()];
+}
+
+function reconcileDeployment(cases, policy) {
+  const approved = policy.approvedImageDigest === undefined ? undefined : validateImageDigest(policy.approvedImageDigest);
+  const deployment = cases.filter(row => ['DEPLOY-01', 'DEPLOY-03'].includes(row.id));
+  const passed = deployment.filter(row => row.status === 'passed');
+  const [pulled, reviewed] = passed;
+  let missing;
+  if (passed.length === 1) missing = 'matching-nas-and-registry-evidence';
+  if (passed.length === 2 && (!pulled.imageDigest || pulled.imageDigest !== reviewed.imageDigest)) {
+    missing = 'matching-image-digest';
+  }
+  if (approved && passed.some(row => row.imageDigest !== approved)) missing = 'approved-image-digest';
+  if (!missing) return;
+  for (const row of passed) {
+    row.status = 'blocked';
+    row.missingChecks = [missing];
+  }
+}
+
+function matchIndexes(entries, indexes) {
+  const available = new Map(indexes.map(normalizeAttachmentIndex).filter(Boolean).map(index => [index.name, index]));
+  const matched = new Map();
+  for (const entry of entries) {
+    const expected = attachmentIndex(entry);
+    const actual = available.get(expected.name);
+    if (actual && actual.caseId === expected.caseId && actual.kind === expected.kind && actual.timestamp === expected.timestamp) {
+      matched.set(expected.name, expected);
+    }
+  }
+  return [...matched.values()];
 }
 
 export function assessRun({ manifest: matrix = manifest, evidence, policy = {}, indexes = [] }) {
@@ -97,6 +157,7 @@ export function assessRun({ manifest: matrix = manifest, evidence, policy = {}, 
   const byId = id => attempts.get(id) ?? [];
   const blockers = collectFindings(entries);
   const cases = matrix.map(row => assessCase(row, byId(row.id), blockers.filter(item => item.caseId === row.id)));
+  reconcileDeployment(cases, policy);
   const uncovered = challengeUncovered(byId('AUTH-03')) ? ['AUTH-03'] : [];
   const required = cases.filter(row => row.stage === 'development');
   const pending = required.filter(row => row.status !== 'passed' && !uncovered.includes(row.id)).map(row => row.id);
@@ -139,7 +200,7 @@ export function assessRun({ manifest: matrix = manifest, evidence, policy = {}, 
     conclusion: { passed: 'feasible', pending: 'conditional', blocked: 'not-feasible' }[developmentStatus],
     development: { status: developmentStatus, pending, uncovered },
     release: { status: releaseStatus, gates, pending: releasePending },
-    environment, blockers, groups, cases, indexes
+    environment, blockers, groups, cases, indexes: matchIndexes(entries, indexes)
   };
 }
 
@@ -189,6 +250,7 @@ export function renderReport(assessment) {
       (entry.checks.length ? '（' + entry.checks.join('、') + '）' : ''));
     if (row.missingChecks?.length) details.push('缺检查：' + row.missingChecks.join('、'));
     if (row.missingMeasurements?.length) details.push('缺测量：' + row.missingMeasurements.join('、'));
+    if (row.missingScopes?.length) details.push('缺缓存场景：' + row.missingScopes.join('、'));
     if (row.missedTargets?.length) details.push('未达判据：' + row.missedTargets.join('、'));
     lines.push('| ' + [row.id, row.title, row.expected, statusName[row.status], details.join('；') || '无'].join(' | ') + ' |');
   }
@@ -200,12 +262,12 @@ export function renderReport(assessment) {
   lines.push('', '## 6 性能专项', '');
   for (const row of cases.filter(row => row.id.startsWith('PERF-'))) {
     const observations = row.attempts.filter(entry => Object.keys(entry.measurements).length)
-      .map(entry => entry.kind + ' ' + prettyMeasure(entry));
+      .map(entry => [entry.kind, entry.cacheState ?? entry.wanPath, prettyMeasure(entry)].filter(Boolean).join(' '));
     lines.push('- ' + row.id + ' ' + row.title + ' · ' + statusName[row.status] + ' · ' + (observations.join('；') || '无测量值'));
   }
   lines.push('', '## 7 已知问题与证据索引', '',
     '手工记录的范围与判据须按证据复核。当前报告保留同一运行内的安全阻断及复测记录。');
-  for (const index of indexes) {
+  for (const index of indexes.map(normalizeAttachmentIndex).filter(Boolean)) {
     lines.push('- ' + index.caseId + ' · ' + index.kind + ' · ' + index.timestamp + ' · ' + index.name);
   }
   lines.push('', '## 8 下一阶段准入和回退', '');
