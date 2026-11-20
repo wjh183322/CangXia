@@ -359,3 +359,64 @@ test('preserves known video dimensions when an otherwise matching candidate is s
   assert.equal(merged.width, 1920);
   assert.equal(merged.height, 1080);
 });
+
+test('enriches cover variants by source and keeps the display thumbnail', () => {
+  const cover = (name, width) => ({
+    url_list: ['https://fixture.douyinpic.com/' + name + '?x-signature=synthetic'],
+    width,
+    height: width / 2
+  });
+  const [listed] = pageOf([{ aweme_id: '101', video: { cover: cover('display', 480) } }]).works;
+  const [scaled] = pageOf([{ aweme_id: '101', video: { cover_original_scale: cover('scale', 960) } }]).works;
+  const [detailed] = pageOf([{ aweme_id: '101', video: { origin_cover: cover('original', 1920) } }]).works;
+  const [sparse] = pageOf([{
+    aweme_id: '101', video: { origin_cover: cover('temporary', 0), cover: cover('display-refreshed', 480) }
+  }]).works;
+
+  const withScale = mergeObservedWork(listed, scaled);
+  assert.deepEqual(withScale.coverUrls, scaled.coverUrls);
+  assert.equal(withScale.coverSource, 'cover_original_scale');
+  assert.equal(withScale.thumbnail, listed.thumbnail);
+
+  const withOriginal = mergeObservedWork(withScale, detailed);
+  assert.deepEqual(withOriginal.coverVariants, [
+    detailed.coverVariants[0], scaled.coverVariants[0], listed.coverVariants[0]
+  ]);
+  assert.deepEqual(withOriginal.coverUrls, detailed.coverUrls);
+  assert.equal(withOriginal.coverSource, 'origin_cover');
+  assert.equal(withOriginal.thumbnail, listed.thumbnail);
+
+  const refreshed = mergeObservedWork(withOriginal, sparse);
+  assert.deepEqual(refreshed.coverVariants, [
+    detailed.coverVariants[0], scaled.coverVariants[0], sparse.coverVariants[1]
+  ]);
+  assert.deepEqual(refreshed.coverUrls, detailed.coverUrls);
+  assert.equal(refreshed.coverSource, 'origin_cover');
+  assert.equal(refreshed.thumbnail, sparse.thumbnail);
+});
+
+test('refreshes a proven 1080p URL while preserving omitted video metadata', () => {
+  const observeVideo = (video, observedAt) => parseSourcePage({
+    ...sourceFixture('two-works'),
+    observedAt,
+    text: JSON.stringify({ aweme_list: [{ aweme_id: '101', video }], has_more: false })
+  }).works[0];
+  const oldTime = '2026-01-01T00:00:00.000Z';
+  const newTime = '2026-01-02T00:00:00.000Z';
+  const sparseTime = '2026-01-03T00:00:00.000Z';
+  const address = name => ({ url_list: ['https://fixture.douyinvod.com/' + name] });
+  const known = observeVideo({
+    width: 1920, height: 1080, duration: 4500, play_addr_h264_1080p: address('known')
+  }, oldTime);
+  const fresh = observeVideo({ play_addr_h264_1080p: address('fresh') }, newTime);
+  const merged = mergeObservedWork(known, fresh);
+  assert.deepEqual(merged.videoUrls, fresh.videoUrls);
+  assert.deepEqual([merged.width, merged.height, merged.duration], [1920, 1080, 4500]);
+  assert.equal(merged.mediaQuality.videoObservedAt, newTime);
+
+  const weak = observeVideo({ play_addr: address('weak') }, sparseTime);
+  const retained = mergeObservedWork(merged, weak);
+  assert.equal(retained.checkedAt, sparseTime);
+  assert.deepEqual(retained.videoUrls, fresh.videoUrls);
+  assert.equal(retained.mediaQuality.videoObservedAt, newTime);
+});

@@ -198,7 +198,10 @@ function mediaQuality(raw, work) {
       videoBitRate = Math.max(videoBitRate, rate);
     }
   }
-  return { imageOriginals, videoRanked: rankedUrls.size, videoPixels, videoBitRate };
+  return {
+    imageOriginals, videoRanked: rankedUrls.size, videoPixels, videoBitRate,
+    ...(work.videoUrls.length ? { videoObservedAt: work.checkedAt } : {})
+  };
 }
 
 const sessionKeys = new Set([

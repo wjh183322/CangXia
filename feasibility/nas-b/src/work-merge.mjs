@@ -3,6 +3,7 @@ import { mergeCreator, sameCreator } from '../../../shared/creators.mjs';
 const stable = creator => creator?.uid || creator?.secUid;
 const updateKeys = ['title', 'caption', 'description', 'publishedAt'];
 const videoParams = ['duration', 'width', 'height'];
+const coverSources = ['origin_cover', 'cover_original_scale', 'cover'];
 
 function mergeMusic(previous, next, fields) {
   if (!previous) return next;
@@ -31,8 +32,7 @@ function coversCandidate(previous, next) {
 }
 
 function mergeMedia(merged, previous, observed, fields) {
-  // Choose a coherent snapshot for each media family. Shorter or lower-quality
-  // observations retain the prior family without mixing candidate versions.
+  // Image and video candidates retain coherent snapshots across observations.
   const oldQuality = previous.mediaQuality ?? {};
   const incoming = observed.mediaQuality ?? {};
   const quality = { ...oldQuality };
@@ -52,10 +52,12 @@ function mergeMedia(merged, previous, observed, fields) {
   const previousPixels = oldQuality.videoPixels ?? 0;
   const bitRate = incoming.videoBitRate ?? 0;
   const previousVideos = previous.videoUrls?.length ?? 0;
-  const hasVideoMetadata = !previousVideos ||
-    ((!previous.duration || fields.has('duration')) &&
-      ['width', 'height'].every(key => Number(observed[key] ?? 0) >= Number(previous[key] ?? 0)));
-  const videoComplete = hasVideo && hasVideoMetadata && observed.videoUrls.length >= previousVideos &&
+  const maintainsDimensions = ['width', 'height'].every(key =>
+    !fields.has(key) || Number(observed[key]) >= Number(previous[key] ?? 0));
+  const hasKnownParams = videoParams.every(key => !previous[key] || fields.has(key));
+  const hasProvenSize = previousPixels > 0 && pixels >= previousPixels;
+  const videoCompatible = !previousVideos || (maintainsDimensions && (hasKnownParams || hasProvenSize));
+  const videoComplete = hasVideo && videoCompatible && observed.videoUrls.length >= previousVideos &&
     (incoming.videoRanked ?? 0) >= (oldQuality.videoRanked ?? 0) &&
     (pixels > previousPixels || (pixels === previousPixels && bitRate >= (oldQuality.videoBitRate ?? 0)));
   if (videoComplete) {
@@ -63,20 +65,24 @@ function mergeMedia(merged, previous, observed, fields) {
     quality.videoRanked = incoming.videoRanked ?? 0;
     quality.videoPixels = pixels;
     quality.videoBitRate = bitRate;
+    quality.videoObservedAt = incoming.videoObservedAt ?? observed.checkedAt;
   }
   for (const key of videoParams) {
     if (fields.has(key) && (videoComplete || (!hasVideo && !previous[key]))) merged[key] = observed[key];
   }
 
-  const bySource = new Map(observed.coverVariants.map(variant => [variant.source, variant]));
-  const coverComplete = fields.has('coverUrls') &&
-    observed.coverUrls.length >= (previous.coverUrls?.length ?? 0) &&
-    (previous.coverVariants ?? []).every(variant => coversCandidate(variant, bySource.get(variant.source)));
-  if (coverComplete) {
-    merged.coverVariants = observed.coverVariants;
-    merged.coverUrls = observed.coverUrls;
-    merged.coverSource = observed.coverSource;
-    merged.thumbnail = observed.thumbnail;
+  // Each named cover variant keeps its own URLs and dimensions together.
+  const bySource = new Map((previous.coverVariants ?? []).map(variant => [variant.source, variant]));
+  for (const variant of observed.coverVariants) {
+    const known = bySource.get(variant.source);
+    if (!known || coversCandidate(known, variant)) bySource.set(variant.source, variant);
+  }
+  const covers = coverSources.map(source => bySource.get(source)).filter(Boolean);
+  if (covers.length) {
+    merged.coverVariants = covers;
+    merged.coverUrls = covers[0].urls;
+    merged.coverSource = covers[0].source;
+    merged.thumbnail = bySource.get('cover')?.urls[0] || merged.coverUrls[0];
   } else if (imagesComplete && !previous.coverUrls?.length) {
     merged.thumbnail = observed.images[0]?.urls[0] || previous.thumbnail;
   }
