@@ -457,7 +457,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
-    if (context.pages().some(page => page.url() !== 'about:blank')) throw unsafeProfile();
+    // Keep startup pages unmanaged. Closing the last headed tab can close Chromium.
+    if (context.pages().length === 0) await browserCall(() => context.newPage());
+    const startupPages = context.pages();
+    if (startupPages.length === 0 || startupPages.some(page => page.isClosed() || page.url() !== 'about:blank')) {
+      throw unsafeProfile();
+    }
     state = store.withWrite(db => advanceAuth(db));
   } catch (error) {
     await context?.close().catch(() => {});
@@ -511,8 +516,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   context.on('close', stopped);
 
   async function makePage(kind, signal = epochController.signal) {
-    const page = context.pages().find(page => page.url() === 'about:blank' && !pages.has(page)) ??
-      await browserCall(() => context.newPage(), signal);
+    const page = await browserCall(() => context.newPage(), signal);
     const slot = { page, kind, revision: 0, pressed: false, panel: null, viewProbe: '__cangxia_view_' + randomUUID() };
     pages.set(page, slot);
     page.on('popup', popup => { void popup.close().catch(() => {}); });

@@ -211,6 +211,54 @@ jobs:
           fi
           docker start "$container" >/dev/null
           require_probe_health
+
+          # Reuse the running display, with a fresh profile and synthetic navigation in the networkless container.
+          timeout -k 5s 45s docker exec -i "$container" node --input-type=module - <<'HEADED_FIXTURE'
+          import assert from 'node:assert/strict';
+          import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+          import path from 'node:path';
+          import { chromium } from 'playwright-core';
+          import { openBrowserGateway } from './src/browser.mjs';
+          import { openProbeStore } from './src/store.mjs';
+
+          const displays = (await readdir('/tmp/.X11-unix')).filter(name => /^X[0-9]+$/.test(name));
+          assert.equal(displays.length, 1);
+          process.env.DISPLAY = ':' + displays[0].slice(1);
+          const root = await mkdtemp('/tmp/cangxia-headful-fixture-');
+          process.env.HOME = root;
+          process.env.XDG_RUNTIME_DIR = root;
+          let gateway, store, context;
+          try {
+            await mkdir(path.join(root, 'browser'), { mode: 0o700 });
+            store = openProbeStore({ file: path.join(root, 'fixture.sqlite'), libraryId: 'ci-headful', initialize: true });
+            const fixtureChromium = {
+              async launchPersistentContext(...args) {
+                context = await chromium.launchPersistentContext(...args);
+                const offlinePage = page => {
+                  const goto = page.goto.bind(page);
+                  page.goto = (_, options) => goto('data:text/plain,retired-fixture', options);
+                  return page;
+                };
+                const newPage = context.newPage.bind(context);
+                context.newPage = async () => offlinePage(await newPage());
+                for (const page of context.pages()) offlinePage(page);
+                return context;
+              }
+            };
+            gateway = await openBrowserGateway({ config: { root }, chromium: fixtureChromium, store });
+            const blank = context.pages()[0];
+            await assert.rejects(gateway.openLogin(), { code: 'PROBE_BROWSER_PAGE' });
+            await assert.rejects(gateway.openLogin(), { code: 'PROBE_BROWSER_PAGE' });
+            assert.equal(blank.isClosed(), false);
+            assert.equal(blank.url(), 'about:blank');
+            console.log('Headed Chromium survives retirement of managed fixture pages.');
+          } finally {
+            await gateway?.close();
+            store?.close();
+            await rm(root, { recursive: true, force: true });
+          }
+          HEADED_FIXTURE
+
           docker stop --time 30 "$container" >/dev/null
           [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
 

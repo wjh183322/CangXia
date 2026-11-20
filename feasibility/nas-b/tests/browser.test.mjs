@@ -59,6 +59,7 @@ class FakeContext extends EventEmitter {
   reply = () => new Response(sourceText, { headers: { 'retry-after': '23' } });
 
   pages() { return this.opened.filter(page => !page.isClosed()); }
+  sourcePages() { return this.pages().filter(page => page.url() !== 'about:blank'); }
   async cookies(urls) {
     assert.deepEqual(urls, [self, 'https://www.douyin.com/aweme/v1/web/']);
     await this.onCookies?.();
@@ -105,6 +106,7 @@ class FakeContext extends EventEmitter {
       await context.beforePageClose?.(page);
       closed = true;
       page.emit('close');
+      if (context.closesOnLastPage && context.pages().length === 0) context.emit('close');
     };
     page.screenshot = async options => {
       assert.equal(options.path, undefined);
@@ -282,7 +284,7 @@ test('only the current owned login page accepts frames and human input', async t
   const { browser, gateway } = await fixture(t);
   await assert.rejects(gateway.frame({ pageRevision: 1 }), { code: 'STALE_BROWSER_VIEW' });
   const view = await gateway.openLogin();
-  const login = browser.pages()[0];
+  const login = browser.sourcePages()[0];
   const frame = await gateway.frame(view);
   assert.deepEqual(frame, { ...view, mime: 'image/png', bytes: Buffer.from('fixture frame') });
   assert.equal(view.width, panelRect.width);
@@ -310,6 +312,33 @@ test('only the current owned login page accepts frames and human input', async t
   };
   await assert.rejects(gateway.frame(current), { code: 'STALE_BROWSER_VIEW' });
   assert.ok(browser.navigations.every(({ url }) => url === self));
+});
+
+test('retiring the only managed login cannot close headed Chromium', async t => {
+  for (const hasStartupPage of [true, false]) {
+    await t.test(hasStartupPage ? 'driver supplies a blank page' : 'driver supplies no pages', async t => {
+      const { browser, open } = await fixture(t, { defer: true });
+      browser.closesOnLastPage = true;
+      const initial = hasStartupPage ? await browser.newPage() : undefined;
+      const gateway = await open();
+      const blank = initial ?? browser.pages()[0];
+
+      const view = await gateway.openLogin();
+      const login = browser.navigations.at(-1).page;
+      const retired = once(login, 'close');
+      login.childNavigate('data:text/plain,disallowed-fixture');
+      await retired;
+      await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
+      assert.deepEqual(browser.pages(), [blank]);
+      assert.equal(blank.url(), 'about:blank');
+      assert.equal(await browser.visit(blank.mainFrame(), self, 'document'), false);
+
+      const next = await gateway.openLogin();
+      assert.notEqual(next.pageRevision, view.pageRevision);
+      assert.notEqual(browser.navigations.at(-1).page, login);
+      assert.equal((await gateway.frame(next)).pageRevision, next.pageRevision);
+    });
+  }
 });
 
 test('ordinary profile with no recognized auth panel produces no pixels or input', async t => {
@@ -416,7 +445,7 @@ test('challenge, ambiguous crop, and changed official page withhold QR pixels', 
   }
   loginQrFixture(browser);
   const view = await gateway.openLogin();
-  const login = browser.pages()[0];
+  const login = browser.sourcePages()[0];
   browser.onQrEncode = () => {
     login.navigate('https://outside.invalid/');
   };
@@ -466,7 +495,7 @@ test('panel redraw or movement retires an older frame revision', async t => {
 test('timed-out pointer dispatch retires its page before replacement input', async t => {
   const { browser, gateway } = await fixture(t);
   const view = await gateway.openLogin();
-  const old = browser.pages()[0];
+  const old = browser.sourcePages()[0];
   let releaseClick;
   let releaseClose;
   browser.beforeInput = () => new Promise(resolve => { releaseClick = resolve; });
@@ -479,7 +508,7 @@ test('timed-out pointer dispatch retires its page before replacement input', asy
   await closing;
   const reopening = gateway.openLogin();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(browser.pages(), [old]);
+  assert.deepEqual(browser.sourcePages(), [old]);
   browser.beforePageClose = undefined;
   releaseClose();
   await timedOut;
@@ -488,11 +517,11 @@ test('timed-out pointer dispatch retires its page before replacement input', asy
   browser.beforeInput = undefined;
   const replacement = await reopening;
   assert.notEqual(replacement.pageRevision, view.pageRevision);
-  assert.notEqual(browser.pages()[0], old);
+  assert.notEqual(browser.sourcePages()[0], old);
   await gateway.input({ ...replacement, type: 'click', x: 2, y: 3 });
   releaseClick();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(browser.input.map(action => action.page), [browser.pages()[0]]);
+  assert.deepEqual(browser.input.map(action => action.page), [browser.sourcePages()[0]]);
 });
 
 test('timed-out login-opening action retires its page before creating a new view', async t => {
@@ -509,14 +538,14 @@ test('timed-out login-opening action retires its page before creating a new view
   browser.beforePanel = undefined;
   const replacement = await gateway.openLogin();
   releaseOpen();
-  assert.notEqual(browser.pages()[0], old);
+  assert.notEqual(browser.sourcePages()[0], old);
   assert.equal((await gateway.frame(replacement)).width, panelRect.width);
 });
 
 test('if retirement cannot be confirmed the login view remains locked until restart', async t => {
   const { browser, gateway, open } = await fixture(t);
   const view = await gateway.openLogin();
-  const old = browser.pages()[0];
+  const old = browser.sourcePages()[0];
   browser.beforeInput = () => { throw new Error('fixture error after dispatch'); };
   browser.beforePageClose = () => { throw new Error('fixture close failed'); };
   await assert.rejects(gateway.input({ ...view, type: 'text', text: 'test' }), { code: 'PROBE_BROWSER_RESTART_REQUIRED' });
@@ -533,7 +562,7 @@ test('if retirement cannot be confirmed the login view remains locked until rest
 test('a read-only panel inspection failure leaves the same view usable', async t => {
   const { browser, gateway } = await fixture(t);
   const view = await gateway.openLogin();
-  const page = browser.pages()[0];
+  const page = browser.sourcePages()[0];
   browser.beforePanel = () => { throw new Error('fixture inspect failure'); };
   await assert.rejects(gateway.frame(view), { code: 'PROBE_BROWSER_FRAME' });
   browser.beforePanel = undefined;
@@ -544,7 +573,7 @@ test('a read-only panel inspection failure leaves the same view usable', async t
 test('foreign child document requests and a committed redirected frame cannot be exposed', async t => {
   const { browser, gateway } = await fixture(t);
   const view = await gateway.openLogin();
-  const page = browser.pages()[0];
+  const page = browser.sourcePages()[0];
   const child = { page: () => page, url: () => 'about:blank' };
   assert.equal(await browser.visit(child, 'https://outside.invalid/verify', 'document'), false);
   assert.equal(await browser.visit(child, 'https://www.douyin.com/user/self', 'document'), false);
@@ -562,7 +591,7 @@ test('foreign child document requests and a committed redirected frame cannot be
 test('browser routes admit the known page and read API without permitting account writes', async t => {
   const { browser, gateway } = await fixture(t);
   await gateway.openLogin();
-  const login = browser.pages()[0].mainFrame();
+  const login = browser.sourcePages()[0].mainFrame();
   assert.equal(await browser.visit(login, 'https://www.douyin.com/aweme/v1/web/commit/favorite/', 'fetch', 'POST'), false);
   assert.equal(await browser.visit(login, 'https://www.douyin.com/settings/account', 'fetch'), false);
   assert.equal(await browser.visit(login, 'https://www.douyin.com' + collection, 'fetch', 'POST'), false);
@@ -570,7 +599,7 @@ test('browser routes admit the known page and read API without permitting accoun
   assert.equal(await browser.visit(login, 'https://static.douyinstatic.com/login.js', 'script'), true);
   assert.equal(await browser.trySocket(), false);
   await gateway.verifyIdentity();
-  const reader = browser.pages()[0].mainFrame();
+  const reader = browser.sourcePages()[0].mainFrame();
   assert.equal(await browser.visit(reader, 'https://www.douyin.com' + collection, 'fetch', 'POST'), true);
   assert.equal(await browser.visit(reader, 'https://www.douyin.com' + detail, 'fetch'), true);
   assert.equal(await browser.visit(reader, 'https://www.douyin.com/aweme/v1/web/commit/favorite/', 'fetch', 'POST'), false);
@@ -705,7 +734,7 @@ test('oversized browser responses and arbitrary driver errors are bounded', asyn
 test('browser resource accounting blocks media requests while preserving official document and script', async t => {
   const { browser, gateway } = await fixture(t);
   await gateway.openLogin();
-  const page = browser.pages()[0];
+  const page = browser.sourcePages()[0];
   const visit = (url, type) => browser.visit(page.mainFrame(), url, type);
   await visit(self, 'document');
   await visit('https://static.douyinstatic.com/fixture.js', 'script');
