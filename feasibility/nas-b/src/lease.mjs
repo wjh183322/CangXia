@@ -121,7 +121,8 @@ export function createLeaseManager({ store, clock = performance, bootId, ttlMs =
 
   function grantFor(state, proof) {
     const { deviceId, instanceId, expiresAt } = state.holder;
-    return { deviceId, instanceId, generation: state.generation, bootId, proof, ttlMs, expiresAt };
+    const remainingMs = Math.max(0, Math.floor(expiresAt - now()));
+    return { deviceId, instanceId, generation: state.generation, bootId, proof, ttlMs: remainingMs, expiresAt };
   }
 
   return {
@@ -131,14 +132,14 @@ export function createLeaseManager({ store, clock = performance, bootId, ttlMs =
       }
       const kind = 'lease-acquire';
       const commandHash = contentHash({ deviceId, instanceId });
-      const grant = write((db, state, time) => {
+      const { state, proof } = write((db, state, time) => {
         const saved = readReceipt(db, operationId, kind, commandHash);
         const live = active(state, time);
         if (saved) {
           if (!live || saved.generation !== live.generation || privateGrant?.generation !== live.generation) {
             throw stale();
           }
-          return grantFor(live, privateGrant.proof);
+          return { state: live, proof: privateGrant.proof };
         }
         if (live) throw new ProbeError('LIBRARY_IN_USE', 'The library already has an interactive holder.');
         const proof = randomBytes(32).toString('hex');
@@ -146,20 +147,21 @@ export function createLeaseManager({ store, clock = performance, bootId, ttlMs =
         state.holder = { deviceId, instanceId, expiresAt: time + ttlMs, proofHash: sha256(proof) };
         saveState(db, state);
         saveReceipt(store, db, operationId, kind, commandHash, { generation: state.generation });
-        return grantFor(state, proof);
+        return { state, proof };
       });
-      privateGrant = { generation: grant.generation, proof: grant.proof };
-      return grant;
+      if (observed?.generation === state.generation) privateGrant = { generation: state.generation, proof };
+      return grantFor(state, proof);
     },
 
     renew(grant) {
       const digest = proofDigest(grant);
-      return write((db, state, time) => {
+      const state = write((db, state, time) => {
         requireHolder(active(state, time), grant, digest);
         state.holder.expiresAt = time + ttlMs;
         saveState(db, state);
-        return grantFor(state, grant.proof);
+        return state;
       });
+      return grantFor(state, grant.proof);
     },
 
     release(grant, operationId) {

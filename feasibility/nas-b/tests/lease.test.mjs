@@ -99,6 +99,38 @@ test('acquire confirmation replay is scoped to the original live operation', asy
   assert.ok(!JSON.stringify(metadata).includes(first.proof));
 });
 
+test('acquire replay returns the remaining time without extending the original grant', async t => {
+  const f = await makeLeaseFixture(t);
+  const intent = f.client('a');
+  const first = f.leases.acquire(intent);
+  f.clock.advance(19_999);
+  const replay = f.leases.acquire(intent);
+  assert.equal(replay.ttlMs, 1);
+  assert.equal(replay.expiresAt, first.expiresAt);
+  assert.equal(replay.generation, first.generation);
+  assert.ok(replay.proof === first.proof);
+  f.clock.advance(0.5);
+  assert.equal(f.leases.acquire(intent).ttlMs, 0);
+  f.clock.advance(0.5);
+  assert.throws(() => f.leases.acquire(intent), { code: 'STALE_LEASE' });
+});
+
+test('initial and renewed grant durations account for time spent writing the lease', async t => {
+  const f = await makeLeaseFixture(t);
+  f.store.db.function('advance_lease_clock', () => f.clock.advance(2.25));
+  f.store.db.exec(`
+    CREATE TEMP TRIGGER delay_lease_write AFTER UPDATE ON runtime_meta WHEN NEW.key='lease' BEGIN
+      SELECT advance_lease_clock();
+    END
+  `);
+  const first = f.leases.acquire(f.client('a'));
+  assert.equal(first.expiresAt, 20_000);
+  assert.equal(first.ttlMs, 19_997);
+  const renewed = f.leases.renew(first);
+  assert.equal(renewed.expiresAt, 20_002.25);
+  assert.equal(renewed.ttlMs, 19_997);
+});
+
 test('release confirmation replay returns the original receipt without affecting a successor', async t => {
   const f = await makeLeaseFixture(t);
   const lost = [];
