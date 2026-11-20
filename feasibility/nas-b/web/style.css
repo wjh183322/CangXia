@@ -1,0 +1,39 @@
+html {
+  font:
+    16px/1.5 system-ui,
+    sans-serif;
+  color: #172524;
+  background: #f3f6f5;
+}
+main {
+  max-width: 52rem;
+  margin: 3rem auto;
+  padding: 1.5rem;
+  background: white;
+}
+h1 {
+  font-size: 1.6rem;
+}
+fieldset {
+  border: 1px solid #91a49e;
+  padding: 1rem;
+}
+input,
+button,
+select {
+  font: inherit;
+  padding: 0.35rem 0.55rem;
+  margin: 0.2rem;
+}
+button {
+  cursor: pointer;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+img,
+video {
+  max-width: 100%;
+  max-height: 65vh;
+}

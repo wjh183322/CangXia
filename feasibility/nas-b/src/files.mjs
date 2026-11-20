@@ -897,9 +897,9 @@ export async function finalizeWorkFiles({ store, layout, workId, jobId = 'reconc
   }
 }
 
-export async function reconcileWork({ store, layout, workId }) {
+export async function reconcileWork({ store, layout, workId, guard }) {
   const recovered = await recoverFileCommits({ store, layout, workId });
   const errors = recovered.filter(result => result.error).map(result => ({ workId, ...result.error }));
   if (errors.length) return { ok: false, pending: true, errors };
-  return withWorkFiles(layout, workId, () => finalizeWorkFiles({ store, layout, workId }));
+  return withWorkFiles(layout, workId, () => finalizeWorkFiles({ store, layout, workId, guard }));
 }

@@ -350,7 +350,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
           let result;
           let failedToSave = false;
           try {
-            result = finalization(await finalize(job));
+            result = finalization(await finalize(job, assertResult));
           } catch {
             failedToSave = true;
             result = {
@@ -397,7 +397,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
           }
         }
       });
-      queueMicrotask(() => { void runJob(worker); });
+      worker.done = Promise.resolve().then(() => runJob(worker));
     }
     if (result.cancel && local && sameRun(local.run, result.cancel)) {
       if (result.job.state === 'stopping' || !local.dispatched) local.controller?.abort();
@@ -471,6 +471,12 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
 
     pause: (id, operationId, { lease } = {}) => interrupt(id, operationId, lease, false),
     stop: (id, operationId, { lease } = {}) => interrupt(id, operationId, lease, true),
+    async close() {
+      const worker = local;
+      if (!worker) return;
+      try { flagLost(worker); } finally { worker.controller?.abort(); }
+      await worker.done;
+    },
     snapshot: id => store.readJob(id)
   };
 }

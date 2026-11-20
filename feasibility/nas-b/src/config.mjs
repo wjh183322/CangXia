@@ -142,6 +142,11 @@ async function readRuntimeMountInfo() {
   }
 }
 
+const freshLayouts = new WeakSet();
+export function consumeFreshLayout(layout) {
+  return freshLayouts.delete(layout);
+}
+
 export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } = {}) {
   const { mode, root, runId, libraryId, port } = config;
   assertMode(mode);
@@ -217,6 +222,7 @@ export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } 
   } catch {
     throw new ProbeError('DATA_ROOT_INITIALIZATION_FAILED', 'Probe data root initialization failed.');
   }
+  if (!entries.length) freshLayouts.add(layout);
   return Object.freeze(layout);
 }
 
