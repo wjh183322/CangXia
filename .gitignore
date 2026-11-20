@@ -20,3 +20,4 @@ system-browser/
 __pycache__/
 *.pyc
 config.json
+.evidence/
