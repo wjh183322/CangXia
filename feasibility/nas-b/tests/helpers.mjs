@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { prepareDataRoot, readProbeConfig } from '../src/config.mjs';
+import { createLeaseManager } from '../src/lease.mjs';
 import { openProbeStore } from '../src/store.mjs';
 
 export async function makeSandbox(t) {
@@ -60,9 +61,24 @@ export async function makeSandbox(t) {
 
 export function fakeClock(start = 0) {
   let time = start;
+  const timers = new Map();
   return {
     now: () => time,
-    advance: milliseconds => { time += milliseconds; return time; }
+    setTimeout(callback, delay) {
+      const id = Symbol();
+      timers.set(id, { callback, deadline: time + delay });
+      return id;
+    },
+    clearTimeout: id => timers.delete(id),
+    advance(milliseconds) {
+      time += milliseconds;
+      for (const [id, { callback, deadline }] of timers) {
+        if (deadline > time) continue;
+        timers.delete(id);
+        callback();
+      }
+      return time;
+    }
   };
 }
 
@@ -92,6 +108,14 @@ export async function makeStoreFixture(t, { testHooks, source = { kind: 'total',
   const opId = 'fixture-page';
   const command = page => ({ jobId: job.id, epoch: job.epoch, authEpoch: job.authEpoch, operationId: opId, page });
   return { store, file, libraryId, job, opId, command, reopen };
+}
+
+export async function makeLeaseFixture(t) {
+  const fixture = await makeStoreFixture(t);
+  const clock = fakeClock();
+  const manager = (store = fixture.store, bootId = 'fixture-boot') => createLeaseManager({ store, clock, bootId });
+  const client = name => ({ deviceId: 'same-device', instanceId: name, operationId: 'acquire-' + name });
+  return { ...fixture, clock, manager, client, leases: manager() };
 }
 
 const sourcePages = JSON.parse(

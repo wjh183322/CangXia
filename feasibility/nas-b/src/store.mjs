@@ -24,7 +24,7 @@ const schema = `
     singleton INTEGER PRIMARY KEY CHECK(singleton=1), service TEXT NOT NULL, library_id TEXT NOT NULL
   ) STRICT;
   CREATE TABLE runtime_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL CHECK(json_valid(value))) STRICT;
-  INSERT INTO runtime_meta VALUES ('revision', '0');
+  INSERT INTO runtime_meta VALUES ('revision', '0'), ('lease', 'null');
 
   CREATE TABLE records (
     kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT CHECK(body IS NULL OR json_valid(body)),
