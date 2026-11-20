@@ -47,7 +47,18 @@
           ><button data-cmd="pause">暂停</button><button data-cmd="resume">恢复</button
           ><button data-cmd="stop">停止读取</button><button data-cmd="cancel">取消下载</button>
         </p>
-        <label>最近操作 ID <input id="receipt" readonly /></label>
+        <label>最近申请 ID <input id="receipt-acquire" readonly /></label>
+        <label>最近释放 ID <input id="receipt-release" readonly /></label>
+        <label>最近作业操作 ID <input id="receipt-command" readonly /></label>
+        <label
+          >查询最近一次
+          <select id="receipt-kind">
+            <option value="release">释放</option>
+            <option value="acquire">申请</option>
+            <option value="command">作业操作</option>
+          </select></label
+        >
+        <button data-cmd="saved-receipt">读取 NAS 回执</button>
       </fieldset>
       <pre id="output" aria-live="polite"></pre>
       <div id="preview"></div>

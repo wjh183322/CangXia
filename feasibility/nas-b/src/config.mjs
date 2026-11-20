@@ -50,7 +50,8 @@ export function readProbeConfig(env) {
   }
   assertId(runId);
   assertId(libraryId);
-  return Object.freeze({ mode, root, runId, libraryId, port: containerPort(port), limits: LIMITS, session: SESSION });
+  const accessHost = env.PROBE_ACCESS_HOST === undefined ? undefined : validateAccessHost(env.PROBE_ACCESS_HOST);
+  return Object.freeze({ mode, root, runId, libraryId, port: containerPort(port), accessHost, limits: LIMITS, session: SESSION });
 }
 
 function foreignRoot() {
@@ -233,6 +234,16 @@ function isLanAddress(address) {
   if (family !== 4) return false;
   const [first, second] = address.split('.').map(Number);
   return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+}
+
+export function validateAccessHost(value) {
+  if (isLanAddress(value)) return value;
+  // Local DNS only. No wildcard, port, URL, resolver search sequence, or OpenSSL option syntax.
+  if (typeof value === 'string' && value.length <= 253 && !value.toLowerCase().startsWith('localhost') &&
+      /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.local|\.home\.arpa)?$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  throw new ProbeError('INVALID_PROBE_ACCESS_HOST', 'A verified private address or local DNS name is required.');
 }
 
 export function validateDeployment(input) {

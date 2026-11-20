@@ -2,11 +2,19 @@ import { assessRegisteredCover } from './cover-adapter.mjs';
 import https from 'node:https';
 import path from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+  X509Certificate
+} from 'node:crypto';
+import { isIP } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { prepareDataRoot, consumeFreshLayout } from './config.mjs';
+import { prepareDataRoot, consumeFreshLayout, validateAccessHost } from './config.mjs';
 import { PROBE, ProbeError } from './contracts.mjs';
 import { openProbeStore } from './store.mjs';
 import { createLeaseManager } from './lease.mjs';
@@ -89,7 +97,7 @@ const names = new Map([
   ['/app.mjs', ['app.mjs', 'text/javascript']],
   ['/style.css', ['style.css', 'text/css']]
 ]);
-async function credentials(layout, fresh, options) {
+async function credentials(layout, fresh, options, accessHost) {
   const secret = path.join(layout.state, 'access.token'),
     pem = path.join(layout.state, 'server.pem'),
     key = path.join(layout.state, 'server.key');
@@ -107,9 +115,9 @@ async function credentials(layout, fresh, options) {
         '-days',
         '365',
         '-subj',
-        '/CN=localhost',
+        '/CN=cangxia-server-probe',
         '-addext',
-        'subjectAltName=DNS:localhost,IP:127.0.0.1',
+        'subjectAltName=' + (isIP(accessHost) ? 'IP:' : 'DNS:') + accessHost,
         '-keyout',
         key,
         '-out',
@@ -119,14 +127,35 @@ async function credentials(layout, fresh, options) {
     );
   const token = options.token ?? (await readFile(secret, 'utf8')).trim();
   if (typeof token !== 'string' || token.length < 32) fail('INVALID_PROBE_ACCESS_KEY');
-  return {
-    secret: digest(token),
-    tls: options.tls ?? { key: await readFile(key), cert: await readFile(pem) }
-  };
+  const tls = options.tls ?? { key: await readFile(key), cert: await readFile(pem) };
+  try {
+    const certificate = new X509Certificate(tls.cert);
+    const matched = isIP(accessHost)
+      ? certificate.checkIP(accessHost)
+      : certificate.checkHost(accessHost, { subject: 'never', wildcards: false });
+    const now = Date.now();
+    if (
+      !matched ||
+      !certificate.checkPrivateKey(createPrivateKey(tls.key)) ||
+      now < Date.parse(certificate.validFrom) ||
+      now >= Date.parse(certificate.validTo)
+    )
+      fail('PROBE_TLS_IDENTITY');
+  } catch {
+    fail('PROBE_TLS_IDENTITY');
+  }
+  return { secret: digest(token), tls };
 }
 
 export async function startProbe(options) {
   const { config } = options;
+  const host = options.host ?? '0.0.0.0';
+  const localFixture =
+    config.root !== PROBE.root &&
+    options.layout?.root === config.root &&
+    ['127.0.0.1', '::1', 'localhost'].includes(host);
+  const accessHost =
+    config.accessHost === undefined && localFixture ? host : validateAccessHost(config.accessHost);
   const layout = options.layout ?? (await prepareDataRoot(config));
   const fresh = consumeFreshLayout(layout);
   const store =
@@ -162,7 +191,7 @@ export async function startProbe(options) {
   };
   let leases;
   try {
-    const { tls, secret } = await credentials(layout, fresh, options);
+    const { tls, secret } = await credentials(layout, fresh, options, accessHost);
     leases = options.leases ?? createLeaseManager({ store, bootId: randomUUID() });
     gateway = options.gateway ?? (await openBrowserGateway({ config, store }));
     downloads = options.downloads ?? createDownloads({ store, gateway, layout });
@@ -520,13 +549,16 @@ export async function startProbe(options) {
         }
       }
     );
-    const host = options.host ?? '0.0.0.0';
     if (options.fixtureView && !['localhost', '127.0.0.1', '::1'].includes(host)) fail('INVALID_PROBE_HOST');
     server.listen(options.port ?? config.port, host);
     await once(server, 'listening');
     runDownloads();
     return {
-      url: 'https://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + server.address().port,
+      url:
+        'https://' +
+        (accessHost.includes(':') ? '[' + accessHost + ']' : accessHost) +
+        ':' +
+        server.address().port,
       close
     };
   } catch (error) {

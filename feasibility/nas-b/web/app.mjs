@@ -56,6 +56,37 @@ export function createClientGate({ clock = performance, renew, onLock }) {
   };
 }
 
+export function createClientOperations(api, onRecord = () => {}) {
+  const recent = new Map();
+  let unconfirmedAcquire;
+  return {
+    last: (kind) => recent.get(kind),
+    async send(route, body) {
+      const kind =
+        route === 'session/acquire' ? 'acquire' : route === 'session/release' ? 'release' : 'command';
+      const operationId = (kind === 'acquire' && unconfirmedAcquire) || crypto.randomUUID();
+      recent.set(kind, operationId);
+      onRecord(kind, operationId);
+      if (kind === 'acquire') unconfirmedAcquire = operationId;
+      if (kind === 'release') unconfirmedAcquire = undefined;
+      try {
+        const result = await api(route, { ...body, operationId });
+        if (kind === 'acquire' && unconfirmedAcquire === operationId) unconfirmedAcquire = undefined;
+        return result;
+      } catch (error) {
+        if (kind === 'acquire' && error.confirmed && unconfirmedAcquire === operationId)
+          unconfirmedAcquire = undefined;
+        throw error;
+      }
+    },
+    lookup(kind) {
+      const id = recent.get(kind);
+      if (!id) throw Error('当前标签页没有此类操作 ID');
+      return api('operations/' + encodeURIComponent(id));
+    }
+  };
+}
+
 if (typeof document !== 'undefined') {
   const el = (id) => document.getElementById(id);
   const controls = el('controls'),
@@ -71,16 +102,20 @@ if (typeof document !== 'undefined') {
       body: body ? JSON.stringify(body) : undefined
     });
     const result = await res.json();
-    if (!res.ok) throw Error(result.code);
+    if (!res.ok) throw Object.assign(Error(result.code), { confirmed: true });
     return result;
   }
+  const operations = createClientOperations(api, (kind, operationId) => {
+    const field = el('receipt-' + kind);
+    field.value = operationId;
+  });
   const gate = createClientGate({
     renew: () => api('session/renew', {}),
     onLock() {
       controls.disabled = true;
       output.textContent = '';
       el('object').value = '';
-      el('receipt').value = '';
+      el('token').value = '';
       status.textContent = '已锁定';
       el('preview').replaceChildren();
     }
@@ -107,7 +142,7 @@ if (typeof document !== 'undefined') {
   };
   el('acquire').onclick = async () => {
     try {
-      await api('session/acquire', { operationId: crypto.randomUUID() });
+      await operations.send('session/acquire', {});
       holder = true;
       await check();
       schedule();
@@ -120,14 +155,13 @@ if (typeof document !== 'undefined') {
     clearInterval(pulse);
     gate.lock();
     try {
-      await api('session/release', { operationId: crypto.randomUUID() });
+      await operations.send('session/release', {});
       status.textContent = '已释放';
     } catch (e) {
       status.textContent = e.message;
     }
   };
   const id = () => encodeURIComponent(el('object').value.trim());
-  const op = () => ({ operationId: crypto.randomUUID() });
   controls.addEventListener('click', async (e) => {
     if (!e.target.dataset.cmd || gate.locked) return;
     const ticket = gate.generation,
@@ -143,11 +177,10 @@ if (typeof document !== 'undefined') {
       collections: ['sources/collections'],
       receipt: ['operations/' + id()],
       read: ['reads/' + id()],
-      enqueue: ['downloads', { ...op(), workIds: [el('object').value.trim()] }],
+      enqueue: ['downloads', { workIds: [el('object').value.trim()] }],
       start: [
         'reads',
         {
-          ...op(),
           source: {
             kind: el('kind').value,
             id: el('kind').value === 'total' ? '__all__' : el('object').value.trim()
@@ -155,10 +188,14 @@ if (typeof document !== 'undefined') {
         }
       ]
     };
-    const [path, body] = paths[cmd] ?? [el('target').value + '/' + id() + '/' + cmd, op()];
-    if (body?.operationId) el('receipt').value = body.operationId;
+    const [path, body] = paths[cmd] ?? [el('target').value + '/' + id() + '/' + cmd, {}];
     try {
-      const result = await api(path, body);
+      const result =
+        cmd === 'saved-receipt'
+          ? await operations.lookup(el('receipt-kind').value)
+          : ['enqueue', 'start', 'pause', 'resume', 'stop', 'cancel'].includes(cmd)
+            ? await operations.send(path, body)
+            : await api(path, body);
       if (gate.locked || ticket !== gate.generation) return;
       output.textContent = JSON.stringify(result, null, 2);
       if (cmd === 'works') {

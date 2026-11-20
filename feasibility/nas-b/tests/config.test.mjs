@@ -267,3 +267,11 @@ test('redacts structured secrets and common secret-bearing strings', () => {
   assert.match(result.messages[1], /request accepted/);
   assert.doesNotMatch(JSON.stringify(result), /sensitive-|guest|password@|sentinel\/private|msToken|synthetic-/);
 });
+test('reads only private IP or local DNS as the TLS access host',()=>{
+  for(const address of ['10.42.0.19','fd12::5','storage','Server-NAS.local','media.home.arpa']){
+    assert.equal(readProbeConfig({...env,PROBE_ACCESS_HOST:address}).accessHost,address.toLowerCase());
+  }
+  for(const address of ['example.org','8.8.8.8','169.254.3.9','0.0.0.0','::1','localhost','bad_host.local','foo.local:443']){
+    assert.throws(()=>readProbeConfig({...env,PROBE_ACCESS_HOST:address}),{code:'INVALID_PROBE_ACCESS_HOST'});
+  }
+});
