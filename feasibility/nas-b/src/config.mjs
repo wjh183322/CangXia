@@ -6,7 +6,10 @@ import path from 'node:path';
 import { LIMITS, PROBE, ProbeError, SESSION } from './contracts.mjs';
 
 const DIRECTORIES = ['state', 'media', 'staging', 'browser', 'reports'];
-const ALLOWED_ROOT_ENTRIES = new Set([PROBE.marker, ...DIRECTORIES]);
+const BOOTSTRAP_FILES = new Set([
+  'library.sqlite', 'library.sqlite-journal', 'library.sqlite-wal', 'library.sqlite-shm',
+  'access.token', 'server.pem', 'server.key'
+]);
 const HOST_BASE = '/volume2/docker/Cangxia-Feasibility-B';
 const ARCHITECTURES = new Map([
   ['x86_64', 'amd64'], ['amd64', 'amd64'],
@@ -143,9 +146,53 @@ async function readRuntimeMountInfo() {
   }
 }
 
-const freshLayouts = new WeakSet();
-export function consumeFreshLayout(layout) {
-  return freshLayouts.delete(layout);
+const bootstrapLayouts = new WeakMap();
+
+async function syncDirectory(directory) {
+  if (process.platform === 'win32') return;
+  const file = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+}
+
+async function readBootstrapState(stamp) {
+  if (!(await lstat(stamp)).isDirectory()) throw foreignRoot();
+  const entries = await readdir(stamp);
+  if (!entries.length) return false;
+  const complete = path.join(stamp, 'complete');
+  if (entries.length !== 1 || entries[0] !== 'complete' ||
+      !(await lstat(complete)).isDirectory() || (await readdir(complete)).length) throw foreignRoot();
+  return true;
+}
+
+function assertRootEntries(entries, identity) {
+  if (!entries.includes(identity) || entries.some(name => name !== identity && !DIRECTORIES.includes(name))) {
+    throw foreignRoot();
+  }
+}
+
+export async function needsDataRootBootstrap(layout) {
+  const stamp = bootstrapLayouts.get(layout);
+  if (!stamp) return false;
+  assertRootEntries(await readdir(layout.root), path.basename(stamp));
+  if (await readBootstrapState(stamp)) return false;
+  for (const name of DIRECTORIES) {
+    const entries = await readdir(layout[name], { withFileTypes: true });
+    if (entries.some(entry => name !== 'state' || !BOOTSTRAP_FILES.has(entry.name) || !entry.isFile())) {
+      throw foreignRoot();
+    }
+  }
+  return true;
+}
+
+export async function completeDataRootBootstrap(layout) {
+  const stamp = bootstrapLayouts.get(layout);
+  await syncDirectory(layout.state);
+  await mkdir(path.join(stamp, 'complete'), { mode: 0o700 });
+  await syncDirectory(stamp);
 }
 
 export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } = {}) {
@@ -170,6 +217,9 @@ export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } 
   const layout = { root };
   const markerPath = path.join(root, PROBE.marker);
   const marker = { service: PROBE.service, version: PROBE.markerVersion, runId, libraryId };
+  // The name claims the exact identity in one filesystem operation, even if startup exits immediately.
+  const stampName = '.' + PROBE.service + '.bootstrap-v' + PROBE.markerVersion + '.' + runId + '.' + libraryId;
+  const stamp = path.join(root, stampName);
   let entries;
   try {
     const ancestors = [];
@@ -181,10 +231,11 @@ export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } 
     }
     entries = await readdir(root);
     if (entries.length) {
-      if (!entries.includes(PROBE.marker) || entries.some(name => !ALLOWED_ROOT_ENTRIES.has(name))) {
-        throw foreignRoot();
-      }
-      await verifyMarker(markerPath, marker);
+      const legacy = entries.includes(PROBE.marker);
+      const identity = legacy ? PROBE.marker : stampName;
+      assertRootEntries(entries, identity);
+      if (legacy) await verifyMarker(markerPath, marker);
+      else await readBootstrapState(stamp);
     }
     const links = new Map();
     for (const name of DIRECTORIES) {
@@ -207,23 +258,21 @@ export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } 
 
   try {
     if (!entries.length) {
-      const file = await open(markerPath, 'wx', 0o600);
-      try {
-        await file.writeFile(JSON.stringify(marker) + '\n');
-        await file.sync();
-      } finally {
-        await file.close();
-      }
+      await mkdir(stamp, { mode: 0o700 });
+      assertRootEntries(await readdir(root), stampName);
+      await syncDirectory(root);
     }
     for (const name of DIRECTORIES) {
       if (!entries.includes(name)) {
         await mkdir(layout[name], { mode: 0o700 });
       }
     }
-  } catch {
+    if (DIRECTORIES.some(name => !entries.includes(name))) await syncDirectory(root);
+  } catch (error) {
+    if (error instanceof ProbeError) throw error;
     throw new ProbeError('DATA_ROOT_INITIALIZATION_FAILED', 'Probe data root initialization failed.');
   }
-  if (!entries.length) freshLayouts.add(layout);
+  if (!entries.includes(PROBE.marker)) bootstrapLayouts.set(layout, stamp);
   return Object.freeze(layout);
 }
 

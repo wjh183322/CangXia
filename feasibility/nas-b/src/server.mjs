@@ -1,7 +1,7 @@
 import { assessRegisteredCover } from './cover-adapter.mjs';
 import https from 'node:https';
 import path from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { open, readFile, writeFile } from 'node:fs/promises';
 import {
   createHash,
   createPrivateKey,
@@ -14,7 +14,7 @@ import { isIP } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { prepareDataRoot, consumeFreshLayout, validateAccessHost } from './config.mjs';
+import { completeDataRootBootstrap, needsDataRootBootstrap, prepareDataRoot, validateAccessHost } from './config.mjs';
 import { PROBE, ProbeError } from './contracts.mjs';
 import { openProbeStore } from './store.mjs';
 import { createLeaseManager } from './lease.mjs';
@@ -97,14 +97,39 @@ const names = new Map([
   ['/app.mjs', ['app.mjs', 'text/javascript']],
   ['/style.css', ['style.css', 'text/css']]
 ]);
-async function credentials(layout, fresh, options, accessHost) {
+async function readOptional(file, encoding) {
+  try {
+    return await readFile(file, encoding);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+function matchingCertificate(tls) {
+  try {
+    const certificate = new X509Certificate(tls.cert);
+    if (certificate.checkPrivateKey(createPrivateKey(tls.key))) return certificate;
+  } catch {}
+}
+
+async function credentials(layout, bootstrap, options, accessHost) {
   const secret = path.join(layout.state, 'access.token'),
     pem = path.join(layout.state, 'server.pem'),
     key = path.join(layout.state, 'server.key');
-  if (fresh && !options.token)
-    await writeFile(secret, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
-  if (fresh && !options.tls)
-    await promisify(execFile)(
+  const read = bootstrap ? readOptional : readFile;
+  let token = options.token ?? (await read(secret, 'utf8'))?.trim();
+  if (bootstrap && options.token == null && !/^[a-f0-9]{64}$/.test(token ?? '')) {
+    token = randomBytes(32).toString('hex');
+    await writeFile(secret, token, { mode: 0o600 });
+  }
+  if (typeof token !== 'string' || token.length < 32) fail('INVALID_PROBE_ACCESS_KEY');
+
+  let tls = options.tls ?? { key: await read(key), cert: await read(pem) };
+  let certificate = matchingCertificate(tls);
+  const generateTls = bootstrap && !options.tls && !certificate;
+  if (generateTls) {
+    // The child only writes to its pipe. A stopped service cannot leave it writing to persistent files.
+    const { stdout } = await promisify(execFile)(
       'openssl',
       [
         'req',
@@ -119,30 +144,47 @@ async function credentials(layout, fresh, options, accessHost) {
         '-addext',
         'subjectAltName=' + (isIP(accessHost) ? 'IP:' : 'DNS:') + accessHost,
         '-keyout',
-        key,
+        '-',
         '-out',
-        pem
+        '-'
       ],
       { windowsHide: true }
     );
-  const token = options.token ?? (await readFile(secret, 'utf8')).trim();
-  if (typeof token !== 'string' || token.length < 32) fail('INVALID_PROBE_ACCESS_KEY');
-  const tls = options.tls ?? { key: await readFile(key), cert: await readFile(pem) };
+    tls = {
+      key: stdout.match(/-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----\r?\n/)?.[0],
+      cert: stdout.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----\r?\n/)?.[0]
+    };
+    certificate = matchingCertificate(tls);
+  }
+  if (!certificate) fail('PROBE_TLS_IDENTITY');
   try {
-    const certificate = new X509Certificate(tls.cert);
     const matched = isIP(accessHost)
       ? certificate.checkIP(accessHost)
       : certificate.checkHost(accessHost, { subject: 'never', wildcards: false });
     const now = Date.now();
     if (
       !matched ||
-      !certificate.checkPrivateKey(createPrivateKey(tls.key)) ||
       now < Date.parse(certificate.validFrom) ||
       now >= Date.parse(certificate.validTo)
     )
       fail('PROBE_TLS_IDENTITY');
   } catch {
     fail('PROBE_TLS_IDENTITY');
+  }
+  if (generateTls) {
+    await writeFile(key, tls.key, { mode: 0o600 });
+    await writeFile(pem, tls.cert, { mode: 0o600 });
+  }
+  if (bootstrap) {
+    const persisted = [...(options.token == null ? [secret] : []), ...(options.tls ? [] : [key, pem])];
+    for (const name of persisted) {
+      const file = await open(name, 'r+');
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    }
   }
   return { secret: digest(token), tls };
 }
@@ -157,13 +199,13 @@ export async function startProbe(options) {
   const accessHost =
     config.accessHost === undefined && localFixture ? host : validateAccessHost(config.accessHost);
   const layout = options.layout ?? (await prepareDataRoot(config));
-  const fresh = consumeFreshLayout(layout);
+  const bootstrap = !options.store && (await needsDataRootBootstrap(layout));
   const store =
     options.store ??
     openProbeStore({
       file: path.join(layout.state, 'library.sqlite'),
       libraryId: config.libraryId,
-      initialize: fresh
+      bootstrap
     });
   let gateway, downloads, reads, server, unsubscribe;
   const sessions = new Map(),
@@ -191,7 +233,27 @@ export async function startProbe(options) {
   };
   let leases;
   try {
-    const { tls, secret } = await credentials(layout, fresh, options, accessHost);
+    let access;
+    if (bootstrap) {
+      // A competing startup cannot overwrite credentials while this process prepares them.
+      store.db.exec('BEGIN IMMEDIATE');
+      try {
+        if (!(await needsDataRootBootstrap(layout))) fail('PROBE_BOOTSTRAP_ALREADY_COMPLETE');
+        const used = store.db.prepare(`
+          SELECT 1 FROM runtime_meta
+          WHERE (key != 'revision' OR value != '0') AND (key != 'lease' OR value != 'null')
+          LIMIT 1
+        `).get();
+        if (used) fail('FOREIGN_DATA_ROOT');
+        access = await credentials(layout, true, options, accessHost);
+        await completeDataRootBootstrap(layout);
+      } finally {
+        store.db.exec('ROLLBACK');
+      }
+    } else {
+      access = await credentials(layout, false, options, accessHost);
+    }
+    const { tls, secret } = access;
     leases = options.leases ?? createLeaseManager({ store, bootId: randomUUID() });
     gateway = options.gateway ?? (await openBrowserGateway({ config, store }));
     downloads = options.downloads ?? createDownloads({ store, gateway, layout });

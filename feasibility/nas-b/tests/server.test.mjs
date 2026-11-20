@@ -1,17 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
+import { spawnSync } from 'node:child_process';
 import { openProbeStore } from '../src/store.mjs';
 import { parseSourcePage } from '../src/page-parser.mjs';
 import { createDownloads } from '../src/downloads.mjs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, X509Certificate } from 'node:crypto';
 import { generate } from 'selfsigned';
 import { makeSandbox, fakeClock } from './helpers.mjs';
 import { startProbe } from '../src/server.mjs';
 import { createClientGate } from '../web/app.mjs';
-import { ProbeError } from '../src/contracts.mjs';
+import { PROBE, ProbeError } from '../src/contracts.mjs';
 test('wake locks synchronously and losing the grant rejects a late renewal', async () => {
   let finish;
   const gate = createClientGate({
@@ -341,11 +342,92 @@ test('heartbeat keeps foreground data and expires a hung renewal', async () => {
   clock.advance(3001);
   assert.equal(gate.locked, true);
 });
-test('an existing marked layout cannot reinitialize a missing database', async (t) => {
+test('a legacy completed marker cannot reinitialize a missing database', async (t) => {
+  const s = await makeSandbox(t);
+  await s.write(PROBE.marker, JSON.stringify({
+    service: PROBE.service, version: PROBE.markerVersion, runId: s.config.runId, libraryId: s.config.libraryId
+  }));
+  await assert.rejects(startProbe({ config: s.config, layout: await s.prepare(), host: '127.0.0.1' }),
+    { code: 'PROBE_DB_MISSING' });
+  assert.equal(await s.exists('state/library.sqlite'), false);
+});
+
+test('first startup resumes after the root is claimed and before the database exists', async (t) => {
   const s = await makeSandbox(t);
   await s.prepare();
-  await assert.rejects(startProbe({ config: s.config, layout: await s.prepare(), host: '127.0.0.1' }));
   assert.equal(await s.exists('state/library.sqlite'), false);
+  await assert.rejects(s.prepare({ libraryId: 'foreign-library' }), { code: 'FOREIGN_DATA_ROOT' });
+  const identity = await generate([{ name: 'commonName', value: 'probe-nas.local' }], {
+    keySize: 2048,
+    extensions: [{ name: 'subjectAltName', altNames: [{ type: 2, value: 'probe-nas.local' }] }]
+  });
+  const probe = await startProbe({
+    config: { ...s.config, accessHost: 'probe-nas.local' }, layout: await s.prepare(),
+    host: '127.0.0.1', port: 0, gateway: { close() {} },
+    token: randomBytes(32).toString('hex'), tls: { key: identity.private, cert: identity.cert }
+  });
+  await probe.close();
+  assert.equal(await s.exists('state/library.sqlite'), true);
+});
+
+test('first startup can initialize an empty database file left by an interrupted creation', async (t) => {
+  const s = await makeSandbox(t);
+  await s.prepare();
+  await s.write('state/library.sqlite', '');
+  const identity = await generate([{ name: 'commonName', value: 'probe-nas.local' }], {
+    keySize: 2048,
+    extensions: [{ name: 'subjectAltName', altNames: [{ type: 2, value: 'probe-nas.local' }] }]
+  });
+  const probe = await startProbe({
+    config: { ...s.config, accessHost: 'probe-nas.local' }, layout: await s.prepare(),
+    host: '127.0.0.1', port: 0, gateway: { close() {} },
+    token: randomBytes(32).toString('hex'), tls: { key: identity.private, cert: identity.cert }
+  });
+  await probe.close();
+  const database = openProbeStore({ file: path.join(s.root, 'state', 'library.sqlite'), libraryId: s.config.libraryId });
+  database.close();
+});
+
+test('first startup rejects foreign content in a claimed but incomplete root', async (t) => {
+  const s = await makeSandbox(t);
+  await s.prepare();
+  await s.write('media/foreign.txt', 'owned fixture');
+  await assert.rejects(startProbe({ config: s.config, layout: await s.prepare(), host: '127.0.0.1' }),
+    { code: 'FOREIGN_DATA_ROOT' });
+  assert.equal(await s.exists('state/library.sqlite'), false);
+  assert.equal(await s.read('media/foreign.txt'), 'owned fixture');
+});
+
+test('first startup recovers a partial TLS pair and keeps completed credentials', async (t) => {
+  if (spawnSync('openssl', ['version'], { windowsHide: true }).error?.code === 'ENOENT') {
+    t.skip('OpenSSL CLI unavailable on this host');
+    return;
+  }
+  const s = await makeSandbox(t);
+  const state = (await s.prepare()).state;
+  const file = path.join(state, 'library.sqlite');
+  openProbeStore({ file, libraryId: s.config.libraryId, initialize: true }).close();
+  const token = randomBytes(32).toString('hex');
+  await s.write('state/access.token', token);
+  await s.write('state/server.key', 'interrupted private key');
+  const start = async () => startProbe({
+    config: { ...s.config, accessHost: 'probe-nas.local' }, layout: await s.prepare(),
+    host: '127.0.0.1', port: 0, gateway: { close() {} }
+  });
+  await (await start()).close();
+  const certificate = await s.read('state/server.pem');
+  const key = await s.read('state/server.key');
+  assert.equal(new X509Certificate(certificate).checkHost('probe-nas.local'), 'probe-nas.local');
+  assert.equal(await s.read('state/access.token'), token);
+  await (await start()).close();
+  assert.equal(await s.read('state/server.pem'), certificate);
+  assert.equal(await s.read('state/server.key'), key);
+
+  await unlink(path.join(state, 'server.pem'));
+  await assert.rejects(start(), { code: 'ENOENT' });
+  assert.equal(await s.exists('state/server.pem'), false);
+  assert.equal(await s.read('state/server.key'), key);
+  assert.equal(await s.read('state/access.token'), token);
 });
 test('a restart verifies the configured LAN certificate identity before opening a browser or listener', async (t) => {
   const s = await makeSandbox(t);

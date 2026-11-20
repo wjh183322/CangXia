@@ -313,11 +313,22 @@ function putCommit(db, commit, revision) {
   db.prepare("INSERT INTO file_commits VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
     "stage=excluded.stage,body=excluded.body,revision=excluded.revision")
     .run(commit.id, commit.workId, commit.resourceId, commit.stage, JSON.stringify(commit.body), revision);
+  commit.revision = revision;
 }
 
 function updateCommit(store, commit, stage = commit.stage) {
   commit.stage = stage;
   store.withWrite(db => putCommit(db, commit, store.nextRevision()));
+}
+
+function markCommitForReview(store, commit) {
+  if (['registered', 'review'].includes(commit.stage)) return;
+  store.withWrite(db => {
+    const current = store.fileCommit(commit.id, commit.workId);
+    if (!current || current.stage !== commit.stage || current.revision !== commit.revision) return;
+    commit.stage = 'review';
+    putCommit(db, commit, store.nextRevision());
+  });
 }
 
 async function commitDirectory(layout, commit) {
@@ -564,7 +575,7 @@ async function placeMetadataReplacement({ store, commit, dir, destination, stage
     await assertDigest({ file: displaced, stat: await status(displaced) }, body.previous);
     return await settlePlacement({ store, commit, destination, dir });
   } catch (error) {
-    if (error.code === 'PROBE_FILE_REVIEW') updateCommit(store, commit, 'review');
+    if (error.code === 'PROBE_FILE_REVIEW') markCommitForReview(store, commit);
     throw error;
   }
 }
@@ -746,10 +757,13 @@ async function checkRecoveryLinks({ store, layout }) {
 export async function recoverFileCommits({ store, layout, workId }) {
   await checkRecoveryLinks({ store, layout });
   const results = [];
-  for (const commit of store.fileCommits(workId)) {
-    if (!['verified', 'swapping', 'escrowing', 'escrowed', 'placed', 'moving'].includes(commit.stage)) continue;
-    try {
-      const result = await withWorkFiles(layout, commit.workId, () => {
+  const stages = ['verified', 'swapping', 'escrowing', 'escrowed', 'placed', 'moving'];
+  for (const candidate of store.fileCommits(workId)) {
+    if (!stages.includes(candidate.stage)) continue;
+    const result = await withWorkFiles(layout, candidate.workId, async () => {
+      const commit = store.fileCommit(candidate.id, candidate.workId);
+      if (!commit || !stages.includes(commit.stage) || commit.revision !== candidate.revision) return null;
+      try {
         const isStopping = () => {
           const job = commit.body.jobId && store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId);
           return ['cancelling', 'cancelled', 'pausing', 'paused'].includes(job?.state);
@@ -758,15 +772,14 @@ export async function recoverFileCommits({ store, layout, workId }) {
           if (isStopping()) throw problem('PROBE_FILE_RECOVERY_PAUSED', 'The stopped job has no new file work to recover.');
           assertWorkFiles(store, commit.workId);
         } };
-        if (commit.stage === 'moving') return applyMove(options);
-        return placeVerified(options);
-      });
-      if (result) results.push(result);
-    } catch (error) {
-      if (error.code === 'PROBE_FILE_RECOVERY_PAUSED') continue;
-      if (error.code === 'PROBE_FILE_REVIEW') updateCommit(store, commit, 'review');
-      results.push({ id: commit.id, workId: commit.workId, stage: commit.stage, error: fileReason(error) });
-    }
+        return await (commit.stage === 'moving' ? applyMove(options) : placeVerified(options));
+      } catch (error) {
+        if (error.code === 'PROBE_FILE_RECOVERY_PAUSED') return null;
+        if (error.code === 'PROBE_FILE_REVIEW') markCommitForReview(store, commit);
+        return { id: commit.id, workId: commit.workId, stage: commit.stage, error: fileReason(error) };
+      }
+    });
+    if (result) results.push(result);
   }
   return results;
 }

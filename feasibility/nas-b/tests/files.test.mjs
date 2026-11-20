@@ -97,6 +97,37 @@ test('DL-05 a different inode, even with the same contents, is never adopted or 
   assert.deepEqual(await readFile(placement.file + '.old'), png);
 });
 
+test('overlapping recovery keeps one registered commit and one visible resource', async t => {
+  const f = await fixture(t, { afterFilePlacement({ kind }) {
+    if (kind === 'image') throw Error('fixture termination point');
+  } });
+  await f.downloads.run();
+  f.store.close();
+  const store = f.open(false);
+  assert.equal(store.resources(id).length, 0);
+
+  const { promise: release, resolve: unlock } = Promise.withResolvers();
+  const holding = withWorkFiles(f.layout, id, () => release);
+  const { promise: bothScan, resolve: scanned } = Promise.withResolvers();
+  const fileCommits = store.fileCommits.bind(store);
+  let scans = 0;
+  store.fileCommits = workId => {
+    const rows = fileCommits(workId);
+    if (workId === id && ++scans === 2) scanned();
+    return rows;
+  };
+  const recover = () => recoverFileCommits({ store, layout: f.layout, workId: id });
+  const recoveries = Promise.all([recover(), recover()]);
+  await Promise.race([bothScan, recoveries]).finally(unlock);
+  await holding;
+  const [first, second] = await recoveries;
+  const committed = [...first, ...second];
+  assert.deepEqual(committed.map(row => row.stage), ['registered']);
+  assert.equal(store.resources(id).length, 1);
+  const asset = await resolveResource({ store, layout: f.layout, workId: id, key: 'image-0' });
+  assert.deepEqual(await readFile(asset.file), png);
+});
+
 test('TX-05 injected ENOSPC during the JSON leaves registered media complete and finalization retryable', async t => {
   const f = await fixture(t, { beforeFileWrite({ kind }) {
     if (kind === 'metadata') throw Object.assign(Error('fixture disk full'), { code: 'ENOSPC' });

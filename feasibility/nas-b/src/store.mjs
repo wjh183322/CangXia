@@ -149,7 +149,7 @@ function sameFile(actual, expected) {
   return actual?.dev === expected.dev && actual?.ino === expected.ino;
 }
 
-function checkPaths(file, { expected, empty = false } = {}) {
+function checkPaths(file, { expected, empty = false, allowRollback = false } = {}) {
   if (typeof file !== 'string' || !path.isAbsolute(file) || path.normalize(file) !== file) throw unsafeDb();
   const seen = {};
   try {
@@ -167,7 +167,8 @@ function checkPaths(file, { expected, empty = false } = {}) {
   const stat = seen[''];
   const hasSidecars = seen['-wal'] || seen['-shm'] || seen['-journal'];
   if ((!stat && hasSidecars) || (expected && !sameFile(stat, expected)) ||
-      (empty && (stat?.size !== 0n || hasSidecars))) throw unsafeDb();
+      (empty && (stat?.size !== 0n || seen['-wal'] || seen['-shm'] ||
+        (seen['-journal'] && !allowRollback)))) throw unsafeDb();
   return stat;
 }
 
@@ -208,12 +209,14 @@ function createDatabaseFile(file) {
   }
 }
 
-function openDatabase(file, libraryId, initialize) {
+function openDatabase(file, libraryId, initialize, bootstrap) {
   let expected = checkPaths(file);
   if (initialize && expected) throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
-  if (!initialize && !expected) throw error('PROBE_DB_MISSING', 'The existing probe database is missing.');
+  const create = initialize || (bootstrap && !expected);
+  const resume = bootstrap && expected?.size === 0n;
+  if (!create && !expected) throw error('PROBE_DB_MISSING', 'The existing probe database is missing.');
   const uri = pathToFileURL(file).href;
-  if (initialize) {
+  if (create) {
     try {
       expected = createDatabaseFile(file);
     } catch (cause) {
@@ -221,7 +224,7 @@ function openDatabase(file, libraryId, initialize) {
       if (cause.code === 'EEXIST') throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
       throw error('PROBE_DB_OPEN_FAILED', 'The probe database could not be initialized.');
     }
-  } else {
+  } else if (!resume) {
     try {
       verifyHeader(file, expected);
       checkPaths(file, { expected });
@@ -240,13 +243,13 @@ function openDatabase(file, libraryId, initialize) {
   let db;
   try {
     // Recheck path identity at SQLite's file-open boundaries on the dedicated mount.
-    const pathCheck = { expected, empty: initialize };
+    const pathCheck = { expected, empty: create || resume, allowRollback: resume };
     checkPaths(file, pathCheck);
     // mode=rw makes SQLite refuse a path that disappears during recovery.
     db = new DatabaseSync(uri + '?mode=rw', { timeout: 1000 });
     checkPaths(file, pathCheck);
     db.exec('PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF');
-    if (initialize) {
+    if (create || resume) {
       checkPaths(file, pathCheck);
       withTransaction(db, 'BEGIN IMMEDIATE', () => {
         // SQLite may have created the rollback journal when it acquired its write lock.
@@ -277,6 +280,14 @@ function jobFrom(row) {
     epoch: row.epoch, authEpoch: row.auth_epoch, state: row.state, cursor: row.cursor,
     savedPages: row.saved_pages, savedReceived: row.saved_received, savedUnique: row.saved_unique,
     pauseRequested: Boolean(row.pause_requested), finalizationPending: Boolean(row.finalization_pending)
+  };
+}
+
+function fileCommitFrom(row) {
+  if (!row) return null;
+  return {
+    id: row.id, workId: row.work_id, resourceId: row.resource_id, stage: row.stage,
+    body: JSON.parse(row.body), revision: row.revision
   };
 }
 
@@ -450,9 +461,11 @@ class ProbeStore {
   fileCommits(workId) {
     const where = workId === undefined ? '' : ' WHERE work_id=?';
     return this.db.prepare('SELECT * FROM file_commits' + where + ' ORDER BY revision,id')
-      .all(...(workId === undefined ? [] : [workId])).map(row => ({
-        id: row.id, workId: row.work_id, resourceId: row.resource_id, stage: row.stage, body: JSON.parse(row.body)
-      }));
+      .all(...(workId === undefined ? [] : [workId])).map(fileCommitFrom);
+  }
+
+  fileCommit(id, workId) {
+    return fileCommitFrom(this.db.prepare('SELECT * FROM file_commits WHERE id=? AND work_id=?').get(id, workId));
   }
 
   fileHook(name, value) {
@@ -603,7 +616,7 @@ class ProbeStore {
   }
 }
 
-export function openProbeStore({ file, libraryId, initialize = false, testHooks = {} }) {
+export function openProbeStore({ file, libraryId, initialize = false, bootstrap = false, testHooks = {} }) {
   if (typeof libraryId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(libraryId)) {
     throw error('INVALID_PROBE_ID', 'The probe requires a valid library identity.');
   }
@@ -612,5 +625,5 @@ export function openProbeStore({ file, libraryId, initialize = false, testHooks 
     testHooks.beforeDownloadWorkLock, testHooks.beforeMetadataExchange, testHooks.afterMetadataExchange]) {
     if (hook !== undefined) assertCallback(hook);
   }
-  return new ProbeStore(openDatabase(file, libraryId, initialize === true), testHooks);
+  return new ProbeStore(openDatabase(file, libraryId, initialize === true, bootstrap === true), testHooks);
 }

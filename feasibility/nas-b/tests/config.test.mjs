@@ -1,6 +1,6 @@
 
 import assert from 'node:assert/strict';
-import { link, symlink } from 'node:fs/promises';
+import { link, readdir, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { PROBE, LIMITS, SESSION } from '../src/contracts.mjs';
@@ -153,13 +153,13 @@ test('resumes only the same probe library and keeps existing content', async t =
   const layout = await sandbox.prepare();
   assert.deepEqual(Object.keys(layout), ['root', 'state', 'media', 'staging', 'browser', 'reports']);
   await sandbox.write('state/library.sqlite', 'existing fixture');
-  const markerBefore = await sandbox.read(PROBE.marker);
+  const entriesBefore = await readdir(sandbox.root);
   assert.deepEqual(await sandbox.prepare(), layout);
   assert.equal(await sandbox.read('state/library.sqlite'), 'existing fixture');
   for (const change of [{ runId: 'another-run' }, { libraryId: 'another-library' }]) {
     await assert.rejects(sandbox.prepare(change), { code: 'FOREIGN_DATA_ROOT' });
   }
-  assert.equal(await sandbox.read(PROBE.marker), markerBefore);
+  assert.deepEqual(await readdir(sandbox.root), entriesBefore);
   assert.equal(await sandbox.read('state/library.sqlite'), 'existing fixture');
 });
 
