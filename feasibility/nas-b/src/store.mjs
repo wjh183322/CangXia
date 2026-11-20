@@ -608,7 +608,8 @@ export function openProbeStore({ file, libraryId, initialize = false, testHooks 
     throw error('INVALID_PROBE_ID', 'The probe requires a valid library identity.');
   }
   for (const hook of [testHooks.afterWorkWrite, testHooks.afterPageCommit, testHooks.beforeFileWrite,
-    testHooks.afterFilePlacement, testHooks.beforeFileCleanup, testHooks.beforeFileMove]) {
+    testHooks.afterFilePlacement, testHooks.beforeFileCleanup, testHooks.beforeFileMove, testHooks.beforeResourceVerify,
+    testHooks.beforeDownloadWorkLock, testHooks.beforeMetadataEscrow, testHooks.afterMetadataEscrow]) {
     if (hook !== undefined) assertCallback(hook);
   }
   return new ProbeStore(openDatabase(file, libraryId, initialize === true), testHooks);

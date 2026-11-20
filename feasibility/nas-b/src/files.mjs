@@ -9,6 +9,7 @@ import { safeName } from '../../../electron/model.mjs';
 import { LIMITS, ProbeError } from './contracts.mjs';
 
 const metadataName = '作品信息.json';
+const metadataEscrow = 'displaced.json';
 const tokenPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const stageName = /^payload\.(?:mp4|jpg|png|webp|avif|json)(?:\.part)?$/;
 const locks = new Map();
@@ -35,6 +36,10 @@ const renameNoReplace = [
   'result = rename(-100, os.fsencode(sys.argv[1]), -100, os.fsencode(sys.argv[2]), 1)',
   'sys.exit(ctypes.get_errno() if result else 0)'
 ].join('\n');
+const winMoveFile = Buffer.from([
+  'try { [System.IO.File]::Move($env:CANGXIA_PROBE_MOVE_FROM, $env:CANGXIA_PROBE_MOVE_TO); exit 0 }',
+  'catch { exit ($_.Exception.InnerException.HResult -band 65535) }'
+].join('\n'), 'utf16le').toString('base64');
 
 export function fileReason(error) {
   if (error instanceof ProbeError) return { code: error.code, message: error.message };
@@ -63,7 +68,7 @@ async function retry(operation) {
   }
 }
 
-async function directory(root, relative = '', { create = false } = {}) {
+async function directory(root, relative = '', { create = false, guard } = {}) {
   const top = await status(root);
   if (!top?.isDirectory()) throw unsafe();
   let current = root;
@@ -73,6 +78,7 @@ async function directory(root, relative = '', { create = false } = {}) {
     if (current.length > 235) throw problem('PROBE_PATH_TOO_LONG', 'The probe path is too long for the portable download layout.');
     stat = await status(current);
     if (!stat && create) {
+      guard?.();
       try { await fs.mkdir(current, { mode: 0o700 }); }
       catch (error) { if (error.code !== 'EEXIST') throw error; }
       stat = await status(current);
@@ -114,19 +120,32 @@ async function syncDirectory(dir) {
   } finally { await handle?.close(); }
 }
 
-async function moveDirectory(from, to) {
+async function moveExclusive(from, to, { directory = false } = {}) {
   // Windows rejects renaming a directory over an existing directory. Linux
   // needs the exclusive flag even for a target that appears empty.
-  if (process.platform === 'win32') return fs.rename(from, to);
+  if (process.platform === 'win32') {
+    if (directory) return fs.rename(from, to);
+    try {
+      await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', winMoveFile], {
+        env: { ...process.env, CANGXIA_PROBE_MOVE_FROM: from, CANGXIA_PROBE_MOVE_TO: to },
+        timeout: 5000, windowsHide: true
+      });
+      return;
+    } catch (error) {
+      if (await status(to)) throw review();
+      if ([5, 32].includes(error.code)) throw Object.assign(new Error('Exclusive file move failed.'), { code: 'EACCES' });
+      throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive file move.');
+    }
+  }
   if (process.platform !== 'linux') {
-    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'Exclusive directory moves are unavailable on this host.');
+    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'Exclusive moves are unavailable on this host.');
   }
   try { await execute('python3', ['-I', '-S', '-c', renameNoReplace, from, to], { timeout: 5000 }); }
   catch (error) {
     const code = Number.isInteger(error.code) ? getSystemErrorName(-error.code) : error.code;
     if (['EEXIST', 'ENOTEMPTY'].includes(code)) throw review();
-    if (storageCodes.includes(code)) throw Object.assign(new Error('Exclusive directory move failed.'), { code });
-    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive directory move.');
+    if (storageCodes.includes(code)) throw Object.assign(new Error('Exclusive move failed.'), { code });
+    throw problem('PROBE_FILE_MOVE_UNSUPPORTED', 'The probe volume could not perform an exclusive move.');
   }
 }
 
@@ -218,13 +237,13 @@ function collectionName(source) {
   return source.name || (source.id === '__all__' ? '收藏' : source.folder || '收藏夹-' + source.id);
 }
 
-async function chooseHome({ store, work, saved, layout }) {
+async function chooseHome({ store, work, saved, layout, guard }) {
   const source = sourceFor(store, work, saved);
   const owners = ownerMap(store);
   const existingHome = saved?.home;
   let home = planDestination({ work, source, owners, existingHome });
   const media = (await roots(layout)).media.file;
-  const parent = await directory(media, home.folder, { create: true });
+  const parent = await directory(media, home.folder, { create: true, guard });
   const candidate = await status(path.join(parent.file, home.workFolder));
   if (candidate && homePath(home) !== (existingHome && homePath(existingHome))) {
     // A directory which isn't in our home ledger must never be adopted.
@@ -302,7 +321,8 @@ export async function assertFileStage(stage, layout) {
   await checkStageEntries(dir, stage.commit);
 }
 
-export async function openFileStage({ store, layout, jobId, workId, key, kind, resourceIdentity, observationIdentity, group }) {
+export async function openFileStage({ store, layout, jobId, workId, key, kind, resourceIdentity, observationIdentity, group, guard }) {
+  guard?.();
   const previous = store.fileCommits(workId).find(entry => entry.stage === 'staged' &&
     entry.body.jobId === jobId && entry.body.key === key && entry.body.resourceIdentity === resourceIdentity && entry.body.group === group);
   if (previous) {
@@ -317,8 +337,9 @@ export async function openFileStage({ store, layout, jobId, workId, key, kind, r
     stage: 'allocating', body: { key, kind, jobId, resourceIdentity, observationIdentity, group, files: {} } };
   updateCommit(store, commit);
   const { staging } = await roots(layout);
-  const parent = await directory(staging.file, 'commits', { create: true });
+  const parent = await directory(staging.file, 'commits', { create: true, guard });
   const dir = path.join(parent.file, id);
+  guard?.();
   await fs.mkdir(dir, { mode: 0o700 });
   const stat = (await directory(parent.file, id)).stat;
   await syncDirectory(parent.file);
@@ -356,12 +377,22 @@ export function stageCheckpoints(store, { commit }) {
 }
 
 async function digestFile(file, expected, limitLinks, signal) {
+  signal?.throwIfAborted();
   const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const first = await handle.stat({ bigint: true });
     if (!first.isFile() || first.nlink > BigInt(limitLinks) || !same(first, expected)) throw review();
     const hash = createHash('sha256');
-    for await (const chunk of handle.createReadStream({ autoClose: false, signal })) hash.update(chunk);
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let remaining = Number(first.size);
+    while (remaining > 0) {
+      signal?.throwIfAborted();
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, remaining), null);
+      if (!bytesRead) throw review();
+      hash.update(chunk.subarray(0, bytesRead));
+      remaining -= bytesRead;
+    }
+    signal?.throwIfAborted();
     const last = await handle.stat({ bigint: true });
     const named = await status(file);
     if (!same(named, expected) || first.size !== last.size || first.mtimeNs !== last.mtimeNs ||
@@ -427,9 +458,9 @@ async function registerFile(store, commit) {
     assertWorkFiles(store, workId);
     const previous = store.resources(workId).find(asset => asset.key === body.key);
     if (previous && previous.id !== resourceId) throw review();
-    if (previous && body.kind !== 'metadata' &&
-        (!body.previous?.missing || previous.relative_path !== body.previous.relative ||
-          previous.sha256 !== body.previous.sha256 || previous.revision !== body.previous.revision)) throw review();
+    if (Boolean(previous) !== Boolean(body.previous) || (previous &&
+        (previous.relative_path !== body.previous.relative || previous.sha256 !== body.previous.sha256 ||
+          previous.revision !== body.previous.revision || (body.kind !== 'metadata' && !body.previous.missing)))) throw review();
     const revision = store.nextRevision();
     db.prepare("INSERT OR REPLACE INTO resources VALUES (?,?,?,?,?,?,?,?,?,?)").run(
       resourceId, workId, body.key, body.kind, body.relative, body.size, body.sha256, body.mime, 'complete', revision);
@@ -445,6 +476,46 @@ async function registerFile(store, commit) {
   });
 }
 
+async function escrowMetadata({ store, commit, dir, destination, recoverOnly, guard }) {
+  const escrow = path.join(dir, metadataEscrow);
+  let stat = await status(escrow);
+  let displacedHere = false;
+  if (!stat) {
+    if (commit.stage === 'escrowed') throw review();
+    if (recoverOnly) return false;
+    await assertDigest(destination, commit.body.previous);
+    await retry(async () => {
+      if (!same(await status(destination.file), commit.body.previous.identity)) throw review();
+      store.fileHook('beforeMetadataEscrow', { file: destination.file, escrow });
+      guard?.();
+      if (commit.stage !== 'escrowing') updateCommit(store, commit, 'escrowing');
+      await moveExclusive(destination.file, escrow);
+      displacedHere = true;
+    });
+    await syncDirectory(dir);
+    await syncDirectory(destination.parent.file);
+    store.fileHook('afterMetadataEscrow', { file: destination.file, escrow });
+    stat = await status(escrow);
+  } else if (!['escrowing', 'escrowed'].includes(commit.stage)) throw review();
+  try { await assertDigest({ file: escrow, stat }, commit.body.previous); }
+  catch (error) {
+    if (error.code !== 'PROBE_FILE_REVIEW') throw error;
+    // Whoever changed the old JSON keeps every version. Restore the displaced
+    // entry only when its original name is still empty.
+    if (displacedHere && stat && !await status(destination.file)) {
+      try {
+        await moveExclusive(escrow, destination.file);
+        await syncDirectory(dir);
+        await syncDirectory(destination.parent.file);
+      } catch { /* Keep the displaced entry when exclusive restoration fails. */ }
+    }
+    updateCommit(store, commit, 'review');
+    throw error;
+  }
+  if (commit.stage !== 'escrowed') updateCommit(store, commit, 'escrowed');
+  return true;
+}
+
 async function placeVerified({ store, layout, commit, recoverOnly = false, guard }) {
   assertWorkFiles(store, commit.workId);
   const { body } = commit;
@@ -455,27 +526,25 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
   const { media } = await roots(layout);
   const destination = await fileAt(media.file, body.relative);
   if (!same(destination.parent.stat, body.homeIdentity)) throw review();
+  const replacesMetadata = body.previous && !body.previous.missing;
 
   if (!same(destination.stat, body.identity)) {
     if (commit.stage === 'placed') throw review();
-    if (recoverOnly) return null;
+    if (recoverOnly && !replacesMetadata) return null;
     await assertDigest(staged, body);
-    if (body.previous && !body.previous.missing) {
+    if (replacesMetadata) {
       if (body.kind !== 'metadata') throw review();
-      await assertDigest(destination, body.previous);
-      await retry(async () => {
-        if (!same(await status(destination.file), body.previous.identity)) throw review();
-        guard?.();
-        await fs.rename(staged.file, destination.file);
-      });
+      if (!await escrowMetadata({ store, commit, dir, destination, recoverOnly, guard })) return null;
     } else {
       if (destination.stat) throw review();
       guard?.();
-      try { await fs.link(staged.file, destination.file); }
-      catch (error) { if (error.code === 'EEXIST') throw review(); throw error; }
     }
+    // An escrowed replacement has already begun. Finish its verified placement
+    // even if cancellation arrived after the prior name was moved.
+    try { await fs.link(staged.file, destination.file); }
+    catch (error) { if (error.code === 'EEXIST') throw review(); throw error; }
     store.fileHook('afterFilePlacement', { workId: commit.workId, kind: body.kind, file: destination.file, staged: staged.file });
-  }
+  } else if (replacesMetadata && !['escrowed', 'placed'].includes(commit.stage)) throw review();
 
   destination.stat = await status(destination.file);
   staged.stat = await status(staged.file);
@@ -508,28 +577,61 @@ function assetProof(store, workId, asset) {
     commit.body.sha256 === asset.sha256 && commit.body.size === asset.size)?.body;
 }
 
+function permitsResource(store, workId) {
+  return !!store.db.prepare(
+    "SELECT 1 FROM records WHERE kind='works' AND id=? AND body IS NOT NULL AND NOT EXISTS (" +
+    "SELECT 1 FROM scope_state WHERE work_id=records.id AND kind IN ('work','files') AND source_id='' AND deleted=1)"
+  ).get(workId);
+}
+
+function assertResourceRegistration(store, resource) {
+  const row = store.db.prepare("SELECT * FROM resources WHERE work_id=? AND key=? AND state='complete'")
+    .get(resource.work_id, resource.key);
+  if (!row || ['id', 'revision', 'relative_path', 'size', 'sha256', 'mime', 'kind']
+    .some(key => row[key] !== resource[key])) throw review();
+}
+
+// Call after opening, using the stat of the actual handle that will be streamed.
+// The registry and scope checks can also be repeated synchronously during reads.
+export function assertResourceCurrent({ store, resource, stat }) {
+  if (!permitsResource(store, resource.work_id)) {
+    throw problem('PROBE_FILES_PROTECTED', 'The work or its media scope is unavailable.');
+  }
+  assertResourceRegistration(store, resource);
+  if (stat !== undefined && (!stat.isFile() || stat.nlink !== 1n || !same(stat, resource.identity) ||
+      stat.size !== BigInt(resource.size) || String(stat.mtimeNs) !== resource.mtimeNs)) throw review();
+}
+
 export async function resolveResource({ store, layout, workId, key, verify = false, allowMissing = false, signal }) {
-  if (!store.work(workId) || store.db.prepare(
-    "SELECT 1 FROM scope_state WHERE work_id=? AND kind='files' AND source_id='' AND deleted=1"
-  ).get(workId)) return null;
+  if (!permitsResource(store, workId)) return null;
   const row = store.resources(workId).find(asset => asset.key === key && asset.state === 'complete');
   if (!row) return null;
   const proof = assetProof(store, workId, row);
   if (!proof) throw review();
   const { media } = await roots(layout);
   const located = await fileAt(media.file, row.relative_path);
+  if (!permitsResource(store, workId)) return null;
   const home = savedHome(store, workId);
   if (!home || !same(located.parent.stat, home.identity)) throw review();
   const asset = { ...row, file: located.file, identity: proof.identity, mtimeNs: proof.mtimeNs,
     resourceIdentity: proof.resourceIdentity, observationIdentity: proof.observationIdentity, ...proof.dimensions };
   if (!located.stat) {
-    if (allowMissing) return { ...asset, missing: true };
+    if (allowMissing) {
+      assertResourceRegistration(store, asset);
+      return { ...asset, missing: true };
+    }
     throw missing();
   }
   if (!same(located.stat, proof.identity) ||
       located.stat.nlink !== 1n || Number(located.stat.size) !== row.size ||
       String(located.stat.mtimeNs) !== proof.mtimeNs) throw review();
-  if (verify) await assertDigest(located, proof, 1, signal);
+  if (verify) {
+    store.fileHook('beforeResourceVerify', asset);
+    await assertDigest(located, proof, 1, signal);
+  }
+  signal?.throwIfAborted();
+  if (!permitsResource(store, workId)) return null;
+  assertResourceRegistration(store, asset);
   return asset;
 }
 
@@ -583,7 +685,7 @@ async function checkRecoveryLinks({ store, layout }) {
       const stat = await status(path.join(stageRoot, token, name));
       if (!stat || stat.nlink <= 1n || !stat.isFile()) continue;
       const commit = commits.get(token);
-      if (!commit || !['verified', 'placed'].includes(commit.stage) || commit.body.stagedName !== name ||
+      if (!commit || !['verified', 'escrowed', 'placed'].includes(commit.stage) || commit.body.stagedName !== name ||
           !same(candidate, commit.body.directory) || !same(stat, commit.body.identity) || stat.nlink !== 2n) throw review();
       const formal = await fileAt(layout.media, commit.body.relative);
       if (!same(formal.stat, commit.body.identity)) throw review();
@@ -595,16 +697,23 @@ export async function recoverFileCommits({ store, layout, workId }) {
   await checkRecoveryLinks({ store, layout });
   const results = [];
   for (const commit of store.fileCommits(workId)) {
-    if (!['verified', 'placed', 'moving'].includes(commit.stage)) continue;
+    if (!['verified', 'escrowing', 'escrowed', 'placed', 'moving'].includes(commit.stage)) continue;
     try {
       const result = await withWorkFiles(layout, commit.workId, () => {
-        if (commit.stage === 'moving') return applyMove({ store, layout, commit });
-        const job = commit.body.jobId && store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId);
-        const recoverOnly = ['cancelling', 'cancelled', 'pausing', 'paused'].includes(job?.state);
-        return placeVerified({ store, layout, commit, recoverOnly });
+        const isStopping = () => {
+          const job = commit.body.jobId && store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId);
+          return ['cancelling', 'cancelled', 'pausing', 'paused'].includes(job?.state);
+        };
+        const options = { store, layout, commit, recoverOnly: isStopping(), guard() {
+          if (isStopping()) throw problem('PROBE_FILE_RECOVERY_PAUSED', 'The stopped job has no new file work to recover.');
+          assertWorkFiles(store, commit.workId);
+        } };
+        if (commit.stage === 'moving') return applyMove(options);
+        return placeVerified(options);
       });
       if (result) results.push(result);
     } catch (error) {
+      if (error.code === 'PROBE_FILE_RECOVERY_PAUSED') continue;
       if (error.code === 'PROBE_FILE_REVIEW') updateCommit(store, commit, 'review');
       results.push({ id: commit.id, workId: commit.workId, stage: commit.stage, error: fileReason(error) });
     }
@@ -612,7 +721,7 @@ export async function recoverFileCommits({ store, layout, workId }) {
   return results;
 }
 
-async function applyMove({ store, layout, commit }) {
+async function applyMove({ store, layout, commit, recoverOnly = false, guard }) {
   const { workId, body } = commit;
   assertWorkFiles(store, workId);
   const { media } = await roots(layout);
@@ -626,11 +735,13 @@ async function applyMove({ store, layout, commit }) {
   let previous = await status(from);
   let placed = await status(to);
   if (previous) {
+    if (recoverOnly) return null;
     if (!previous.isDirectory() || !same(previous, body.before.identity) || placed) throw review();
     await retry(async () => {
       if (!same(await status(from), body.before.identity) || await status(to)) throw review();
       store.fileHook('beforeFileMove', { workId, file: to });
-      try { await moveDirectory(from, to); }
+      guard?.();
+      try { await moveExclusive(from, to, { directory: true }); }
       catch (error) {
         if (await status(to)) throw review();
         throw error;
@@ -659,13 +770,16 @@ async function applyMove({ store, layout, commit }) {
   return { id: commit.id, workId, stage: commit.stage };
 }
 
-async function writeMetadata({ store, layout, work, home, jobId }) {
+async function writeMetadata({ store, layout, work, home, jobId, signal, guard }) {
+  guard();
   const { id: workId } = work;
   const assets = store.resources(workId).filter(row => row.kind !== 'metadata');
   if (!assets.length) return;
-  for (const asset of assets) await resolveResource({ store, layout, workId, key: asset.key, verify: true });
-  const previous = await resolveResource({ store, layout, workId, key: 'metadata', verify: true });
-  const previousProof = previous ? { identity: previous.identity, size: previous.size, sha256: previous.sha256 } : null;
+  for (const asset of assets) await resolveResource({ store, layout, workId, key: asset.key, verify: true, signal });
+  const previous = await resolveResource({ store, layout, workId, key: 'metadata', verify: true, signal });
+  guard();
+  const previousProof = previous ? { identity: previous.identity, mtimeNs: previous.mtimeNs,
+    size: previous.size, sha256: previous.sha256, relative: previous.relative_path, revision: previous.revision } : null;
   const info = {
     schemaVersion: 1, workId, workName: work.name, title: work.title, caption: work.caption, description: work.description,
     author: work.author, coAuthors: work.coAuthors ?? [], tags: work.tags, rawTags: work.rawTags,
@@ -678,43 +792,55 @@ async function writeMetadata({ store, layout, work, home, jobId }) {
   const bytes = Buffer.from(JSON.stringify(info, null, 2), 'utf8');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   if (previous?.sha256 === sha256) return;
-  const stage = await openFileStage({ store, layout, jobId, workId, key: 'metadata', kind: 'metadata', resourceIdentity: sha256 });
+  const stage = await openFileStage({ store, layout, jobId, workId, key: 'metadata', kind: 'metadata', resourceIdentity: sha256, guard });
   const file = path.join(stage.dir, 'payload.json');
   store.fileHook('beforeFileWrite', { workId, kind: 'metadata', file });
   const existing = await status(file);
+  const owned = stage.commit.body.files['payload.json'];
+  if (existing && (!existing.isFile() || existing.nlink !== 1n || !same(existing, owned))) throw review();
+  guard();
   const handle = await fs.open(file, existing ? 'r+' : 'wx');
   try {
-    trackStagedFile(store, stage, file, await handle.stat());
+    const opened = await handle.stat({ bigint: true });
+    if (existing && !same(opened, owned)) throw review();
+    trackStagedFile(store, stage, file, opened);
+    guard();
     await handle.truncate(0);
     await handle.writeFile(bytes);
     await handle.sync();
   } finally { await handle.close(); }
   await verifyAndPlace({ store, layout, stage, home, previous: previousProof, filename: metadataName,
-    mime: 'application/json', transferred: { file, size: bytes.length, sha256 } });
+    mime: 'application/json', transferred: { file, size: bytes.length, sha256 }, signal, guard });
 }
 
 const success = () => ({ ok: true, pending: false, errors: [] });
 
-export async function finalizeWorkFiles({ store, layout, workId, jobId = 'reconcile' }) {
+export async function finalizeWorkFiles({ store, layout, workId, jobId = 'reconcile', signal, guard: assertWriter }) {
   const work = store.work(workId);
   const saved = savedHome(store, workId);
   if (!work || !saved) return success();
-  try {
+  const guard = () => {
+    signal?.throwIfAborted();
+    assertWriter?.();
     assertWorkFiles(store, workId);
+  };
+  try {
+    guard();
     if (store.fileCommits(workId).some(commit => commit.stage === 'review')) throw review();
     const moving = store.fileCommits(workId).find(entry => entry.stage === 'moving');
-    if (moving) await applyMove({ store, layout, commit: moving });
+    if (moving) await applyMove({ store, layout, commit: moving, guard });
     const before = savedHome(store, workId);
-    const target = await chooseHome({ store, layout, work, saved: before });
+    const target = await chooseHome({ store, layout, work, saved: before, guard });
     const after = { home: target.home, identity: before.identity, collectionName: target.collectionName };
+    guard();
     if (homePath(before.home) !== homePath(after.home)) {
-      const commit = { id: randomUUID(), workId, resourceId: null, stage: 'moving', body: { before, after, kind: 'move' } };
+      const commit = { id: randomUUID(), workId, resourceId: null, stage: 'moving', body: { before, after, kind: 'move', jobId } };
       updateCommit(store, commit);
-      await applyMove({ store, layout, commit });
+      await applyMove({ store, layout, commit, guard });
     } else if (JSON.stringify(before) !== JSON.stringify(after)) {
       store.withWrite(db => saveHome(db, workId, after, store.nextRevision()));
     }
-    await writeMetadata({ store, layout, work, home: after, jobId });
+    await writeMetadata({ store, layout, work, home: after, jobId, signal, guard });
     return success();
   } catch (error) {
     return { ok: false, pending: true, errors: [{ workId, ...fileReason(error) }] };

@@ -598,10 +598,11 @@ export function createDownloads({ store, gateway, layout, clock = Date, fetchAss
       saveProgress(job.id, target);
     }
     requireWriter(job, signal);
-    const result = await finalizeWorkFiles({ store, layout, workId, jobId: job.id });
+    const result = await finalizeWorkFiles({ store, layout, workId, jobId: job.id, signal,
+      guard: () => requireWriter(job, signal) });
     change(job.id, current => {
-      current.finalizationPending = result.pending;
       if (current.state !== 'running' || closing) return;
+      current.finalizationPending = result.pending;
       current.state = result.ok ? 'complete' : 'finalization-pending';
       current.reason = result.ok ? null : result.errors[0];
     });
@@ -612,9 +613,10 @@ export function createDownloads({ store, gateway, layout, clock = Date, fetchAss
     const controller = new AbortController();
     active = { id, controller };
     try {
+      store.fileHook('beforeDownloadWorkLock', { workId });
       await withWorkFiles(layout, workId, async () => {
         let job = getJob(db, id);
-        if (job.state === 'cancelling' || job.state === 'pausing' || closing) return;
+        if (!['queued', 'running'].includes(job.state) || closing) return;
         job = change(id, current => { current.state = 'running'; current.reason = null; });
         if (recovered?.error) throw failure(recovered.error.code, recovered.error.message);
         await saveJob(job, controller.signal);
