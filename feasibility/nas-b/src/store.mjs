@@ -110,7 +110,7 @@ const isTime = value => typeof value === 'string' && Number.isFinite(Date.parse(
 const bodyOf = row => row?.body == null ? null : JSON.parse(row.body);
 const select = (record, fields) => Object.fromEntries(fields.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]]));
 
-function normalizeSource(source) {
+export function normalizeSource(source) {
   const { kind, id } = source ?? {};
   const valid = kind === 'total' && id === '__all__' ||
     kind === 'collection' && isWorkId(id) ||
@@ -419,7 +419,12 @@ class ProbeStore {
 
   readJob(id) {
     if (!isKey(id)) return null;
-    return jobFrom(this.db.prepare('SELECT * FROM source_jobs WHERE id=?').get(id));
+    const row = this.db.prepare(`
+      SELECT j.*, m.value AS read_details FROM source_jobs j
+      LEFT JOIN runtime_meta m ON m.key='read:job:' || j.id WHERE j.id=?
+    `).get(id);
+    const job = jobFrom(row);
+    return row?.read_details ? { ...job, ...JSON.parse(row.read_details) } : job;
   }
 
   readHead(source) {
@@ -551,6 +556,11 @@ class ProbeStore {
     const hints = new Map(page.aux.audioSourceHints.map(hint => [hint.workId, hint]));
     const people = [];
     const { kind, id } = page.source;
+    const coordinated = db.prepare("SELECT 1 FROM runtime_meta WHERE key='read:job:' || ?").get(job.id);
+    const sourceRank = coordinated ? db.prepare(`
+      SELECT COALESCE(SUM(received_count),0) AS count FROM read_pages WHERE source_kind=? AND source_id=?
+    `).get(kind, id).count : job.savedReceived;
+    const keepRef = coordinated ? db.prepare('INSERT INTO work_refs VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING') : putRef;
     let added = 0;
     for (const [index, observed] of page.works.entries()) {
       const { id: workId } = observed;
@@ -562,7 +572,7 @@ class ProbeStore {
       if (this.#testHooks.afterWorkWrite) synchronousResult(this.#testHooks.afterWorkWrite({ workId, index }));
       const accountProtected = kind !== 'author' && protectedScope.get(workId, 'account', '__all__');
       if (!accountProtected && !protectedScope.get(workId, kind, id)) {
-        putRef.run(kind, id, workId, job.savedReceived + page.refs[index].rank, job.id, revision);
+        keepRef.run(kind, id, workId, sourceRank + page.refs[index].rank, job.id, revision);
       }
       added += remember.run(job.id, workId).changes;
       people.push(observed.author, ...(observed.coAuthors ?? []));

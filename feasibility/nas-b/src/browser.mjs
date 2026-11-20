@@ -19,7 +19,7 @@ const driverTimeout = 2500;
 const maxResponseBytes = 8 * 1024 * 1024;
 const keys = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
 const pointerTypes = new Set(['click', 'move', 'down', 'up']);
-const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form']);
+const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form', 'beforeDispatch']);
 const routeParams = new Map([
   [selfRoute, []],
   [collectionRoute, []],
@@ -169,6 +169,7 @@ function approvedRead(route, options) {
   const params = routeParams.get(route);
   if (!params || !options || Object.keys(options).some(key => !requestFields.has(key)) ||
       (options.signal !== undefined && !(options.signal instanceof AbortSignal)) ||
+      (options.beforeDispatch !== undefined && typeof options.beforeDispatch !== 'function') ||
       (options.form !== undefined && route !== collectionRoute)) throw invalidRoute();
   try {
     return apiRequest(route, { method: options.method, params: readParams(options.params, params), form: readParams(options.form, ['cursor', 'count']) });
@@ -750,7 +751,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   async function request(route, options = {}) {
     const query = approvedRead(route, options);
-    const { authEpoch, signal: callerSignal } = options;
+    const { authEpoch, signal: callerSignal, beforeDispatch } = options;
     assertAuthEpoch(authEpoch);
     const signals = callerSignal ? [epochController.signal, callerSignal] : [epochController.signal];
     const signal = AbortSignal.any(signals);
@@ -763,6 +764,8 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         await beforeRead(signal);
         await assertSession(authEpoch, signal);
         assertAuthEpoch(authEpoch);
+        // The caller may hold a separate server lease. Check it at actual dispatch.
+        if (beforeDispatch && beforeDispatch() !== undefined) throw invalidRoute();
         const result = await read(slot, query, signal);
         await assertSession(authEpoch, signal);
         assertAuthEpoch(authEpoch);

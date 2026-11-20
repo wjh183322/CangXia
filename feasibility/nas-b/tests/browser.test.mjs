@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { openBrowserGateway } from '../src/browser.mjs';
+import { ProbeError } from '../src/contracts.mjs';
 import { openProbeStore } from '../src/store.mjs';
 import { makeSandbox, sourceFixture } from './helpers.mjs';
 import { parseSourcePage } from '../src/page-parser.mjs';
@@ -644,4 +645,26 @@ test('Linux Chromium may check its own stale singleton artifacts', { skip: proce
   await symlink('987654321', path.join(layout.browser, 'SingletonCookie'));
   await symlink(path.join(tmpdir(), '.org.chromium.Chromium.abc123', 'SingletonSocket'), path.join(layout.browser, 'SingletonSocket'));
   await open();
+});
+
+test('the synchronous request fence runs after pacing and session checks but before the source fetch', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  let stillHeld = true;
+  browser.clock.onPaceWait = () => { stillHeld = false; };
+  const fence = () => {
+    assert.equal(stillHeld, false);
+    assert.equal(browser.reads.length, 1);
+    throw new ProbeError('STALE_LEASE', 'Expired fixture lease');
+  };
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' }, beforeDispatch: fence }),
+    { code: 'STALE_LEASE' });
+  assert.equal(browser.reads.length, 1);
+  await gateway.request(detail, { authEpoch, params: { aweme_id: '1' } });
+  browser.clock.onPaceWait = () => { browser.session = 'new-session-before-dispatch'; };
+  let called = false;
+  await assert.rejects(gateway.request(detail, {
+    authEpoch, params: { aweme_id: '2' }, beforeDispatch: () => { called = true; }
+  }), { code: 'STALE_AUTH_EPOCH' });
+  assert.equal(called, false);
 });
