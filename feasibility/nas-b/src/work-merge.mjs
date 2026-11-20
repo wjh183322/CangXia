@@ -36,6 +36,7 @@ function mergeMedia(merged, previous, observed, fields) {
   const oldQuality = previous.mediaQuality ?? {};
   const incoming = observed.mediaQuality ?? {};
   const quality = { ...oldQuality };
+  quality.identities = { ...oldQuality.identities };
   const byIndex = new Map(observed.images.map(image => [image.index, image]));
   const imagesComplete = fields.has('images') && (previous.images ?? []).every(image =>
     coversCandidate(image, byIndex.get(image.index)) &&
@@ -45,6 +46,8 @@ function mergeMedia(merged, previous, observed, fields) {
     merged.images = observed.images;
     merged.type = observed.type;
     quality.imageOriginals = incoming.imageOriginals ?? {};
+    quality.identities.images = incoming.identities?.images;
+    quality.identities.imageCount = incoming.identities?.imageCount;
   }
 
   const hasVideo = fields.has('videoUrls');
@@ -66,6 +69,7 @@ function mergeMedia(merged, previous, observed, fields) {
     quality.videoPixels = pixels;
     quality.videoBitRate = bitRate;
     quality.videoObservedAt = incoming.videoObservedAt ?? observed.checkedAt;
+    quality.identities.video = incoming.identities?.video;
   }
   for (const key of videoParams) {
     if (fields.has(key) && (videoComplete || (!hasVideo && !previous[key]))) merged[key] = observed[key];
@@ -83,6 +87,8 @@ function mergeMedia(merged, previous, observed, fields) {
     merged.coverUrls = covers[0].urls;
     merged.coverSource = covers[0].source;
     merged.thumbnail = bySource.get('cover')?.urls[0] || merged.coverUrls[0];
+    const candidate = covers[0];
+    if (observed.coverVariants.includes(candidate)) quality.identities.cover = incoming.identities?.cover;
   } else if (imagesComplete && !previous.coverUrls?.length) {
     merged.thumbnail = observed.images[0]?.urls[0] || previous.thumbnail;
   }

@@ -61,12 +61,22 @@ function unsafeRoot() {
   return new ProbeError('UNSAFE_DATA_ROOT', 'The data root or an entry cannot be inspected as a safe filesystem path.');
 }
 
-async function checkDirectoryTree(directory) {
+async function checkDirectoryTree(directory, root, links) {
   for (const name of await readdir(directory)) {
     const entry = path.join(directory, name);
-    const stat = await lstat(entry);
-    if (stat.isDirectory()) await checkDirectoryTree(entry);
-    else if (!stat.isFile() || stat.nlink !== 1) throw unsafeRoot();
+    const stat = await lstat(entry, { bigint: true });
+    if (stat.isDirectory()) await checkDirectoryTree(entry, root, links);
+    else if (!stat.isFile() || (stat.nlink !== 1n && stat.nlink !== 2n)) throw unsafeRoot();
+    else if (stat.nlink === 2n) {
+      const relative = path.relative(root, entry).split(path.sep).join('/');
+      const knownStaging = /^staging\/commits\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/payload\.(mp4|jpg|png|webp|avif|json)$/.test(relative);
+      const knownMedia = /^media\/(?:[^/]+\/){2,3}[^/]+\.(mp4|jpg|png|webp|avif|json)$/.test(relative);
+      if (!knownStaging && !knownMedia) throw unsafeRoot();
+      const key = String(stat.dev) + ':' + String(stat.ino);
+      const pair = links.get(key) ?? [];
+      pair.push({ staged: knownStaging, extension: path.extname(name) });
+      links.set(key, pair);
+    }
   }
 }
 
@@ -170,12 +180,19 @@ export async function prepareDataRoot(config, { fixtureRoot, fixtureMountInfo } 
       }
       await verifyMarker(markerPath, marker);
     }
+    const links = new Map();
     for (const name of DIRECTORIES) {
       layout[name] = path.join(root, name);
       if (!entries.includes(name)) continue;
       if (!(await lstat(layout[name])).isDirectory()) throw unsafeRoot();
       // Chromium manages transient singleton artifacts inside its profile.
-      if (name !== 'browser') await checkDirectoryTree(layout[name]);
+      if (name !== 'browser') await checkDirectoryTree(layout[name], root, links);
+    }
+    // A crash can leave both names from a no-clobber placement. The probe
+    // checks the journal and recorded digest before it accepts either as media.
+    for (const pair of links.values()) {
+      if (pair.length !== 2 || pair[0].staged === pair[1].staged ||
+          pair[0].extension !== pair[1].extension) throw unsafeRoot();
     }
   } catch (error) {
     if (error instanceof ProbeError) throw error;

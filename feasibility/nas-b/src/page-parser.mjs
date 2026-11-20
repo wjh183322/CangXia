@@ -188,6 +188,11 @@ function candidateUrls(address) {
   return Array.isArray(urls) ? urls.filter(isText).map(url => url.replace(/^http:/, 'https:')) : [];
 }
 
+function assetIdentity(...values) {
+  const value = values.map(integerText).find(item => isText(item) && /^[A-Za-z0-9_./:-]{1,512}$/.test(item));
+  return value ? createHash('sha256').update(value).digest('hex') : null;
+}
+
 function mediaQuality(raw, work) {
   const images = imageRowsOf(raw);
   const imageOriginals = Object.fromEntries(work.images.map(({ index, urls }) => {
@@ -233,8 +238,30 @@ function mediaQuality(raw, work) {
   }
   return {
     imageOriginals, videoRanked: rankedUrls.size, videoPixels, videoBitRate,
+    identities: {
+      ...(Array.isArray(images) && images.length ? {
+        imageCount: images.length,
+        images: images.map(row => assetIdentity(row?.image_id, row?.uri, row?.origin_image?.uri, row?.display_image?.uri))
+      } : {}),
+      video: assetIdentity(video.vid, video.video_id, video.videoId, (video.play_addr || video.playAddr)?.uri),
+      cover: assetIdentity((video.origin_cover || video.originCover)?.uri, video.cover_original_scale?.uri, video.cover?.uri)
+    },
     ...(work.videoUrls.length ? { videoObservedAt: work.checkedAt } : {})
   };
+}
+
+export function parseSourceDetail({ workId, status, text, retryAfter, observedAt }) {
+  const access = inspectSourceResponse({ status, text, retryAfter });
+  if (access.code) throw new ProbeError(access.code, 'The queued work detail is temporarily unavailable.');
+  if (status !== 200 || !isText(text) || Buffer.byteLength(text) > maxPageBytes) throw invalid('作品详情不可用');
+  validateJson(text);
+  const data = parsePlatformJSON(text);
+  const first = data?.aweme_detail;
+  const nested = data?.data?.aweme_detail;
+  if ((first && nested) || (!first && !nested)) throw invalid('作品详情未提供唯一作品');
+  const { work } = observe(first || nested, observedAt);
+  if (work.id !== workId) throw invalid('返回的作品详情与目标不一致');
+  return work;
 }
 
 const sessionKeys = new Set([

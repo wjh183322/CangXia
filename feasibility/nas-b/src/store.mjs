@@ -442,6 +442,24 @@ class ProbeStore {
     return bodyOf(this.db.prepare('SELECT body FROM operations WHERE operation_id=?').get(id));
   }
 
+  resources(workId) {
+    return this.db.prepare('SELECT * FROM resources WHERE work_id=? ORDER BY revision,key')
+      .all(workId).map(row => ({ ...row }));
+  }
+
+  fileCommits(workId) {
+    const where = workId === undefined ? '' : ' WHERE work_id=?';
+    return this.db.prepare('SELECT * FROM file_commits' + where + ' ORDER BY revision,id')
+      .all(...(workId === undefined ? [] : [workId])).map(row => ({
+        id: row.id, workId: row.work_id, resourceId: row.resource_id, stage: row.stage, body: JSON.parse(row.body)
+      }));
+  }
+
+  fileHook(name, value) {
+    const hook = this.#testHooks[name];
+    if (hook) synchronousResult(hook(value));
+  }
+
   work(id) {
     if (!isWorkId(id)) return null;
     const row = this.db.prepare(`
@@ -589,7 +607,8 @@ export function openProbeStore({ file, libraryId, initialize = false, testHooks 
   if (typeof libraryId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(libraryId)) {
     throw error('INVALID_PROBE_ID', 'The probe requires a valid library identity.');
   }
-  for (const hook of [testHooks.afterWorkWrite, testHooks.afterPageCommit]) {
+  for (const hook of [testHooks.afterWorkWrite, testHooks.afterPageCommit, testHooks.beforeFileWrite,
+    testHooks.afterFilePlacement, testHooks.beforeFileCleanup, testHooks.beforeFileMove]) {
     if (hook !== undefined) assertCallback(hook);
   }
   return new ProbeStore(openDatabase(file, libraryId, initialize === true), testHooks);
