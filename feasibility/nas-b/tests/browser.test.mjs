@@ -22,6 +22,7 @@ const sourceText = ` { "aweme_list": [{ "aweme_id": 8999555333221111111, "author
 const panelRect = { x: 220, y: 180, width: 480, height: 320 };
 const qrRect = { x: 260, y: 280, width: 120, height: 120 };
 const qrPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAATElEQVR4nO3NAQkAAAwDoPUvvcU4HC1geiRisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFou/xQMh7wsJH5s1mQAAAABJRU5ErkJggg==', 'base64');
+const qrWithNoticePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAAU0lEQVR4nO3NsREAIAgEsN9/aay9s0UKkgWSGhKxWCwWi8VisVjcE+dBLBaLxeKl8Q9isVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLL4cg+7gFzmifzsAAAAASUVORK5CYII=', 'base64');
 
 function fixtureNode(tagName, { attrs = {}, rect = { x: 240, y: 230, width: 140, height: 30 }, text = '', children = [] } = {}) {
   const { x, y, width, height } = rect;
@@ -322,31 +323,87 @@ test('ordinary profile with no recognized auth panel produces no pixels or input
   assert.equal(browser.input.length, 0);
 });
 
-function loginQrFixture(browser, { challenge = false, ambiguous = false } = {}) {
-  const qr = fixtureNode('canvas', { attrs: { 'aria-label': '登录二维码' }, rect: qrRect });
+function loginQrFixture(browser, {
+  challenge = false, ambiguous = false, tag = 'canvas', tainted = false, overlay = false,
+  qrUrl = tainted ? 'https://p3.douyinpic.com/qr/test.png' : 'https://www.douyin.com/qr/test.png'
+} = {}) {
+  const qr = fixtureNode(tag, { attrs: { 'aria-label': '登录二维码' }, rect: qrRect });
+  Object.assign(qr, {
+    width: 120, height: 120, naturalWidth: 120, naturalHeight: 120, complete: true,
+    currentSrc: tag === 'img' ? qrUrl : undefined,
+    toDataURL(type) {
+      assert.equal(type, 'image/png');
+      browser.onQrEncode?.();
+      return 'data:image/png;base64,' + qrPng.toString('base64');
+    }
+  });
   const headings = [fixtureNode('h2', { text: '扫码登录' })];
   if (challenge) headings.push(fixtureNode('h2', { text: '安全验证' }));
   const panel = fixtureNode('section', {
     attrs: { role: 'dialog' }, rect: panelRect,
     children: [...headings, qr, ...(ambiguous ? [fixtureNode('canvas', { rect: qrRect })] : [])]
   });
-  const body = fixtureNode('body', { children: [panel] });
+  const notice = fixtureNode('div', {
+    text: '与登录无关的通知', rect: { x: 280, y: 305, width: 20, height: 15 }
+  });
+  const body = fixtureNode('body', { children: [panel, ...(overlay ? [notice] : [])] });
   browser.panelDocument = {
     body, querySelectorAll: selectors => body.querySelectorAll(selectors),
-    elementsFromPoint: () => [panel, body], elementFromPoint: () => qr
+    // The notice is drawn above the QR but has pointer-events: none.
+    elementsFromPoint: () => [panel, body], elementFromPoint: () => qr,
+    createElement(tagName) {
+      assert.equal(tagName, 'canvas');
+      let drawn;
+      return {
+        getContext(type) {
+          assert.equal(type, '2d');
+          return { drawImage(node, x, y) {
+            assert.equal(x, 0);
+            assert.equal(y, 0);
+            drawn = node;
+          } };
+        },
+        toDataURL(type) {
+          assert.equal(drawn, qr);
+          assert.equal(this.width, 120);
+          assert.equal(this.height, 120);
+          if (tainted) throw Object.assign(new Error('fixture canvas tainted'), { name: 'SecurityError' });
+          return qr.toDataURL(type);
+        }
+      };
+    }
   };
-  browser.screenshot = () => qrPng;
+  browser.screenshot = () => overlay ? qrWithNoticePng : qrPng;
+  return qr;
 }
 
-test('a current official login QR can only produce its bounded PNG crop', async t => {
+test('a current official login QR produces its isolated canvas bitmap without an overlapping notice', async t => {
   const { browser, gateway } = await fixture(t);
-  loginQrFixture(browser);
+  const qr = loginQrFixture(browser, { overlay: true });
   const view = await gateway.openLogin();
   assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
-  assert.deepEqual(browser.lastShot.clip, qrRect);
+  assert.equal(browser.lastShot, undefined);
   await assert.rejects(gateway.loginQr({ pageRevision: view.pageRevision - 1 }), { code: 'STALE_BROWSER_VIEW' });
-  browser.screenshot = () => Buffer.from('not a PNG');
+  qr.toDataURL = () => 'data:image/png;base64,ZmFrZQ==';
   await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
+});
+
+test('an origin-clean IMG can produce its own PNG while tainted images and SVG are withheld', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser, { tag: 'img', overlay: true });
+  const view = await gateway.openLogin();
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  assert.equal(browser.lastShot, undefined);
+  for (const options of [
+    { tag: 'img', tainted: true },
+    { tag: 'img', qrUrl: 'data:image/svg+xml,<svg/>' },
+    { tag: 'svg' }
+  ]) {
+    loginQrFixture(browser, options);
+    const unsafe = await gateway.openLogin();
+    await assert.rejects(gateway.loginQr(unsafe), { code: 'PROBE_QR_UNAVAILABLE' });
+    assert.equal(browser.lastShot, undefined);
+  }
 });
 
 test('challenge, ambiguous crop, and changed official page withhold QR pixels', async t => {
@@ -360,9 +417,8 @@ test('challenge, ambiguous crop, and changed official page withhold QR pixels', 
   loginQrFixture(browser);
   const view = await gateway.openLogin();
   const login = browser.pages()[0];
-  browser.screenshot = () => {
+  browser.onQrEncode = () => {
     login.navigate('https://outside.invalid/');
-    return qrPng;
   };
   await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
 });

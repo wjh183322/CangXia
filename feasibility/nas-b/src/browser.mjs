@@ -309,8 +309,8 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
   return result;
 }
 
-// Geometry-only counterpart to electron/qr-page.mjs, restricted to the owned login panel.
-function loginQrRegion({ key, panel }) {
+// QR classification from electron/qr-page.mjs, restricted to the owned login panel.
+function loginQrRegion({ key, panel, encode }) {
   const compact = element => (element.innerText || element.textContent || '').replace(/\s+/g, '');
   if (!document.body || scrollX || scrollY) return null;
   const body = compact(document.body);
@@ -358,12 +358,37 @@ function loginQrRegion({ key, panel }) {
   const points = [[x, y], [x + width - 1, y], [x, y + height - 1],
     [x + width - 1, y + height - 1], [x + width / 2, y + height / 2]];
   if (!points.every(([a, b]) => element.contains(document.elementFromPoint(a, b)))) return null;
-  const source = element.currentSrc || element.getAttribute('src');
+  const isImage = element.tagName === 'IMG';
+  if (!isImage && element.tagName !== 'CANVAS') return null;
+  const source = isImage ? element.currentSrc : undefined;
+  if (isImage && (!element.complete || !source ||
+      !/^data:image\/(?:png|jpeg|webp);base64,/i.test(source) &&
+      !/^https:\/\/[^?#]+\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(source))) return null;
+  const pixelWidth = isImage ? element.naturalWidth : element.width;
+  const pixelHeight = isImage ? element.naturalHeight : element.height;
+  if (![pixelWidth, pixelHeight].every(size => Number.isInteger(size) && size >= 100 && size <= 450) ||
+      Math.abs(pixelWidth / pixelHeight - 1) > 0.12) return null;
   const regions = state.qrRegions ??= new WeakMap();
   if (regions.get(element)?.source !== source || !regions.has(element)) {
     regions.set(element, { source, id: ++state.next });
   }
-  return { id: regions.get(element).id, x, y, width, height };
+  const region = { id: regions.get(element).id, x, y, width, height, pixelWidth, pixelHeight };
+  if (!encode) return region;
+  // Draw the element bitmap at its native size, outside the document's compositing tree.
+  try {
+    const bitmap = document.createElement('canvas');
+    bitmap.width = pixelWidth;
+    bitmap.height = pixelHeight;
+    bitmap.getContext('2d').drawImage(element, 0, 0);
+    const url = bitmap.toDataURL('image/png');
+    const prefix = 'data:image/png;base64,';
+    if (url.startsWith(prefix) && url.length <= prefix.length + 4 * Math.ceil(1024 * 1024 / 3)) {
+      return { ...region, png: url.slice(prefix.length) };
+    }
+  } catch {
+    // Tainted or unreadable bitmaps stay in the browser.
+  }
+  return null;
 }
 
 // Serialize only fixed repository functions for the browser realm.
@@ -623,12 +648,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     });
   }
 
-  async function inspectQr(slot, revision, signal) {
+  async function inspectQr(slot, revision, signal, encode = false) {
     await refreshPanel(slot);
     assertView(revision);
     if (!slot.panel) throw qrUnavailable();
     const region = await browserCall(
-      () => slot.page.evaluate(loginQrRegion, { key: slot.viewProbe, panel: slot.panel }),
+      () => slot.page.evaluate(loginQrRegion, { key: slot.viewProbe, panel: slot.panel, encode }),
       signal
     );
     assertView(revision);
@@ -642,14 +667,13 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       try {
         signal?.throwIfAborted();
         const captureSignal = signal ? AbortSignal.any([signal, epochController.signal]) : epochController.signal;
-        const { id, ...clip } = await inspectQr(slot, revision, captureSignal);
-        const bytes = await browserCall(
-          () => slot.page.screenshot({ type: 'png', scale: 'css', timeout: driverTimeout, clip }),
-          captureSignal
-        );
+        const { png, ...region } = await inspectQr(slot, revision, captureSignal, true);
         const current = await inspectQr(slot, revision, captureSignal);
-        if (current.id !== id || Object.keys(clip).some(key => clip[key] !== current[key])) throw staleView();
-        if (!isLoginQrPng(bytes) || bytes.readUInt32BE(16) !== clip.width || bytes.readUInt32BE(20) !== clip.height)
+        if (Object.keys(region).some(key => region[key] !== current[key])) throw staleView();
+        if (typeof png !== 'string') throw qrUnavailable();
+        const bytes = Buffer.from(png, 'base64');
+        if (!isLoginQrPng(bytes) || bytes.readUInt32BE(16) !== region.pixelWidth ||
+            bytes.readUInt32BE(20) !== region.pixelHeight)
           throw qrUnavailable();
         return { pageRevision: revision, bytes };
       } catch (error) {
