@@ -1,0 +1,86 @@
+{
+  "unsafe-integer": {
+    "status_code": 0,
+    "has_more": 1,
+    "cursor": 7345612390836712345,
+    "aweme_list": [
+      {
+        "aweme_id": 7345612390836712343,
+        "author": {"uid": 7345612390836712341, "sec_uid": "fixture-author-a"},
+        "music": {"id": 7345612390836712347},
+        "desc": "Fixture"
+      }
+    ]
+  },
+  "two-works": {
+    "status_code": 0,
+    "has_more": false,
+    "aweme_list": [{"aweme_id": "101", "desc": "First fixture"}, {"awemeId": 102, "desc": "Second fixture"}]
+  },
+  "media": {
+    "status_code": 0,
+    "data": {
+      "has_more": false,
+      "max_cursor": 199,
+      "aweme_list": [
+        {
+          "aweme_id": "101",
+          "item_title": "Synthetic title",
+          "caption": "Caption",
+          "desc": "Synthetic #description",
+          "text_extra": [{"start": 10, "end": 22, "hashtag_name": "structured", "hashtag_id": "501"}],
+          "cha_list": [{"cid": "502", "cha_name": "challenge"}],
+          "author": {"uid": "111", "sec_uid": "fixture-author", "unique_id": "fixture", "nickname": "Fixture author"},
+          "cooperation_info": {"co_creators": [
+            {"uid": "111", "nickname": "Self"},
+            {"uid": "112", "sec_uid": "fixture-co-author", "nickname": "Coauthor", "role_title": "Camera", "invite_status": 1},
+            {"uid": "112", "unique_id": "fixture-co", "invite_status": 1},
+            {"uid": "113", "invite_status": 0}
+          ]},
+          "create_time": 1750000000,
+          "aweme_type": 68,
+          "images": [
+            {
+              "width": 1200,
+              "height": 900,
+              "watermark_free_download_url_list": ["https://fixture.douyinpic.com/photo-1-original"],
+              "origin_image": {"url_list": ["https://fixture.douyinpic.com/photo-1-original"]},
+              "display_image": {"url_list": ["https://fixture.douyinpic.com/photo-1-preview"]}
+            },
+            {
+              "width": 640,
+              "height": 800,
+              "url_list": ["https://fixture.douyinpic.com/photo-2"]
+            }
+          ],
+          "video": {
+            "duration": 4310,
+            "width": 1920,
+            "height": 1080,
+            "bit_rate": [
+              {"bit_rate": 520, "play_addr": {"width": 640, "height": 480, "url_list": ["https://fixture.douyinvod.com/video-low"]}},
+              {"bit_rate": 1350, "play_addr": {"width": 2560, "height": 1440, "url_list": ["https://fixture.douyinvod.com/video-high"]}}
+            ],
+            "play_addr_h264_1080p": {"url_list": ["https://fixture.douyinvod.com/video-1080"]},
+            "play_addr": {"uri": "fixture-audio", "url_list": ["https://fixture.douyinvod.com/work-audio"]},
+            "cover": {"width": 480, "height": 270, "url_list": ["https://fixture.douyinpic.com/cover-display"]},
+            "cover_original_scale": {"width": 960, "height": 540, "url_list": ["https://fixture.douyinpic.com/cover-scale"]},
+            "origin_cover": {"width": 1920, "height": 1080, "url_list": ["https://fixture.douyinpic.com/cover-original"]}
+          },
+          "music": {"id_str": "877", "title": "Fixture track", "author": "Fixture musician", "duration": 15, "play_url": {"url_list": ["https://fixture.douyinvod.com/track"]}},
+          "image_album_music_info": {"begin_time": 0, "end_time": 4310, "volume": 0}
+        },
+        {"aweme_id": "102", "author": {"uid": "114", "nickname": "Another author"}, "video": {"play_addr": {"url_list": ["https://fixture.douyinvod.com/another-video"]}}}
+      ]
+    }
+  },
+  "duplicates": {
+    "has_more": true,
+    "max_cursor": "19",
+    "aweme_list": [
+      {"aweme_id": "101", "video": {"duration": 4310, "width": 1920, "height": 1080}, "author": {"uid": "41", "sec_uid": "fixture-author"}},
+      {"aweme_id": "101", "caption": "Another observation", "author": {"uid": "41", "nickname": "Enriched"}},
+      {"aweme_id": "102", "desc": "Independent work"}
+    ]
+  }
+}

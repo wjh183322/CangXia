@@ -1,5 +1,5 @@
-
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -61,12 +61,18 @@ export function fakeClock(start = 0) {
 }
 
 export function sourceFixture(kind) {
-  if (kind !== 'unsafe-integer') throw new Error('Unknown source fixture kind.');
+  if (!Object.hasOwn(sourcePages, kind)) throw new Error('Unknown source fixture kind.');
   return {
     source: { kind: 'total', id: '__all__' },
     inputCursor: '0',
     status: 200,
-    text: '{"status_code":0,"aweme_list":[{"aweme_id":9007199254740993,"desc":"Fixture"}],"has_more":1,"cursor":9007199254740995}',
+    text: JSON.stringify(sourcePages[kind]),
     observedAt: '2026-01-01T00:00:00.000Z'
   };
 }
+
+const sourcePages = JSON.parse(
+  readFileSync(new URL('../fixtures/source-pages.json', import.meta.url), 'utf8'),
+  (key, value, context) => typeof value === 'number' && !Number.isSafeInteger(value)
+    ? JSON.rawJSON(context.source) : value
+);
