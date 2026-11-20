@@ -20,6 +20,8 @@ const ownId = '9357260389275234771';
 const authorId = '8765602039312834059';
 const sourceText = ` { "aweme_list": [{ "aweme_id": 8999555333221111111, "author": {"uid":${authorId}} }], "has_more": 0 } `;
 const panelRect = { x: 220, y: 180, width: 480, height: 320 };
+const qrRect = { x: 260, y: 280, width: 120, height: 120 };
+const qrPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAATElEQVR4nO3NAQkAAAwDoPUvvcU4HC1geiRisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFou/xQMh7wsJH5s1mQAAAABJRU5ErkJggg==', 'base64');
 
 function fixtureNode(tagName, { attrs = {}, rect = { x: 240, y: 230, width: 140, height: 30 }, text = '', children = [] } = {}) {
   const { x, y, width, height } = rect;
@@ -318,6 +320,51 @@ test('ordinary profile with no recognized auth panel produces no pixels or input
   await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 1 }), { code: 'PROBE_VERIFICATION_PANEL_REQUIRED' });
   assert.equal(browser.lastShot, undefined);
   assert.equal(browser.input.length, 0);
+});
+
+function loginQrFixture(browser, { challenge = false, ambiguous = false } = {}) {
+  const qr = fixtureNode('canvas', { attrs: { 'aria-label': '登录二维码' }, rect: qrRect });
+  const headings = [fixtureNode('h2', { text: '扫码登录' })];
+  if (challenge) headings.push(fixtureNode('h2', { text: '安全验证' }));
+  const panel = fixtureNode('section', {
+    attrs: { role: 'dialog' }, rect: panelRect,
+    children: [...headings, qr, ...(ambiguous ? [fixtureNode('canvas', { rect: qrRect })] : [])]
+  });
+  const body = fixtureNode('body', { children: [panel] });
+  browser.panelDocument = {
+    body, querySelectorAll: selectors => body.querySelectorAll(selectors),
+    elementsFromPoint: () => [panel, body], elementFromPoint: () => qr
+  };
+  browser.screenshot = () => qrPng;
+}
+
+test('a current official login QR can only produce its bounded PNG crop', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  assert.deepEqual(browser.lastShot.clip, qrRect);
+  await assert.rejects(gateway.loginQr({ pageRevision: view.pageRevision - 1 }), { code: 'STALE_BROWSER_VIEW' });
+  browser.screenshot = () => Buffer.from('not a PNG');
+  await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
+});
+
+test('challenge, ambiguous crop, and changed official page withhold QR pixels', async t => {
+  const { browser, gateway } = await fixture(t);
+  for (const options of [{ challenge: true }, { ambiguous: true }]) {
+    loginQrFixture(browser, options);
+    const view = await gateway.openLogin();
+    await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
+    assert.equal(browser.lastShot, undefined);
+  }
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const login = browser.pages()[0];
+  browser.screenshot = () => {
+    login.navigate('https://outside.invalid/');
+    return qrPng;
+  };
+  await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
 });
 
 test('auth panel DOM hit testing rejects ordinary controls and focus outside the panel', async t => {

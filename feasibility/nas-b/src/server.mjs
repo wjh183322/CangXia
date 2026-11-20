@@ -18,7 +18,7 @@ import { prepareDataRoot, consumeFreshLayout, validateAccessHost } from './confi
 import { PROBE, ProbeError } from './contracts.mjs';
 import { openProbeStore } from './store.mjs';
 import { createLeaseManager } from './lease.mjs';
-import { openBrowserGateway } from './browser.mjs';
+import { isLoginQrPng, openBrowserGateway } from './browser.mjs';
 import { createDownloads } from './downloads.mjs';
 import { createReadCoordinator } from './read-jobs.mjs';
 import { reconcileWork, resolveResource, assertResourceCurrent } from './files.mjs';
@@ -313,14 +313,36 @@ export async function startProbe(options) {
           }
           if (group === 'identity' && !action) {
             if (id === 'open' && method === 'POST') {
-              session.view = null;
+              const opening = { generation: lease.generation };
+              session.view = opening;
               authEpoch = undefined;
               const view = await (options.fixtureView ?? gateway).openLogin();
               guard();
-              session.view = pick(view, ['pageRevision', 'width', 'height']);
-              return json({ ...session.view, localVerification: !options.fixtureView });
+              if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              const descriptor = pick(view, ['pageRevision', 'width', 'height']);
+              session.view = { ...opening, ...descriptor };
+              return json({ ...descriptor, localVerification: !options.fixtureView });
+            }
+            if (id === 'qr' && method === 'GET') {
+              const view = session.view;
+              const revision = view?.pageRevision;
+              if (view?.generation !== lease.generation || !Number.isSafeInteger(revision) ||
+                  url.searchParams.size !== 1 || url.searchParams.get('revision') !== String(revision))
+                fail('PROBE_VIEW_REQUIRED');
+              if (options.fixtureView || typeof gateway.loginQr !== 'function') fail('PROBE_QR_UNAVAILABLE');
+              const capture = await gateway.loginQr({ pageRevision: revision, signal });
+              guard();
+              if (session.view !== view || capture?.pageRevision !== revision) fail('PROBE_VIEW_REQUIRED');
+              if (!isLoginQrPng(capture.bytes)) fail('PROBE_QR_UNAVAILABLE');
+              res.writeHead(200, {
+                'Content-Type': 'image/png',
+                'Content-Length': capture.bytes.length,
+                'Cross-Origin-Resource-Policy': 'same-origin'
+              });
+              return res.end(capture.bytes);
             }
             if (id === 'verify' && method === 'POST') {
+              session.view = null;
               const verified = await gateway.verifyIdentity();
               guard();
               gateway.assertAuthEpoch(verified.authEpoch);

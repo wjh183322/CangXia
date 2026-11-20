@@ -58,20 +58,35 @@ export function createClientGate({ clock = performance, renew, onLock }) {
 
 export function createClientOperations(api, onRecord = () => {}) {
   const recent = new Map();
-  let unconfirmedAcquire;
+  let unconfirmedAcquire, releaseId, pendingRelease;
   return {
     last: (kind) => recent.get(kind),
     async send(route, body) {
       const kind =
         route === 'session/acquire' ? 'acquire' : route === 'session/release' ? 'release' : 'command';
-      const operationId = (kind === 'acquire' && unconfirmedAcquire) || crypto.randomUUID();
+      if (kind === 'release' && pendingRelease) return pendingRelease;
+      if (kind === 'acquire' && pendingRelease) await pendingRelease.catch(() => {});
+      const previousId = kind === 'acquire' ? unconfirmedAcquire : kind === 'release' ? releaseId : undefined;
+      const operationId = previousId ?? crypto.randomUUID();
       recent.set(kind, operationId);
       onRecord(kind, operationId);
       if (kind === 'acquire') unconfirmedAcquire = operationId;
-      if (kind === 'release') unconfirmedAcquire = undefined;
+      if (kind === 'release') {
+        unconfirmedAcquire = undefined;
+        releaseId = operationId;
+        pendingRelease = api(route, { ...body, operationId });
+        try {
+          return await pendingRelease;
+        } finally {
+          pendingRelease = undefined;
+        }
+      }
       try {
         const result = await api(route, { ...body, operationId });
-        if (kind === 'acquire' && unconfirmedAcquire === operationId) unconfirmedAcquire = undefined;
+        if (kind === 'acquire' && unconfirmedAcquire === operationId) {
+          unconfirmedAcquire = undefined;
+          releaseId = undefined;
+        }
         return result;
       } catch (error) {
         if (kind === 'acquire' && error.confirmed && unconfirmedAcquire === operationId)
@@ -87,13 +102,50 @@ export function createClientOperations(api, onRecord = () => {}) {
   };
 }
 
+export function createQrView({ image, load, clock = globalThis, urls = URL }) {
+  let current, timer, source;
+  function clear() {
+    current?.abort();
+    current = undefined;
+    clock.clearTimeout(timer);
+    image.hidden = true;
+    image.removeAttribute('src');
+    if (source) urls.revokeObjectURL(source);
+    source = undefined;
+  }
+  async function show(revision, allowed = () => true) {
+    clear();
+    const capture = new AbortController();
+    current = capture;
+    timer = clock.setTimeout(clear, 15000);
+    try {
+      const png = await load(revision, capture.signal);
+      if (current !== capture) return false;
+      if (!allowed()) {
+        clear();
+        return false;
+      }
+      source = urls.createObjectURL(png);
+      image.src = source;
+      image.hidden = false;
+      return true;
+    } catch (error) {
+      if (current !== capture) return false;
+      clear();
+      throw error;
+    }
+  }
+  return { clear, show };
+}
+
 if (typeof document !== 'undefined') {
   const el = (id) => document.getElementById(id);
   const controls = el('controls'),
     status = el('status'),
     output = el('output');
   let holder = false,
-    pulse;
+    pulse,
+    identityAttempt = 0;
   async function api(path, body) {
     const res = await fetch('/probe/v1/' + path, {
       cache: 'no-store',
@@ -109,9 +161,21 @@ if (typeof document !== 'undefined') {
     const field = el('receipt-' + kind);
     field.value = operationId;
   });
+  const qrView = createQrView({
+    image: el('login-qr'),
+    async load(revision, signal) {
+      const res = await fetch('/probe/v1/identity/qr?revision=' + encodeURIComponent(revision), {
+        cache: 'no-store', signal
+      });
+      if (!res.ok) throw Error((await res.json()).code);
+      if (res.headers.get('Content-Type') !== 'image/png') throw Error('PROBE_QR_UNAVAILABLE');
+      return res.blob();
+    }
+  });
   const gate = createClientGate({
     renew: () => api('session/renew', {}),
     onLock() {
+      qrView.clear();
       controls.disabled = true;
       output.textContent = '';
       el('object').value = '';
@@ -166,6 +230,13 @@ if (typeof document !== 'undefined') {
     if (!e.target.dataset.cmd || gate.locked) return;
     const ticket = gate.generation,
       cmd = e.target.dataset.cmd;
+    const identityTicket = ['open', 'verify'].includes(cmd) ? ++identityAttempt : null;
+    const current = () => !gate.locked && ticket === gate.generation &&
+      (identityTicket === null || identityTicket === identityAttempt);
+    if (identityTicket !== null) {
+      qrView.clear();
+      output.textContent = '';
+    }
     const paths = {
       cover: ['works/' + id() + '/cover-check', {}],
       report: ['report'],
@@ -196,7 +267,13 @@ if (typeof document !== 'undefined') {
           : ['enqueue', 'start', 'pause', 'resume', 'stop', 'cancel'].includes(cmd)
             ? await operations.send(path, body)
             : await api(path, body);
-      if (gate.locked || ticket !== gate.generation) return;
+      if (!current()) return;
+      if (cmd === 'open') {
+        output.textContent = '正在检查来源登录页…';
+        if (await qrView.show(result.pageRevision, current) && current())
+          output.textContent = '请用手机抖音扫码并确认，再点“核验账号”。';
+        return;
+      }
       output.textContent = JSON.stringify(result, null, 2);
       if (cmd === 'works') {
         const box = el('preview');
@@ -215,8 +292,14 @@ if (typeof document !== 'undefined') {
         }
       }
     } catch (err) {
-      if (ticket === gate.generation) {
-        output.textContent = err.message;
+      if (current()) {
+        if (cmd === 'open' && ['PROBE_QR_UNAVAILABLE', 'STALE_BROWSER_VIEW'].includes(err.message)) {
+          output.textContent = '暂无可用的扫码二维码。可重新打开登录页。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';
+        } else if (cmd === 'verify' && err.message === 'PROBE_AUTH_REQUIRED') {
+          output.textContent = '来源尚未确认登录。请在手机确认。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';
+        } else {
+          output.textContent = err.message;
+        }
         if (err.message === 'STALE_LEASE') gate.lock();
       }
     }

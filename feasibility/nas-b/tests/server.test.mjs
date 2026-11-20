@@ -11,6 +11,7 @@ import { generate } from 'selfsigned';
 import { makeSandbox, fakeClock } from './helpers.mjs';
 import { startProbe } from '../src/server.mjs';
 import { createClientGate } from '../web/app.mjs';
+import { ProbeError } from '../src/contracts.mjs';
 test('wake locks synchronously and losing the grant rejects a late renewal', async () => {
   let finish;
   const gate = createClientGate({
@@ -25,6 +26,48 @@ test('wake locks synchronously and losing the grant rejects a late renewal', asy
   await pending;
   assert.equal(gate.locked, true);
   gate.dispose();
+});
+test('clearing the owner QR removes its image and ignores a late response', async () => {
+  const { createQrView } = await import('../web/app.mjs');
+  const image = { hidden: true, removeAttribute() { delete this.src; } };
+  const clock = fakeClock();
+  let response;
+  let revoked;
+  const view = createQrView({
+    image, clock,
+    urls: { createObjectURL: () => 'blob:fixture', revokeObjectURL: (url) => { revoked = url; } },
+    load: (_revision, signal) => new Promise(resolve => { response = { resolve, signal }; })
+  });
+  const late = view.show(7);
+  view.clear();
+  assert.equal(response.signal.aborted, true);
+  response.resolve(new Blob(['fixture'], { type: 'image/png' }));
+  await late;
+  assert.equal(image.src, undefined);
+  const fresh = view.show(8);
+  response.resolve(new Blob(['fixture'], { type: 'image/png' }));
+  await fresh;
+  assert.equal(image.src, 'blob:fixture');
+  assert.equal(image.hidden, false);
+  clock.advance(20001);
+  assert.equal(revoked, 'blob:fixture');
+  assert.equal(image.hidden, true);
+  assert.equal(image.src, undefined);
+});
+test('repeated release while confirmation is pending shares the same request', async () => {
+  const { createClientOperations } = await import('../web/app.mjs');
+  let complete;
+  const posted = [];
+  const client = createClientOperations(async (_route, body) => {
+    posted.push(body.operationId);
+    return new Promise(resolve => { complete = resolve; });
+  });
+  const first = client.send('session/release', {});
+  const duplicate = client.send('session/release', {});
+  assert.deepEqual(posted, [client.last('release')]);
+  complete({ released: true });
+  assert.equal((await first).released, true);
+  assert.equal((await duplicate).released, true);
 });
 test('HTTPS requires authentication and current ownership before library or verification access', async (t) => {
   const s = await makeSandbox(t),
@@ -76,7 +119,13 @@ test('HTTPS requires authentication and current ownership before library or veri
     'base64'
   );
   let verified = false,
-    epochs = [];
+    epochs = [],
+    qrCaptures = 0,
+    onQrCapture;
+  const qrPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAATElEQVR4nO3NAQkAAAwDoPUvvcU4HC1geiRisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFou/xQMh7wsJH5s1mQAAAABJRU5ErkJggg==',
+    'base64'
+  );
   const gateway = {
     assertAuthEpoch(epoch) {
       if (verified) assert.equal(epoch, 3);
@@ -87,6 +136,11 @@ test('HTTPS requires authentication and current ownership before library or veri
     close() {},
     async openLogin() {
       return { pageRevision: 7, width: 120, height: 80 };
+    },
+    async loginQr({ pageRevision }) {
+      qrCaptures++;
+      await onQrCapture?.();
+      return { pageRevision, bytes: qrPng };
     },
     async verifyIdentity() {
       verified = true;
@@ -127,7 +181,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     gateway
   });
   s.onCleanup(probe.close);
-  function request(route, body, cookie, { method, range, discardResponse } = {}) {
+  function request(route, body, cookie, { method, range, discardResponse, origin } = {}) {
     return new Promise((resolve, reject) => {
       const req = https.request(
         new URL('/probe/v1/' + route, probe.url),
@@ -137,6 +191,7 @@ test('HTTPS requires authentication and current ownership before library or veri
           method: method ?? (body ? 'POST' : 'GET'),
           headers: {
             ...(range ? { range } : {}),
+            ...(origin ? { origin } : {}),
             ...(cookie ? { cookie } : {}),
             ...(body ? { 'content-type': 'application/json' } : {})
           }
@@ -166,23 +221,47 @@ test('HTTPS requires authentication and current ownership before library or veri
     });
   }
   assert.equal((await request('library')).status, 401);
+  assert.equal((await request('identity/qr?revision=7')).status, 401);
   const a = await request('access/login', { token }),
     b = await request('access/login', { token });
   assert.ok(a.cookie && b.cookie && a.cookie !== b.cookie);
   assert.equal((await request('session/acquire', { operationId: 'alpha' }, a.cookie)).status, 200);
-  for (const route of ['library', 'identity/frame', 'media/unknown', 'report'])
+  for (const route of ['library', 'identity/frame', 'identity/qr?revision=7', 'media/unknown', 'report'])
     assert.equal((await request(route, null, b.cookie)).status, 403);
+  assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
   const opened = await request('identity/open', {}, a.cookie);
   assert.equal(opened.body.localVerification, true);
+  assert.equal((await request('identity/qr?revision=7', null, a.cookie, { origin: 'https://other.invalid' })).status, 403);
+  assert.equal((await request('identity/qr?revision=6', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
+  assert.equal((await request('identity/qr?revision=07', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
+  assert.equal(qrCaptures, 0);
+  const qr = await request('identity/qr?revision=7', null, a.cookie);
+  assert.equal(qr.status, 200);
+  assert.equal(qr.headers['content-type'], 'image/png');
+  assert.equal(qr.headers['cache-control'], 'no-store');
+  assert.deepEqual(qr.body, qrPng);
+  onQrCapture = () => { throw new ProbeError('PROBE_QR_UNAVAILABLE'); };
+  assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_QR_UNAVAILABLE');
   assert.equal(
     (await request('identity/input', { type: 'text', text: 'fixture' }, a.cookie)).body.code,
     'PROBE_LOCAL_VERIFICATION_REQUIRED'
   );
+  let captureStarted, finishCapture;
+  const captureReady = new Promise(resolve => { captureStarted = resolve; });
+  onQrCapture = () => new Promise(resolve => {
+    finishCapture = resolve;
+    captureStarted();
+  });
+  const staleCapture = request('identity/qr?revision=7', null, a.cookie);
+  await captureReady;
   assert.deepEqual((await request('identity/verify', { authEpoch: 333 }, a.cookie)).body, {
     verified: true,
     uid: '123',
     nickname: 'fixture'
   });
+  finishCapture();
+  assert.equal((await staleCapture).body.code, 'PROBE_VIEW_REQUIRED');
+  assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
   const collections = await request('sources/collections', null, a.cookie);
   assert.equal(collections.body.items[0].id, '123');
   assert.equal(JSON.stringify(collections.body).includes('secret.local'), false);
@@ -218,11 +297,23 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.ok(lostId);
   const gate = createClientGate({ clock: fakeClock(), renew: () => ({ ttlMs: 10000 }), onLock() {} });
   gate.lock();
+  await assert.rejects(client.send('session/release', {}), /STALE_LEASE/);
+  assert.equal(client.last('release'), lostId);
   await client.send('session/acquire', {});
   assert.notEqual(client.last('acquire'), lostId);
   assert.equal(client.last('release'), lostId);
   assert.equal((await client.lookup('release')).operationId, lostId);
   assert.equal((await client.lookup('release')).released, true);
+  assert.equal((await request('identity/open', {}, a.cookie)).status, 200);
+  const leaseCaptureReady = new Promise(resolve => { captureStarted = resolve; });
+  const leaseCapture = assert.rejects(request('identity/qr?revision=7', null, a.cookie), { code: 'ECONNRESET' });
+  await leaseCaptureReady;
+  await client.send('session/release', {});
+  assert.notEqual(client.last('release'), lostId);
+  finishCapture();
+  await leaseCapture;
+  await client.send('session/acquire', {});
+  assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
   await client.send('session/release', {});
   assert.equal((await request('session/acquire', { operationId: 'beta' }, b.cookie)).status, 200);
   assert.equal((await request('operations/' + lostId, null, b.cookie)).body.released, true);
