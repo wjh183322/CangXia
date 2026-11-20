@@ -16,6 +16,31 @@ const detail = '/aweme/v1/web/aweme/detail/';
 const ownId = '9357260389275234771';
 const authorId = '8765602039312834059';
 const sourceText = ` { "aweme_list": [{ "aweme_id": 8999555333221111111, "author": {"uid":${authorId}} }], "has_more": 0 } `;
+const panelRect = { x: 220, y: 180, width: 480, height: 320 };
+
+function fixtureNode(tagName, { attrs = {}, rect = { x: 240, y: 230, width: 140, height: 30 }, text = '', children = [] } = {}) {
+  const { x, y, width, height } = rect;
+  const node = {
+    tagName: tagName.toUpperCase(), children,
+    innerText: [text, ...children.map(child => child.innerText)].join(' '),
+    getBoundingClientRect: () => ({ left: x, top: y, right: x + width, bottom: y + height, width, height }),
+    getAttribute: name => attrs[name] ?? null,
+    matches(selectors) {
+      return selectors.split(',').some(selector => {
+        const [, tag, attr, value] = /^([a-z\d]*)(?:\[([\w-]+)(?:="([^"]+)")?\])?$/.exec(selector) ?? [];
+        return (tag || attr) && (!tag || tag === tagName) && (!attr || (Object.hasOwn(attrs, attr) && (!value || attrs[attr] === value)));
+      });
+    },
+    querySelectorAll(selectors) {
+      return children.flatMap(child => [...(child.matches(selectors) ? [child] : []), ...child.querySelectorAll(selectors)]);
+    },
+    querySelector(selectors) { return this.querySelectorAll(selectors)[0] ?? null; },
+    closest(selectors) { return this.matches(selectors) ? this : this.parentElement?.closest(selectors) ?? null; },
+    contains(other) { return other === this || children.some(child => child.contains(other)); }
+  };
+  for (const child of children) child.parentElement = node;
+  return node;
+}
 
 class FakeContext extends EventEmitter {
   opened = [];
@@ -24,35 +49,53 @@ class FakeContext extends EventEmitter {
   navigations = [];
   uid = ownId;
   session = 'private-fixture-session';
+  panel = { id: 1, ...panelRect };
   reply = () => new Response(sourceText, { headers: { 'retry-after': '23' } });
 
   pages() { return this.opened.filter(page => !page.isClosed()); }
   async cookies(urls) {
     assert.deepEqual(urls, [self, 'https://www.douyin.com/aweme/v1/web/']);
+    await this.onCookies?.();
     return this.session ? [{ name: 'sessionid', domain: '.douyin.com', path: '/', value: this.session }] : [];
   }
 
   async route(pattern, handler) { this.routeRequest = handler; }
+  async routeWebSocket(pattern, handler) { this.routeSocket = handler; }
+  async trySocket() {
+    let closed = false;
+    await this.routeSocket?.({ close: async () => { closed = true; } });
+    return !closed;
+  }
 
   async newPage() {
     const context = this;
     const page = new EventEmitter();
-    const frame = {};
+    const frame = { page: () => page, url: () => href };
+    const children = [];
     let href = 'about:blank';
     let closed = false;
     const input = (type, ...args) => context.input.push({ page, type, args });
     const window = {};
     page.url = () => href;
     page.mainFrame = () => frame;
+    page.frames = () => [frame, ...children];
     page.isClosed = () => closed;
     page.goto = async url => {
       context.navigations.push({ page, url });
       page.navigate(url);
     };
     page.navigate = url => { href = url; page.emit('framenavigated', frame); };
+    page.childNavigate = url => {
+      const child = { page: () => page, url: () => url };
+      children.push(child);
+      page.emit('frameattached', child);
+      page.emit('framenavigated', child);
+      return child;
+    };
     page.close = async () => { closed = true; page.emit('close'); };
     page.screenshot = async options => {
       assert.equal(options.path, undefined);
+      context.lastShot = options;
       return context.screenshot ? context.screenshot() : Buffer.from('fixture frame');
     };
     page.mouse = {
@@ -60,9 +103,14 @@ class FakeContext extends EventEmitter {
       down: async () => input('down'), up: async () => input('up')
     };
     page.keyboard = { insertText: async text => input('text', text), press: async key => input('key', key) };
-    page.evaluate = async (fn, arg) => runInNewContext(`(${fn})(arg)`, {
+    page.evaluate = async (fn, arg) => {
+      if (arg?.viewProbe && !context.panelDocument) return context.panel && { ...context.panel, allowed: context.allowTarget !== false };
+      if (fn.toString().includes('navigator.userAgent')) await context.onUserAgent?.();
+      return runInNewContext(`(${fn})(arg)`, {
       arg, window, location: new URL(href), navigator: { userAgent: 'Fixture chromium' },
-      document: { readyState: 'complete' }, AbortController, TextDecoder, setTimeout, clearTimeout,
+      document: context.panelDocument ?? { readyState: 'complete' }, AbortController, TextDecoder, setTimeout, clearTimeout,
+      scrollX: 0, scrollY: 0, innerWidth: 1000, innerHeight: 760,
+      getComputedStyle: () => ({ visibility: 'visible', display: 'block', opacity: '1', borderRadius: '0px' }),
       fetch: async (url, options) => {
         const target = new URL(url);
         context.reads.push({ page, target, options, clock: context.clock.now() });
@@ -72,9 +120,25 @@ class FakeContext extends EventEmitter {
         }
         return context.reply(url, options);
       }
-    });
+      });
+    };
     this.opened.push(page);
     return page;
+  }
+
+  async visit(frame, url, type, method = 'GET', isNavigation = type === 'document') {
+    const request = {
+      url: () => url, resourceType: () => type, method: () => method,
+      isNavigationRequest: () => isNavigation, frame: () => frame,
+      sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
+    };
+    let permitted;
+    await this.routeRequest({
+      request: () => request,
+      abort: async () => { permitted = false; this.emit('requestfailed', request); },
+      continue: async () => { permitted = true; this.emit('requestfinished', request); }
+    });
+    return permitted;
   }
 
   async close() { await Promise.all(this.pages().map(page => page.close())); this.emit('close'); }
@@ -89,6 +153,7 @@ async function fixture(t, { launch, defer = false } = {}) {
   let time = 0;
   const clock = {
     now: () => time,
+    advance(ms) { time += ms; },
     setTimeout(callback, ms) { time += ms; return setImmediate(callback); },
     clearTimeout: clearImmediate
   };
@@ -200,15 +265,23 @@ test('only the current owned login page accepts frames and human input', async t
   const login = browser.pages()[0];
   const frame = await gateway.frame(view);
   assert.deepEqual(frame, { ...view, mime: 'image/png', bytes: Buffer.from('fixture frame') });
+  assert.equal(view.width, panelRect.width);
+  assert.equal(view.height, panelRect.height);
+  assert.deepEqual(browser.lastShot.clip, panelRect);
   await gateway.input({ ...view, type: 'click', x: 12, y: 34 });
   await gateway.input({ ...view, type: 'text', text: '确认' });
   await gateway.input({ ...view, type: 'key', key: 'Enter' });
   await assert.rejects(gateway.input({ ...view, type: 'key', key: 'Control+L' }), { code: 'INVALID_BROWSER_INPUT' });
   await assert.rejects(gateway.input({ ...view, type: 'click', x: -1, y: 0 }), { code: 'INVALID_BROWSER_INPUT' });
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 600, y: 30 }), { code: 'INVALID_BROWSER_INPUT' });
+  browser.allowTarget = false;
+  await assert.rejects(gateway.input({ ...view, type: 'text', text: 'other field' }), { code: 'INVALID_BROWSER_INPUT' });
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 1 }), { code: 'INVALID_BROWSER_INPUT' });
+  browser.allowTarget = true;
   login.navigate(self + '?login=finished');
   await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 2 }), { code: 'STALE_BROWSER_VIEW' });
   assert.deepEqual(browser.input.map(({ page, type, args }) => [page === login, type, ...args]), [
-    [true, 'click', 12, 34], [true, 'text', '确认'], [true, 'key', 'Enter']
+    [true, 'click', 232, 214], [true, 'text', '确认'], [true, 'key', 'Enter']
   ]);
   const current = await gateway.openLogin();
   browser.screenshot = async () => {
@@ -217,6 +290,92 @@ test('only the current owned login page accepts frames and human input', async t
   };
   await assert.rejects(gateway.frame(current), { code: 'STALE_BROWSER_VIEW' });
   assert.ok(browser.navigations.every(({ url }) => url === self));
+});
+
+test('ordinary profile with no recognized auth panel produces no pixels or input', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.panel = null;
+  const view = await gateway.openLogin();
+  assert.equal(view.width, 0);
+  await assert.rejects(gateway.frame(view), { code: 'PROBE_VERIFICATION_PANEL_REQUIRED' });
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 1 }), { code: 'PROBE_VERIFICATION_PANEL_REQUIRED' });
+  assert.equal(browser.lastShot, undefined);
+  assert.equal(browser.input.length, 0);
+});
+
+test('auth panel DOM hit testing rejects ordinary controls and focus outside the panel', async t => {
+  const { browser, gateway } = await fixture(t);
+  const code = fixtureNode('input', { attrs: { placeholder: '请输入验证码', autocomplete: 'one-time-code' } });
+  const ordinary = fixtureNode('button', { text: '打开设置' });
+  const overlay = fixtureNode('input', { attrs: { placeholder: '请输入验证码' } });
+  const panel = fixtureNode('section', {
+    attrs: { role: 'dialog' }, rect: panelRect,
+    children: [fixtureNode('h2', { text: '身份验证' }), code, ordinary]
+  });
+  const body = fixtureNode('body', { rect: { x: 0, y: 0, width: 1000, height: 760 }, children: [panel, overlay] });
+  let hit = code;
+  browser.panelDocument = {
+    body, querySelectorAll: selectors => body.querySelectorAll(selectors), activeElement: overlay,
+    elementsFromPoint: () => [panel, body], elementFromPoint: () => hit
+  };
+  const view = await gateway.openLogin();
+  const frame = await gateway.frame(view);
+  assert.equal(frame.width, panelRect.width);
+  await gateway.input({ ...view, type: 'click', x: 20, y: 50 });
+  for (const forbidden of [ordinary, overlay]) {
+    hit = forbidden;
+    await assert.rejects(gateway.input({ ...view, type: 'click', x: 20, y: 50 }), { code: 'INVALID_BROWSER_INPUT' });
+  }
+  await assert.rejects(gateway.input({ ...view, type: 'text', text: 'outside' }), { code: 'INVALID_BROWSER_INPUT' });
+  browser.panelDocument.activeElement = code;
+  await gateway.input({ ...view, type: 'text', text: 'fixture' });
+  assert.deepEqual(browser.input.map(action => action.type), ['click', 'text']);
+});
+
+test('panel redraw or movement retires an older frame revision', async t => {
+  const { browser, gateway } = await fixture(t);
+  const view = await gateway.openLogin();
+  browser.panel = { id: 2, ...panelRect };
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 1 }), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(browser.input.length, 0);
+  const updated = await gateway.openLogin();
+  browser.screenshot = () => { browser.panel = { id: 2, ...panelRect, x: panelRect.x + 10 }; return Buffer.from('stale pixels'); };
+  await assert.rejects(gateway.frame(updated), { code: 'STALE_BROWSER_VIEW' });
+});
+
+test('foreign child document requests and a committed redirected frame cannot be exposed', async t => {
+  const { browser, gateway } = await fixture(t);
+  const view = await gateway.openLogin();
+  const page = browser.pages()[0];
+  const child = { page: () => page, url: () => 'about:blank' };
+  assert.equal(await browser.visit(child, 'https://outside.invalid/verify', 'document'), false);
+  assert.equal(await browser.visit(child, 'https://www.douyin.com/user/self', 'document'), false);
+  browser.screenshot = () => {
+    page.childNavigate('https://outside.invalid/redirected');
+    return Buffer.from('foreign frame');
+  };
+  await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
+  await assert.rejects(gateway.input({ ...view, type: 'click', x: 1, y: 1 }), { code: 'STALE_BROWSER_VIEW' });
+  const refreshed = await gateway.openLogin();
+  assert.notEqual(refreshed.pageRevision, view.pageRevision);
+  assert.equal(browser.input.length, 0);
+});
+
+test('browser routes admit the known page and read API without permitting account writes', async t => {
+  const { browser, gateway } = await fixture(t);
+  await gateway.openLogin();
+  const login = browser.pages()[0].mainFrame();
+  assert.equal(await browser.visit(login, 'https://www.douyin.com/aweme/v1/web/commit/favorite/', 'fetch', 'POST'), false);
+  assert.equal(await browser.visit(login, 'https://www.douyin.com/settings/account', 'fetch'), false);
+  assert.equal(await browser.visit(login, 'https://www.douyin.com' + collection, 'fetch', 'POST'), false);
+  assert.equal(await browser.visit(login, 'https://outside.invalid/script.js', 'script'), false);
+  assert.equal(await browser.visit(login, 'https://static.douyinstatic.com/login.js', 'script'), true);
+  assert.equal(await browser.trySocket(), false);
+  await gateway.verifyIdentity();
+  const reader = browser.pages()[0].mainFrame();
+  assert.equal(await browser.visit(reader, 'https://www.douyin.com' + collection, 'fetch', 'POST'), true);
+  assert.equal(await browser.visit(reader, 'https://www.douyin.com' + detail, 'fetch'), true);
+  assert.equal(await browser.visit(reader, 'https://www.douyin.com/aweme/v1/web/commit/favorite/', 'fetch', 'POST'), false);
 });
 
 test('media headers put no session data on any hop and reject unknown targets', async t => {
@@ -268,6 +427,61 @@ test('source rate limits preserve raw evidence and pause both reader and detail 
   assert.equal(browser.reads.length, 2);
 });
 
+test('cooldown blocks cold detail navigation before loading the page', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  browser.reply = () => new Response('limit', { status: 429, headers: { 'retry-after': '15' } });
+  await gateway.request(collection, { authEpoch, method: 'POST', form: { cursor: '0' } });
+  const navigationCount = browser.navigations.length;
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'PROBE_SOURCE_RATE_LIMITED' });
+  assert.equal(browser.navigations.length, navigationCount);
+});
+
+test('a slow authorization check cannot collapse the spacing between actual fetches', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  browser.onCookies = () => { browser.clock.advance(1600); browser.onCookies = undefined; };
+  const opts = { authEpoch, params: { aweme_id: '1' } };
+  await gateway.request(detail, opts);
+  await gateway.request(detail, opts);
+  assert.ok(browser.reads[2].clock - browser.reads[1].clock >= 1100);
+});
+
+test('stalled cookie reads time out and release the source queue', { timeout: 6000 }, async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  browser.onCookies = () => new Promise(() => {});
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'PROBE_BROWSER_TIMEOUT' });
+  browser.onCookies = undefined;
+  assert.equal((await gateway.request(detail, { authEpoch, params: { aweme_id: '1' } })).status, 200);
+});
+
+test('caller cancellation releases an in-flight cookie admission before its deadline', { timeout: 1500 }, async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  browser.onCookies = () => {
+    browser.onCookies = undefined;
+    browser.emit('cookies-started');
+    return new Promise(() => {});
+  };
+  const controller = new AbortController();
+  const firstStarted = once(browser, 'cookies-started');
+  const options = { authEpoch, params: { aweme_id: '1' } };
+  const pending = gateway.request(detail, { ...options, signal: controller.signal });
+  await firstStarted;
+  controller.abort();
+  await assert.rejects(pending, { code: 'PROBE_BROWSER_CANCELLED' });
+  assert.equal((await gateway.request(detail, options)).status, 200);
+});
+
+test('stalled user agent verification times out and releases the view queue', { timeout: 6000 }, async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.onUserAgent = () => new Promise(() => {});
+  await assert.rejects(gateway.verifyIdentity(), { code: 'PROBE_BROWSER_TIMEOUT' });
+  browser.onUserAgent = undefined;
+  assert.equal((await gateway.verifyIdentity()).uid, ownId);
+});
+
 test('oversized browser responses and arbitrary driver errors are bounded', async t => {
   const { browser, gateway } = await fixture(t);
   const { authEpoch } = await gateway.verifyIdentity();
@@ -286,18 +500,7 @@ test('browser resource accounting blocks media requests while preserving officia
   const { browser, gateway } = await fixture(t);
   await gateway.openLogin();
   const page = browser.pages()[0];
-  async function visit(url, type) {
-    const request = {
-      url: () => url, resourceType: () => type, isNavigationRequest: () => type === 'document',
-      frame: () => Object.assign(page.mainFrame(), { page: () => page }),
-      sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
-    };
-    await browser.routeRequest({
-      request: () => request,
-      abort: async () => browser.emit('requestfailed', request),
-      continue: async () => browser.emit('requestfinished', request)
-    });
-  }
+  const visit = (url, type) => browser.visit(page.mainFrame(), url, type);
   await visit(self, 'document');
   await visit('https://static.douyinstatic.com/fixture.js', 'script');
   await visit('https://v.douyinvod.com/fixture.mp4', 'media');
