@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { visit } from 'jsonc-parser';
 import { pageResult } from '../../../electron/api-pagination.mjs';
+import { goneMessage } from '../../../shared/source-state.mjs';
 import { normalizeCreator, mergeCreator, sameCreator } from '../../../shared/creators.mjs';
 import { parsePlatformJSON, parseWork } from '../../../electron/model.mjs';
 import { audioSources } from '../../../electron/work-audio.mjs';
@@ -36,7 +37,7 @@ const integerKeys = new Set([
 
 // Keep the baseline parser as the value decoder. The visitor sees key repetitions
 // and exact numeric tokens before JSON.parse could discard or round them.
-function validateJson(text) {
+function validateJson(text, checkIntegers = true) {
   const containers = [];
   function enter(keys) {
     if (containers.length === maxJsonDepth) throw invalid('来源响应 JSON 嵌套过深');
@@ -53,7 +54,7 @@ function validateJson(text) {
       keys.add(key);
     },
     onLiteralValue(value, offset, length, line, column, getPath) {
-      if (typeof value !== 'number') return;
+      if (!checkIntegers || typeof value !== 'number') return;
       const path = getPath();
       const key = path.at(-1);
       if (integerKeys.has(key) || (path.at(-2) === 'music' && ['id', 'id_str'].includes(key))) {
@@ -62,6 +63,38 @@ function validateJson(text) {
     },
     onError() { throw invalid('来源响应不是严格 JSON'); }
   }, { disallowComments: true, allowTrailingComma: false, allowEmptyContent: false });
+}
+
+export function inspectSourceResponse({ status, text, retryAfter }, countRows = false) {
+  let data;
+  let parsed = false;
+  try {
+    if (!isText(text) || Buffer.byteLength(text, 'utf8') > maxPageBytes) throw invalid('来源响应大小无效');
+    if (countRows) validateJson(text, false);
+    data = JSON.parse(text);
+    parsed = true;
+  } catch {
+    // Error responses often have no JSON body. A successful response with
+    // malformed JSON can conceal an arbitrary section of the requested list.
+  }
+  const body = isRecord(data?.data) ? data.data : data;
+  const message = String(data?.status_msg || data?.message || body?.status_msg || body?.message || '');
+  const lists = [...new Set([data?.aweme_list, body?.aweme_list])].filter(items => items !== undefined);
+  const plainError = status !== 200 && isText(text) && !/^\s*[[{]/.test(text);
+  const rows = parsed && lists.every(Array.isArray)
+    ? lists.reduce((sum, items) => sum + items.length, 0)
+    : plainError ? 0 : null;
+  if (status === 429) return { rows, code: 'PROBE_SOURCE_RATE_LIMITED', retryAfter: retryAfter || 60 };
+  if (status === 401 || status === 403) return { rows, code: 'PROBE_SOURCE_AUTH' };
+  if (status !== 200) return { rows };
+  if (/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)) {
+    return { rows, code: 'PROBE_SOURCE_RATE_LIMITED', retryAfter: 60 };
+  }
+  const rejected = [data?.status_code, body?.status_code].some(code => code != null && Number(code) !== 0);
+  if (!parsed || rejected && !goneMessage(message)) {
+    return { rows, code: 'PROBE_SOURCE_AUTH' };
+  }
+  return { rows };
 }
 
 function readEnvelope(text) {

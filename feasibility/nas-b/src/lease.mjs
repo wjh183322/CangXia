@@ -181,6 +181,12 @@ export function createLeaseManager({ store, clock = performance, bootId, ttlMs =
       });
     },
 
+    assertBoot() {
+      if (readState(store.db)?.bootId !== bootId) {
+        throw new ProbeError('STALE_PROBE_BOOT', 'The probe service boot changed.');
+      }
+    },
+
     assertLease(grant) {
       requireHolder(current(), grant, proofDigest(grant));
     },

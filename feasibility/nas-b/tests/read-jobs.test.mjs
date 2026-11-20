@@ -192,10 +192,10 @@ test('limits persist across restarts, with exact cursors and independent source 
 test('a new job continues an explicitly stopped source at its previous committed cursor', async t => {
   const hold = deferred();
   let held = true;
-  const f = await fixture(t, { reply: (call, dispatch) => {
+  const f = await fixture(t, { reply: async (call, dispatch) => {
+    if (call.cursor !== '0' && held) await hold.promise;
     dispatch();
     if (call.cursor === '0') return page(['100'], '30');
-    if (held) return hold.promise;
     return page(['90', '100']);
   } });
   const job = f.start(total, 'first-job');
@@ -362,10 +362,10 @@ for (const [text, expected] of [
 test('a new service boot resumes from the last committed cursor and fences an old worker', async t => {
   const oldPage = deferred();
   let stopped = false;
-  const f = await fixture(t, { reply: (call, dispatch) => {
+  const f = await fixture(t, { reply: async (call, dispatch) => {
+    if (call.cursor !== '0' && !stopped) await oldPage.promise;
     dispatch();
-    if (call.cursor === '0') return page(['100'], '30');
-    return stopped ? page(['200']) : oldPage.promise;
+    return call.cursor === '0' ? page(['100'], '30') : page(['200']);
   } });
   const started = f.start(total, 'before-crash');
   await until(() => f.calls.length === 2);
@@ -408,4 +408,150 @@ test('stopping a completed total preserves the total result while preventing its
   assert.equal(f.calls.length, 1);
   const independent = f.start(folder('10'), 'explicit-independent-folder');
   assert.equal((await f.settled(independent.id)).state, 'complete');
+});
+
+test('lease expiration during reservation prevents dispatch without spending a known unsent page', async t => {
+  let dispatched = 0;
+  let expireFirst = true;
+  const f = await fixture(t, { reply: (call, dispatch) => {
+    if (expireFirst) {
+      expireFirst = false;
+      const write = f.store.withWrite.bind(f.store);
+      f.store.withWrite = callback => {
+        f.store.withWrite = write;
+        const result = write(callback);
+        f.clock.advance(20_000);
+        return result;
+      };
+    }
+    dispatch();
+    dispatched++;
+    return call.cursor === '0' ? page(['100'], '30') : page(['200']);
+  } });
+  const job = f.start(total, 'slow-budget-reservation');
+  assert.equal((await f.settled(job.id)).state, 'paused');
+  assert.equal(dispatched, 0);
+  assert.equal(f.store.readHead(total), null);
+  const successor = f.acquire('lease-after-slow-reservation');
+  f.reads.resume(job.id, 'resume-after-slow-reservation', f.opts(successor));
+  assert.equal((await f.settled(job.id)).state, 'complete');
+  assert.equal(dispatched, 2);
+});
+
+test('opening a new lease boot alone fences an old authorized page before the successor sends a read command', async t => {
+  const hold = deferred();
+  const f = await fixture(t, { reply: (_call, dispatch) => { dispatch(); return hold.promise; } });
+  const job = f.start(total, 'old-page');
+  await until(() => f.calls.length === 1);
+  const reopened = f.launch();
+  hold.resolve(page(['100'], '30'));
+  await setImmediate();
+  assert.equal(reopened.store.readHead(total), null);
+  assert.equal(reopened.store.work('100'), null);
+  assert.equal(reopened.reads.snapshot(job.id).cursor, '0');
+});
+
+test('opening a new lease boot alone fences an old asynchronous finalizer', async t => {
+  const hold = deferred();
+  let entered = false;
+  const f = await fixture(t, {
+    reply: (_call, dispatch) => { dispatch(); return page(['100']); },
+    finalize: async () => { entered = true; return hold.promise; }
+  });
+  const job = f.start(total, 'old-finalize');
+  await until(() => entered);
+  const reopened = f.launch();
+  hold.resolve(end);
+  await setImmediate();
+  assert.equal(reopened.reads.snapshot(job.id).finalizationPending, true);
+  assert.equal(reopened.reads.snapshot(job.id).state, 'finalizing');
+  assert.equal(f.calls.length, 1);
+});
+
+test('authorization changes during the finalizer leave necessary work pending', async t => {
+  const hold = deferred();
+  let entered = false;
+  const f = await fixture(t, {
+    reply: (_call, dispatch) => { dispatch(); return page(['100']); },
+    finalize: async () => { entered = true; return hold.promise; }
+  });
+  const job = f.start(total, 'auth-finalizer');
+  await until(() => entered);
+  f.rotateAuth();
+  hold.resolve(end);
+  const paused = await f.settled(job.id);
+  assert.equal(paused.finalizationPending, true);
+  assert.equal(paused.reason.code, 'STALE_AUTH_EPOCH');
+});
+
+test('two dispatched pages exhaust a source even when stop discards the second complete response', async t => {
+  const hold = deferred();
+  const f = await fixture(t, { reply: (call, dispatch) => {
+    dispatch();
+    return call.cursor === '0' ? page(['100'], '30') : hold.promise;
+  } });
+  const first = f.start(total, 'first-two-pages');
+  await until(() => f.calls.length === 2);
+  f.reads.stop(first.id, 'discard-second', f.opts());
+  hold.resolve(page(['200']));
+  await f.settled(first.id);
+  assert.equal(f.store.readHead(total).cursor, '30');
+  assert.equal(f.store.work('200'), null);
+  const reopened = f.launch();
+  assert.throws(() => reopened.reads.resume(first.id, 'resume-exhausted', reopened.opts()), { code: 'PROBE_SAMPLE_LIMIT' });
+  assert.throws(() => reopened.start(total, 'new-exhausted'), { code: 'PROBE_SAMPLE_LIMIT' });
+});
+
+test('rows in a structurally complete oversized envelope count despite invalid work data', async t => {
+  const f = await fixture(t, { reply: (_call, dispatch) => {
+    dispatch();
+    return page(Array(301).fill('bad-id'));
+  } });
+  const job = f.start(total, 'oversized-invalid-rows');
+  const paused = await f.settled(job.id);
+  assert.equal(paused.reason.code, 'PROBE_SAMPLE_LIMIT');
+  assert.equal(f.store.readHead(total), null);
+  assert.throws(() => f.start(folder('10'), 'budget-already-spent'), { code: 'PROBE_SAMPLE_LIMIT' });
+});
+
+test('an unbounded malformed page seals the remaining row budget across restart', async t => {
+  const f = await fixture(t, { reply: (_call, dispatch) => {
+    dispatch();
+    return { status: 200, text: '{"aweme_list":[', retryAfter: 0 };
+  } });
+  const job = f.start(total, 'unbounded-page');
+  assert.equal((await f.settled(job.id)).reason.code, 'PROBE_SOURCE_AUTH');
+  const reopened = f.launch();
+  assert.throws(() => reopened.start(folder('10'), 'unproven-budget'), { code: 'PROBE_SAMPLE_LIMIT' });
+});
+
+test('an independent start cannot strand a linked source with an unresolved access interruption', async t => {
+  let recovered = false;
+  let holdIndependent = true;
+  const queued = deferred();
+  const f = await fixture(t, { reply: async (call, dispatch) => {
+    if (call.params?.collects_id === '10' && holdIndependent) await queued.promise;
+    dispatch();
+    return call.params?.collects_id === '10' && !recovered ? { status: 429, text: '', retryAfter: 13 } : page(['100']);
+  } });
+  const prior = f.start(folder('10'), 'previous-independent-job');
+  await until(() => f.calls.length === 1);
+  f.reads.pause(prior.id, 'pause-previous-independent', f.opts());
+  holdIndependent = false;
+  queued.resolve();
+  await f.settled(prior.id);
+  const totalJob = f.start(total, 'batch-total');
+  await f.settled(totalJob.id);
+  const link = { afterTotalJobId: totalJob.id };
+  const interrupted = f.start(folder('10'), 'linked-interrupted', link);
+  assert.equal((await f.settled(interrupted.id)).reason.scope, 'global');
+  assert.throws(() => f.start(folder('10'), 'independent-same-folder'), { code: 'PROBE_READ_BATCH_PAUSED' });
+  assert.throws(() => f.reads.resume(prior.id, 'resume-same-folder', f.opts()), { code: 'PROBE_READ_BATCH_PAUSED' });
+  const independent = f.start(author('independent-author'), 'independent-other-source');
+  assert.equal((await f.settled(independent.id)).state, 'complete');
+  recovered = true;
+  f.reads.resume(interrupted.id, 'recover-linked-folder', f.opts());
+  assert.equal((await f.settled(interrupted.id)).state, 'complete');
+  const next = f.start(folder('20'), 'next-after-recovery', link);
+  assert.equal((await f.settled(next.id)).state, 'complete');
 });

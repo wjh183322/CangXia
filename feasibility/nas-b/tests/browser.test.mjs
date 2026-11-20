@@ -668,3 +668,35 @@ test('the synchronous request fence runs after pacing and session checks but bef
   }), { code: 'STALE_AUTH_EPOCH' });
   assert.equal(called, false);
 });
+
+test('an HTTP 200 source rate message holds both list and detail requests for the shared cooldown', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const text = '{"status_code":0,"status_msg":"访问太频繁","aweme_list":[],"has_more":0}';
+  browser.reply = () => new Response(text);
+  assert.equal((await gateway.request(collection, { authEpoch, method: 'POST', form: { cursor: '0', count: '30' } })).text, text);
+  const reads = browser.reads.length;
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), {
+    code: 'PROBE_SOURCE_RATE_LIMITED'
+  });
+  await assert.rejects(gateway.request(collection, { authEpoch, method: 'POST', form: { cursor: '0', count: '30' } }), {
+    code: 'PROBE_SOURCE_RATE_LIMITED'
+  });
+  assert.equal(browser.reads.length, reads);
+  browser.clock.advance(60_000);
+  browser.reply = () => new Response(sourceText);
+  await gateway.request(detail, { authEpoch, params: { aweme_id: '1' } });
+  assert.equal(browser.reads.length, reads + 1);
+});
+
+test('an HTTP 200 business authentication rejection invalidates the verified session immediately', async t => {
+  const { browser, gateway } = await fixture(t);
+  const { authEpoch } = await gateway.verifyIdentity();
+  const text = '{"status_code":8,"status_msg":"login required"}';
+  browser.reply = () => new Response(text);
+  assert.equal((await gateway.request(collection, { authEpoch, method: 'POST', form: { cursor: '0', count: '30' } })).text, text);
+  assert.throws(() => gateway.assertAuthEpoch(authEpoch), { code: 'STALE_AUTH_EPOCH' });
+  const reads = browser.reads.length;
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'STALE_AUTH_EPOCH' });
+  assert.equal(browser.reads.length, reads);
+});

@@ -7,6 +7,7 @@ import { validAccountIdentity, verifyAccountIdentity } from '../../../electron/a
 import { isMediaURL } from '../../../electron/model.mjs';
 import { readVerificationPanel, validPanel } from '../../../electron/verification-panel.mjs';
 import { PROBE, ProbeError } from './contracts.mjs';
+import { inspectSourceResponse } from './page-parser.mjs';
 
 const origin = 'https://www.douyin.com';
 const home = `${origin}/user/self`;
@@ -769,10 +770,9 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         const result = await read(slot, query, signal);
         await assertSession(authEpoch, signal);
         assertAuthEpoch(authEpoch);
-        if (result.status === 401 || result.status === 403) {
-          // Return the source status to the caller while invalidating the write fence.
-          invalidate();
-        }
+        const issue = inspectSourceResponse(result);
+        if (issue.code === 'PROBE_SOURCE_AUTH') invalidate();
+        if (issue.code === 'PROBE_SOURCE_RATE_LIMITED' && result.status === 200) rateLimit(issue.retryAfter);
         return result;
       }), callerSignal);
     } catch (error) {

@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { contentHash } from '../../../shared/backup-protocol.mjs';
-import { goneMessage } from '../../../shared/source-state.mjs';
 import { LIMITS, ProbeError } from './contracts.mjs';
 import { assertJobEpoch } from './lease.mjs';
-import { parseSourcePage } from './page-parser.mjs';
+import { inspectSourceResponse, parseSourcePage } from './page-parser.mjs';
 import { normalizeSource } from './store.mjs';
 
 const activeKey = 'read:active';
 const receivedKey = 'read:received';
 const detailKey = id => 'read:job:' + id;
+const dispatchKey = ({ kind, id }) => `read:dispatch:${kind}:${id}`;
 const isKey = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const sameLease = (left, right) => left && left.bootId === right.bootId && left.generation === right.generation;
 const sameRun = (left, right) => sameLease(left, right) && left.jobId === right.jobId && left.epoch === right.epoch;
@@ -48,11 +48,14 @@ function usedRows(db) {
   return getMeta(db, receivedKey) ?? db.prepare('SELECT COALESCE(SUM(received_count),0) AS n FROM read_pages').get().n;
 }
 
+function sourceDispatches(db, source) {
+  return getMeta(db, dispatchKey(source)) ??
+    db.prepare('SELECT COUNT(*) AS n FROM read_pages WHERE source_kind=? AND source_id=?').get(source.kind, source.id).n;
+}
+
 function available(db, source) {
   const remaining = LIMITS.receivedRows - usedRows(db);
-  const { n } = db.prepare('SELECT COUNT(*) AS n FROM read_pages WHERE source_kind=? AND source_id=?')
-    .get(source.kind, source.id);
-  if (remaining <= 0 || n >= LIMITS.pagesPerSource) throw limit();
+  if (remaining <= 0 || sourceDispatches(db, source) >= LIMITS.pagesPerSource) throw limit();
   return remaining;
 }
 
@@ -60,6 +63,15 @@ function admitSource(db, source) {
   const sources = db.prepare('SELECT DISTINCT source_id FROM source_jobs WHERE source_kind=?').all(source.kind);
   const capacity = source.kind === 'collection' ? 2 : 1;
   if (!sources.some(row => row.source_id === source.id) && sources.length >= capacity) throw limit();
+}
+
+function assertNoSourceReplacement(db, source, except = '') {
+  const unresolved = db.prepare(`
+    SELECT 1 FROM source_jobs j JOIN runtime_meta m ON m.key='read:job:' || j.id
+    WHERE j.source_kind=? AND j.source_id=? AND json_extract(m.value,'$.afterTotalJobId') IS NOT NULL
+      AND json_extract(m.value,'$.reason.scope')='global' AND j.id<>? LIMIT 1
+  `).get(source.kind, source.id, except);
+  if (unresolved) throw error('PROBE_READ_BATCH_PAUSED', 'Resume the interrupted linked source before starting a replacement.');
 }
 
 function assertLinkedTotal(store, id, except) {
@@ -86,25 +98,6 @@ function finalization(result) {
     finished: result.ok && !result.pending && result.errors.length === 0,
     errors: result.errors.map(({ workId, code, message }) => ({ workId, code, message: error(code, message).message }))
   };
-}
-
-function assertSourceResponse({ status, text, retryAfter }) {
-  if (status === 401 || status === 403) throw error('PROBE_SOURCE_AUTH', 'Verify the source login.');
-  if (status === 429) throw new ProbeError('PROBE_SOURCE_RATE_LIMITED', 'The source requested a pause.', { retryAfter });
-  if (status !== 200) return;
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw error('PROBE_SOURCE_AUTH', 'The source did not return a valid response. Verify the source login.');
-  }
-  const message = String(body?.status_msg || body?.message || body?.data?.status_msg || body?.data?.message || '');
-  if (/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)) {
-    throw new ProbeError('PROBE_SOURCE_RATE_LIMITED', 'The source requested a pause.', { retryAfter: retryAfter || 60 });
-  }
-  if (Number(body?.status_code || body?.data?.status_code || 0) !== 0 && !goneMessage(message)) {
-    throw error('PROBE_SOURCE_AUTH', 'The source rejected access. Verify the source login.');
-  }
 }
 
 function sourceReason(cause) {
@@ -173,16 +166,18 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
   }
 
   function owningJob(db, run) {
+    leases.assertBoot();
     if (!sameRun(getMeta(db, activeKey), run)) throw error('STALE_JOB_EPOCH', 'The active read job changed.');
     const job = store.readJob(run.jobId);
     if (!job) throw unknownJob();
     return job;
   }
 
-  function finish(run, state, flags) {
+  function finish(run, state, flags, assertResult) {
     return store.withWrite(db => {
       if (!sameRun(getMeta(db, activeKey), run)) return;
       const job = owningJob(db, run);
+      assertResult?.();
       if (job.state === 'stopping') update(db, job, 'stopped', { reason: stopReason });
       else if (job.state === 'pausing' && flags?.reason?.scope !== 'global') {
         update(db, job, 'paused', {
@@ -212,61 +207,88 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
     const controller = new AbortController();
     worker.controller = controller;
     worker.dispatched = false;
-    let count;
-    let page;
-    try {
+    leases.assertLease(lease);
+    gateway.assertAuthEpoch(authEpoch);
+    const count = Math.min(30, available(store.db, source));
+    const [route, options] = requestFor(job, count);
+    const assertOrigin = () => {
       leases.assertLease(lease);
       gateway.assertAuthEpoch(authEpoch);
-      count = Math.min(30, available(store.db, source));
-      const [route, options] = requestFor(job, count);
-      const reply = await gateway.request(route, {
+    };
+
+    function settleBudget(rows) {
+      return store.withWrite(db => {
+        const current = owningJob(db, run);
+        const actual = rows === null ? LIMITS.receivedRows : usedRows(db) - count + rows;
+        putMeta(db, receivedKey, Math.min(actual, LIMITS.receivedRows));
+        if (current.state === 'reading') {
+          try {
+            leases.assertLease(lease);
+          } catch (cause) {
+            if (cause?.code !== 'STALE_LEASE') throw cause;
+            update(db, current, 'pausing', { reason: pauseReason });
+          }
+        }
+        return actual <= LIMITS.receivedRows;
+      });
+    }
+
+    let reply;
+    try {
+      reply = await gateway.request(route, {
         ...options, authEpoch, signal: controller.signal,
         beforeDispatch() {
+          let reserved = false;
           try {
             store.withWrite(db => {
               const current = owningJob(db, run);
-              leases.assertLease(lease);
-              gateway.assertAuthEpoch(authEpoch);
+              assertOrigin();
               assertJobEpoch(store, { jobId: id, epoch, authEpoch, inputCursor: cursor });
               if (current.state !== 'reading' || worker.dispatched) throw error(pauseReason.code, 'The read is pausing.');
               if (available(db, source) < count) throw limit();
-              // A crash or unparseable response retains this conservative reservation.
               putMeta(db, receivedKey, usedRows(db) + count);
+              putMeta(db, dispatchKey(source), sourceDispatches(db, source) + 1);
             });
+            reserved = true;
+            // SQLite's commit may outlast a lease or race an authorization change.
+            assertOrigin();
           } catch (cause) {
+            if (reserved) {
+              try {
+                store.withWrite(db => {
+                  owningJob(db, run);
+                  putMeta(db, receivedKey, usedRows(db) - count);
+                  putMeta(db, dispatchKey(source), sourceDispatches(db, source) - 1);
+                });
+              } catch {
+                // A newer boot or unavailable disk keeps the conservative reservation.
+              }
+            }
             if (cause instanceof ProbeError) throw cause;
             throw error('PROBE_READ_STORAGE', 'The sample budget could not be reserved.');
           }
           worker.dispatched = true;
         }
       });
-      if (!worker.dispatched) throw error('PROBE_READ_DISPATCH', 'The source request did not cross the dispatch fence.');
-      assertSourceResponse(reply);
-      page = parseSourcePage({
-        source, inputCursor: cursor, status: reply.status, text: reply.text, observedAt: new Date(clock.now()).toISOString()
-      });
     } catch (cause) {
+      if (worker.dispatched) settleBudget(null);
       if (controller.signal.aborted) throw error(pauseReason.code, 'The read is pausing.');
       if (cause instanceof ProbeError) throw cause;
       throw error('PROBE_SOURCE_UNAVAILABLE', 'The source request could not be completed.');
     }
+    if (!worker.dispatched) throw error('PROBE_READ_DISPATCH', 'The source request did not cross the dispatch fence.');
 
-    // The response consumes budget even if an authorization change or stop disallows its write.
-    const fits = store.withWrite(db => {
-      const current = owningJob(db, run);
-      const actual = usedRows(db) - count + page.receivedCount;
-      putMeta(db, receivedKey, Math.min(actual, LIMITS.receivedRows));
-      if (current.state === 'reading') {
-        try {
-          leases.assertLease(lease);
-        } catch (cause) {
-          if (cause?.code !== 'STALE_LEASE') throw cause;
-          update(db, current, 'pausing', { reason: pauseReason });
-        }
-      }
-      return actual <= LIMITS.receivedRows;
+    // Charge complete incoming envelopes before any work validation or page write.
+    const issue = inspectSourceResponse(reply, true);
+    if (!settleBudget(issue.rows)) throw limit();
+    if (issue.code === 'PROBE_SOURCE_AUTH') throw error(issue.code, 'Verify the source login.');
+    if (issue.code === 'PROBE_SOURCE_RATE_LIMITED') {
+      throw new ProbeError(issue.code, 'The source requested a pause.', { retryAfter: issue.retryAfter });
+    }
+    if (issue.rows === null) throw error('SOURCE_PAGE_INVALID', 'The source row count could not be bounded.');
+    const page = parseSourcePage({
+      source, inputCursor: cursor, status: reply.status, text: reply.text, observedAt: new Date(clock.now()).toISOString()
     });
-    if (!fits) throw limit();
 
     try {
       store.commitPage({ jobId: id, epoch, authEpoch, operationId, page }, context => {
@@ -297,7 +319,11 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
           return;
         }
         if (job.state === 'finalizing') {
-          leases.assertLease(lease);
+          const assertResult = () => {
+            leases.assertLease(lease);
+            gateway.assertAuthEpoch(job.authEpoch);
+          };
+          assertResult();
           let result;
           let failedToSave = false;
           try {
@@ -309,13 +335,13 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
               errors: [{ workId: '', code: 'PROBE_FINALIZATION_FAILED', message: 'The required finalizer failed.' }]
             };
           }
-          if (result.finished) finish(run, 'complete', { finalizationPending: false, finalizationErrors: [] });
+          if (result.finished) finish(run, 'complete', { finalizationPending: false, finalizationErrors: [] }, assertResult);
           else {
             const global = job.source.kind === 'total' || failedToSave || result.errors.some(({ code }) => storageCode.test(code));
             finish(run, global ? 'paused' : 'failed', {
               reason: { code: 'PROBE_FINALIZATION_PENDING', scope: global ? 'global' : 'source' },
               finalizationErrors: result.errors
-            });
+            }, assertResult);
           }
           return;
         }
@@ -387,6 +413,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
       return deliver(operate('read-start', operationId, lease, { source, mode, afterTotalJobId }, (db, active) => {
         if (active) throw busy();
         if (afterTotalJobId) assertLinkedTotal(store, afterTotalJobId);
+        assertNoSourceReplacement(db, source);
         gateway.assertAuthEpoch(authEpoch);
         admitSource(db, source);
         available(db, source);
@@ -407,6 +434,7 @@ export function createReadCoordinator({ store, leases, gateway, clock = Date, fi
           throw error('PROBE_READ_NOT_RESUMABLE', 'The read job is not resumable.');
         }
         if (job.afterTotalJobId) assertLinkedTotal(store, job.afterTotalJobId, id);
+        assertNoSourceReplacement(db, job.source, id);
         gateway.assertAuthEpoch(authEpoch);
         if (!job.finalizationPending) {
           available(db, job.source);
