@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile, unlink } from 'node:fs/promises';
+import { readFile, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
 import { spawnSync } from 'node:child_process';
@@ -386,6 +386,92 @@ test('first startup can initialize an empty database file left by an interrupted
   await probe.close();
   const database = openProbeStore({ file: path.join(s.root, 'state', 'library.sqlite'), libraryId: s.config.libraryId });
   database.close();
+});
+
+test('first startup recovers a hot rollback journal after schema pages spill to disk', async (t) => {
+  const s = await makeSandbox(t);
+  const processSource = `
+    import path from 'node:path';
+    import { DatabaseSync } from 'node:sqlite';
+    import { prepareDataRoot } from ${JSON.stringify(new URL('../src/config.mjs', import.meta.url))};
+    import { startProbe } from ${JSON.stringify(new URL('../src/server.mjs', import.meta.url))};
+    const config = JSON.parse(process.argv[1]);
+    const layout = await prepareDataRoot(config, { fixtureRoot: config.root });
+    if (process.argv[2] === 'schema') {
+      const exec = DatabaseSync.prototype.exec;
+      DatabaseSync.prototype.exec = function (sql) {
+        const result = exec.call(this, sql);
+        if (sql.includes('PRAGMA synchronous=FULL')) exec.call(this, 'PRAGMA cache_size=2');
+        if (sql.startsWith('PRAGMA application_id=')) process.exit(74);
+        return result;
+      };
+    } else {
+      const prepare = DatabaseSync.prototype.prepare;
+      DatabaseSync.prototype.prepare = function (sql) {
+        if (sql === 'PRAGMA application_id' && path.resolve(this.location()) === path.join(layout.state, 'library.sqlite')) {
+          process.exit(75);
+        }
+        return prepare.call(this, sql);
+      };
+    }
+    await startProbe({ config, layout, host: '127.0.0.1' });
+  `;
+  const stopStartup = (phase, status) => {
+    const child = spawnSync(process.execPath,
+      ['--input-type=module', '-e', processSource, JSON.stringify(s.config), phase],
+      { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    assert.ifError(child.error);
+    assert.equal(child.status, status, child.stderr);
+  };
+  stopStartup('schema', 74);
+
+  const layout = await s.prepare();
+  const dirs = [layout.state, ...await readdir(s.root, { withFileTypes: true })
+    .then(entries => entries.filter(entry => entry.isDirectory() && entry.name.startsWith('.'))
+      .map(entry => path.join(s.root, entry.name)))];
+  const journals = [];
+  for (const dir of dirs) {
+    for (const entry of await readdir(dir)) {
+      if (entry.endsWith('.sqlite-journal')) journals.push(path.join(dir, entry));
+    }
+  }
+  assert.equal(journals.length, 1);
+  const database = await readFile(journals[0].slice(0, -'-journal'.length));
+  const journal = await readFile(journals[0]);
+  assert.ok(journal.length > 512);
+  assert.ok(database.length > 0);
+
+  const foreign = await makeSandbox(t);
+  const foreignLayout = await foreign.prepare();
+  await foreign.write('state/library.sqlite', database);
+  await foreign.write('state/library.sqlite-journal', journal);
+  await assert.rejects(startProbe({ config: foreign.config, layout: foreignLayout, host: '127.0.0.1' }),
+    { code: 'FOREIGN_PROBE_DB' });
+  assert.deepEqual(await readFile(path.join(foreignLayout.state, 'library.sqlite')), database);
+  assert.deepEqual(await readFile(path.join(foreignLayout.state, 'library.sqlite-journal')), journal);
+
+  stopStartup('published', 75);
+  const published = await readFile(path.join(layout.state, 'library.sqlite'));
+  assert.deepEqual([...published.subarray(18, 20)], [2, 2]);
+
+  const identity = await generate([{ name: 'commonName', value: 'probe-nas.local' }], {
+    keySize: 2048,
+    extensions: [{ name: 'subjectAltName', altNames: [{ type: 2, value: 'probe-nas.local' }] }]
+  });
+  const probe = await startProbe({
+    config: { ...s.config, accessHost: 'probe-nas.local' }, layout,
+    host: '127.0.0.1', port: 0, gateway: { close() {} },
+    token: randomBytes(32).toString('hex'), tls: { key: identity.private, cert: identity.cert }
+  });
+  await probe.close();
+  assert.notEqual(path.dirname(journals[0]), layout.state);
+  assert.deepEqual(await readdir(path.dirname(journals[0])), ['complete']);
+  const store = openProbeStore({ file: path.join(layout.state, 'library.sqlite'), libraryId: s.config.libraryId });
+  try {
+    assert.equal(store.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  } finally {
+    store.close();
+  }
 });
 
 test('first startup rejects foreign content in a claimed but incomplete root', async (t) => {

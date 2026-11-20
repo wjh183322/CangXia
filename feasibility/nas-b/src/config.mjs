@@ -10,6 +10,8 @@ const BOOTSTRAP_FILES = new Set([
   'library.sqlite', 'library.sqlite-journal', 'library.sqlite-wal', 'library.sqlite-shm',
   'access.token', 'server.pem', 'server.key'
 ]);
+const BOOTSTRAP_DATABASE = 'library.sqlite';
+const BOOTSTRAP_DB_ENTRIES = new Set(['', '-journal', '-wal', '-shm'].map(suffix => BOOTSTRAP_DATABASE + suffix));
 const HOST_BASE = '/volume2/docker/Cangxia-Feasibility-B';
 const ARCHITECTURES = new Map([
   ['x86_64', 'amd64'], ['amd64', 'amd64'],
@@ -148,7 +150,7 @@ async function readRuntimeMountInfo() {
 
 const bootstrapLayouts = new WeakMap();
 
-async function syncDirectory(directory) {
+export async function syncDirectory(directory) {
   if (process.platform === 'win32') return;
   const file = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY);
   try {
@@ -161,11 +163,18 @@ async function syncDirectory(directory) {
 async function readBootstrapState(stamp) {
   if (!(await lstat(stamp)).isDirectory()) throw foreignRoot();
   const entries = await readdir(stamp);
-  if (!entries.length) return false;
-  const complete = path.join(stamp, 'complete');
-  if (entries.length !== 1 || entries[0] !== 'complete' ||
-      !(await lstat(complete)).isDirectory() || (await readdir(complete)).length) throw foreignRoot();
-  return true;
+  if (entries.includes('complete')) {
+    const complete = path.join(stamp, 'complete');
+    if (entries.length !== 1 || !(await lstat(complete)).isDirectory() ||
+        (await readdir(complete)).length) throw foreignRoot();
+    return true;
+  }
+  for (const entry of entries) {
+    if (!BOOTSTRAP_DB_ENTRIES.has(entry)) throw foreignRoot();
+    const stat = await lstat(path.join(stamp, entry));
+    if (!stat.isFile() || stat.nlink !== 1) throw foreignRoot();
+  }
+  return false;
 }
 
 function assertRootEntries(entries, identity) {
@@ -174,22 +183,23 @@ function assertRootEntries(entries, identity) {
   }
 }
 
-export async function needsDataRootBootstrap(layout) {
+export async function bootstrapDatabasePath(layout) {
   const stamp = bootstrapLayouts.get(layout);
-  if (!stamp) return false;
+  if (!stamp) return null;
   assertRootEntries(await readdir(layout.root), path.basename(stamp));
-  if (await readBootstrapState(stamp)) return false;
+  if (await readBootstrapState(stamp)) return null;
   for (const name of DIRECTORIES) {
     const entries = await readdir(layout[name], { withFileTypes: true });
     if (entries.some(entry => name !== 'state' || !BOOTSTRAP_FILES.has(entry.name) || !entry.isFile())) {
       throw foreignRoot();
     }
   }
-  return true;
+  return path.join(stamp, BOOTSTRAP_DATABASE);
 }
 
 export async function completeDataRootBootstrap(layout) {
   const stamp = bootstrapLayouts.get(layout);
+  if ((await readdir(stamp)).length) throw foreignRoot();
   await syncDirectory(layout.state);
   await mkdir(path.join(stamp, 'complete'), { mode: 0o700 });
   await syncDirectory(stamp);

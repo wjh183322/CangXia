@@ -143,7 +143,7 @@ function runWindowsRename(command, from, to, displaced) {
   });
 }
 
-async function moveExclusive(from, to, { directory = false } = {}) {
+export async function moveExclusive(from, to, { directory = false } = {}) {
   // Windows rejects renaming a directory over an existing directory. Linux
   // needs the exclusive flag even for a target that appears empty.
   if (process.platform === 'win32') {

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { types } from 'node:util';
 import { contentHash } from '../../../shared/backup-protocol.mjs';
 import { creatorKey, mergeCreator, sameCreator } from '../../../shared/creators.mjs';
+import { syncDirectory } from './config.mjs';
 import { LIMITS, PROBE, ProbeError } from './contracts.mjs';
+import { moveExclusive } from './files.mjs';
 import { mergeObservedWork } from './work-merge.mjs';
 
 const APPLICATION_ID = 0x43585042;
@@ -149,7 +151,7 @@ function sameFile(actual, expected) {
   return actual?.dev === expected.dev && actual?.ino === expected.ino;
 }
 
-function checkPaths(file, { expected, empty = false, allowRollback = false } = {}) {
+function checkPaths(file, { expected, empty = false, noSidecars = false, rollbackOnly = false } = {}) {
   if (typeof file !== 'string' || !path.isAbsolute(file) || path.normalize(file) !== file) throw unsafeDb();
   const seen = {};
   try {
@@ -167,8 +169,8 @@ function checkPaths(file, { expected, empty = false, allowRollback = false } = {
   const stat = seen[''];
   const hasSidecars = seen['-wal'] || seen['-shm'] || seen['-journal'];
   if ((!stat && hasSidecars) || (expected && !sameFile(stat, expected)) ||
-      (empty && (stat?.size !== 0n || seen['-wal'] || seen['-shm'] ||
-        (seen['-journal'] && !allowRollback)))) throw unsafeDb();
+      (noSidecars && hasSidecars) || (rollbackOnly && (seen['-wal'] || seen['-shm'])) ||
+      (empty && (stat?.size !== 0n || hasSidecars))) throw unsafeDb();
   return stat;
 }
 
@@ -209,11 +211,33 @@ function createDatabaseFile(file) {
   }
 }
 
-function openDatabase(file, libraryId, initialize, bootstrap) {
+function rollbackOriginPages(file) {
+  const journal = file + '-journal';
+  const existing = lstatSync(journal, { bigint: true, throwIfNoEntry: false });
+  if (!existing || existing.size < 28n) return null;
+  const fd = openSync(journal, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || !sameFile(stat, existing)) throw unsafeDb();
+    const signature = Buffer.from('d9d505f920a163d7', 'hex');
+    const header = Buffer.alloc(28), end = Buffer.alloc(signature.length);
+    if (readSync(fd, header, 0, header.length, 0) !== header.length ||
+        readSync(fd, end, 0, end.length, stat.size - BigInt(end.length)) !== end.length) throw unsafeDb();
+    // A bootstrap transaction only opens one database and cannot name a super-journal.
+    if (end.equals(signature)) throw unsafeDb();
+    if (stat.size <= 512n || !header.subarray(0, signature.length).equals(signature)) return null;
+    return header.readUInt32BE(16);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function openDatabase(file, libraryId, initialize, staged = false) {
   let expected = checkPaths(file);
   if (initialize && expected) throw error('PROBE_DB_EXISTS', 'The probe database path already exists.');
-  const create = initialize || (bootstrap && !expected);
-  const resume = bootstrap && expected?.size === 0n;
+  const create = initialize || (staged && !expected);
+  const rollbackPages = staged && expected ? rollbackOriginPages(file) : null;
+  const resume = staged && expected && (rollbackPages === 0 || (rollbackPages === null && expected.size === 0n));
   if (!create && !expected) throw error('PROBE_DB_MISSING', 'The existing probe database is missing.');
   const uri = pathToFileURL(file).href;
   if (create) {
@@ -228,7 +252,10 @@ function openDatabase(file, libraryId, initialize, bootstrap) {
     try {
       verifyHeader(file, expected);
       checkPaths(file, { expected });
-      const inspection = new DatabaseSync(uri + '?mode=ro', { readOnly: true, timeout: 1000 });
+      // A staged WAL-mode change may have its own rollback journal. Its bare
+      // schema and identity must still match before SQLite can replay the journal.
+      const inspection = new DatabaseSync(uri + '?mode=ro' + (rollbackPages === null ? '' : '&immutable=1'),
+        { readOnly: true, timeout: 1000 });
       try {
         checkPaths(file, { expected });
         verifyIdentity(inspection, libraryId);
@@ -243,7 +270,7 @@ function openDatabase(file, libraryId, initialize, bootstrap) {
   let db;
   try {
     // Recheck path identity at SQLite's file-open boundaries on the dedicated mount.
-    const pathCheck = { expected, empty: create || resume, allowRollback: resume };
+    const pathCheck = { expected, empty: create, rollbackOnly: resume || rollbackPages !== null };
     checkPaths(file, pathCheck);
     // mode=rw makes SQLite refuse a path that disappears during recovery.
     db = new DatabaseSync(uri + '?mode=rw', { timeout: 1000 });
@@ -616,14 +643,47 @@ class ProbeStore {
   }
 }
 
-export function openProbeStore({ file, libraryId, initialize = false, bootstrap = false, testHooks = {} }) {
+function assertLibraryId(libraryId) {
   if (typeof libraryId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(libraryId)) {
     throw error('INVALID_PROBE_ID', 'The probe requires a valid library identity.');
   }
+}
+
+export async function openBootstrapProbeStore({ file, staged, libraryId }) {
+  assertLibraryId(libraryId);
+  const existing = checkPaths(file);
+  if (existing) {
+    if (checkPaths(staged)) throw unsafeDb();
+    if (existing.size !== 0n) return openProbeStore({ file, libraryId });
+    // Older interrupted initializations could leave an empty final filename.
+    checkPaths(file, { expected: existing, empty: true });
+    await moveExclusive(file, staged);
+  }
+  openDatabase(staged, libraryId, false, true).close();
+  const expected = checkPaths(staged, { noSidecars: true });
+  const fd = openSync(staged, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || !sameFile(stat, expected)) throw unsafeDb();
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  const stagingDirectory = path.dirname(staged);
+  await syncDirectory(stagingDirectory);
+  checkPaths(staged, { expected, noSidecars: true });
+  await moveExclusive(staged, file);
+  await syncDirectory(path.dirname(file));
+  await syncDirectory(stagingDirectory);
+  return openProbeStore({ file, libraryId });
+}
+
+export function openProbeStore({ file, libraryId, initialize = false, testHooks = {} }) {
+  assertLibraryId(libraryId);
   for (const hook of [testHooks.afterWorkWrite, testHooks.afterPageCommit, testHooks.beforeFileWrite,
     testHooks.afterFilePlacement, testHooks.beforeFileCleanup, testHooks.beforeFileMove, testHooks.beforeResourceVerify,
     testHooks.beforeDownloadWorkLock, testHooks.beforeMetadataExchange, testHooks.afterMetadataExchange]) {
     if (hook !== undefined) assertCallback(hook);
   }
-  return new ProbeStore(openDatabase(file, libraryId, initialize === true, bootstrap === true), testHooks);
+  return new ProbeStore(openDatabase(file, libraryId, initialize === true), testHooks);
 }

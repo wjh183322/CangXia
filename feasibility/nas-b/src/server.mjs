@@ -14,9 +14,9 @@ import { isIP } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { completeDataRootBootstrap, needsDataRootBootstrap, prepareDataRoot, validateAccessHost } from './config.mjs';
+import { bootstrapDatabasePath, completeDataRootBootstrap, prepareDataRoot, validateAccessHost } from './config.mjs';
 import { PROBE, ProbeError } from './contracts.mjs';
-import { openProbeStore } from './store.mjs';
+import { openBootstrapProbeStore, openProbeStore } from './store.mjs';
 import { createLeaseManager } from './lease.mjs';
 import { isLoginQrPng, openBrowserGateway } from './browser.mjs';
 import { createDownloads } from './downloads.mjs';
@@ -199,14 +199,11 @@ export async function startProbe(options) {
   const accessHost =
     config.accessHost === undefined && localFixture ? host : validateAccessHost(config.accessHost);
   const layout = options.layout ?? (await prepareDataRoot(config));
-  const bootstrap = !options.store && (await needsDataRootBootstrap(layout));
+  const staged = !options.store && (await bootstrapDatabasePath(layout));
+  const database = { file: path.join(layout.state, 'library.sqlite'), libraryId: config.libraryId };
   const store =
     options.store ??
-    openProbeStore({
-      file: path.join(layout.state, 'library.sqlite'),
-      libraryId: config.libraryId,
-      bootstrap
-    });
+    (staged ? await openBootstrapProbeStore({ ...database, staged }) : openProbeStore(database));
   let gateway, downloads, reads, server, unsubscribe;
   const sessions = new Map(),
     active = new Set();
@@ -234,11 +231,11 @@ export async function startProbe(options) {
   let leases;
   try {
     let access;
-    if (bootstrap) {
+    if (staged) {
       // A competing startup cannot overwrite credentials while this process prepares them.
       store.db.exec('BEGIN IMMEDIATE');
       try {
-        if (!(await needsDataRootBootstrap(layout))) fail('PROBE_BOOTSTRAP_ALREADY_COMPLETE');
+        if (!(await bootstrapDatabasePath(layout))) fail('PROBE_BOOTSTRAP_ALREADY_COMPLETE');
         const used = store.db.prepare(`
           SELECT 1 FROM runtime_meta
           WHERE (key != 'revision' OR value != '0') AND (key != 'lease' OR value != 'null')
