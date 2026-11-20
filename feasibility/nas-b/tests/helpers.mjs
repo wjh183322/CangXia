@@ -8,11 +8,13 @@ import { createLeaseManager } from '../src/lease.mjs';
 import { openProbeStore } from '../src/store.mjs';
 
 export async function makeSandbox(t) {
-  const root = await mkdtemp(path.join(await realpath(tmpdir()), 'cangxia-probe-'));
+  const temporaryDirectory = await realpath(tmpdir());
+  const root = await mkdtemp(path.join(temporaryDirectory, 'cangxia-probe-'));
   const cleanups = [];
   t.after(async () => {
     for (const cleanup of cleanups.reverse()) await cleanup();
-    await rm(root, { recursive: true, force: true });
+    assert.equal(path.dirname(root), temporaryDirectory);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   const config = Object.freeze({
