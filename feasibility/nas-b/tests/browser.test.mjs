@@ -132,7 +132,13 @@ class FakeContext extends EventEmitter {
         await context.beforePanel?.(arg.action, page);
         if (closed) return null;
       }
-      if (arg?.viewProbe && !context.panelDocument) return context.panel && { ...context.panel, allowed: context.allowTarget !== false };
+      if (arg?.viewProbe && !context.panelDocument) {
+        if (context.panel) return { ...context.panel, allowed: context.allowTarget !== false };
+        if (arg.action === 'probe-open' || arg.action === 'open') return {
+          loginEntry: context.entryVisible === false ? 'not-present' : arg.action === 'open' ? 'clicked' : 'ready'
+        };
+        return null;
+      }
       if (fn.toString().includes('navigator.userAgent')) await context.onUserAgent?.();
       return runInNewContext(`(${fn})(arg)`, {
       arg, window, location: new URL(href), navigator: { userAgent: 'Fixture chromium' },
@@ -359,6 +365,73 @@ test('retiring the only managed login cannot close headed Chromium', async t => 
       assert.equal((await gateway.frame(next)).pageRevision, next.pageRevision);
     });
   }
+});
+
+test('explicit login waits for a late ordinary button, clicks once, and re-observes after a same-document change', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser);
+  const loadedPanel = browser.panelDocument;
+  const entry = fixtureNode('button', { text: '登录' });
+  let page, observations = 0, clicks = 0, firstAfterClick = true;
+  browser.panelDocument = {
+    querySelectorAll(selectors) {
+      return selectors === 'button,[role="button"]' && observations >= 2 ? [entry] : [];
+    },
+    elementsFromPoint: () => []
+  };
+  entry.click = () => {
+    clicks++;
+    page.navigate(self + '?ordinary-login');
+  };
+  browser.beforePanel = (action, current) => {
+    page = current;
+    if (action === 'probe-open') {
+      observations++;
+      if (clicks && firstAfterClick) {
+        firstAfterClick = false;
+        page.navigate(self + '?panel-mounted');
+      } else if (clicks) browser.panelDocument = loadedPanel;
+    }
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(view.width, panelRect.width);
+  assert.equal(gateway.reportStage().loginEntry, 'clicked');
+  assert.equal(gateway.reportStage().panelDetected, true);
+  assert.equal(clicks, 1);
+  assert.ok(observations >= 4);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  assert.equal(clicks, 1);
+});
+
+test('readiness reports a missing ordinary entry after a bounded read-only wait', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.panel = null;
+  browser.entryVisible = false;
+  const actions = [];
+  browser.beforePanel = action => { actions.push(action); };
+  const view = await gateway.openLogin();
+  assert.equal(view.width, 0);
+  assert.equal(gateway.reportStage().loginEntry, 'not-present');
+  assert.ok(actions.length > 1 && actions.length < 30);
+  assert.ok(actions.every(action => action === 'probe-open'));
+});
+
+test('an expired lease during the readiness wait cannot click a late login entry', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.panel = null;
+  browser.entryVisible = false;
+  const actions = [];
+  let live = true;
+  browser.beforePanel = action => { actions.push(action); };
+  browser.clock.onPaceWait = () => {
+    live = false;
+    browser.entryVisible = true;
+  };
+  await assert.rejects(gateway.openLogin({ guard() {
+    if (!live) throw new ProbeError('STALE_LEASE');
+  } }), { code: 'STALE_LEASE' });
+  assert.ok(actions.length > 0);
+  assert.ok(actions.every(action => action === 'probe-open'));
 });
 
 test('an explicit second opening retries a missing panel on the same trusted login page', async t => {
@@ -597,6 +670,7 @@ test('timed-out pointer dispatch retires its page before replacement input', asy
 
 test('timed-out login-opening action retires its page before creating a new view', async t => {
   const { browser, gateway } = await fixture(t);
+  browser.panel = null;
   let releaseOpen;
   let old;
   browser.beforePanel = (action, page) => {
@@ -607,6 +681,7 @@ test('timed-out login-opening action retires its page before creating a new view
   await assert.rejects(gateway.openLogin(), { code: 'PROBE_BROWSER_TIMEOUT' });
   assert.equal(old.isClosed(), true);
   browser.beforePanel = undefined;
+  browser.panel = { id: 1, ...panelRect };
   const replacement = await gateway.openLogin();
   releaseOpen();
   assert.notEqual(browser.sourcePages()[0], old);
@@ -712,7 +787,7 @@ test('login diagnostics report only bounded public stages and blocked operation 
   assert.equal(await browser.visit(next, storageHelper('4.0.8') + '?token=never-export', 'document'), false);
   const stage = gateway.reportStage();
   assert.deepEqual(stage, {
-    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused',
+    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused', loginEntry: 'panel-present',
     helper: { state: 'new-version', version: '4.0.8' },
     blockedPassport: { GET: 2, POST: 1, routes: [
       { method: 'GET', name: 'get_qrcode' },

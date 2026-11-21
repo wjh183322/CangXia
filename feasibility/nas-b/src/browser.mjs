@@ -19,6 +19,8 @@ const collectionRoute = '/aweme/v1/web/aweme/listcollection/';
 const viewport = Object.freeze({ width: 1000, height: 760 });
 const requestTimeout = 12000;
 const driverTimeout = 2500;
+const loginReadinessMs = 4000;
+const loginObservationMs = 200;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
 const maxPassportQrBytes = 256 * 1024;
@@ -483,18 +485,22 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
     if (challenge || qr) { selected = surface; break; }
   }
   if (!selected) {
-    if (action === 'open') {
+    if (action === 'probe-open' || action === 'open') {
       // Opening the ordinary login dialog is the only action outside a recognized panel.
       const entry = [...document.querySelectorAll('button,[role="button"]')]
-        .find(element => label(element) === '登录' && !element.closest('a[href]') && visible(element));
-      entry?.click();
+        .find(element => label(element) === '登录' && !element.closest('a[href]') &&
+          !element.disabled && element.getAttribute('aria-disabled') !== 'true' && visible(element));
+      if (!entry || document.readyState === 'loading') return { loginEntry: 'not-present' };
+      if (action === 'probe-open') return { loginEntry: 'ready' };
+      entry.click();
+      return { loginEntry: 'clicked' };
     }
     return null;
   }
   const identities = window[viewProbe] ??= { elements: new WeakMap(), next: 0 };
   if (!identities.elements.has(selected)) identities.elements.set(selected, ++identities.next);
   const result = { ...box(selected), id: identities.elements.get(selected), allowed: false };
-  if (action === undefined || action === 'open') return result;
+  if (action === undefined || action === 'open' || action === 'probe-open') return result;
 
   const keyboard = action === 'key' || action === 'text';
   const target = keyboard ? document.activeElement : document.elementFromPoint(x, y);
@@ -649,7 +655,7 @@ export async function openBrowserGateway({
   const pages = new Map();
   let observeTraffic;
   const loginStage = {
-    helper: { state: 'not-requested' }, qrRequest: { state: 'not-requested' },
+    helper: { state: 'not-requested' }, qrRequest: { state: 'not-requested' }, loginEntry: 'not-checked',
     blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
   };
   let lastQr = 'not-requested';
@@ -831,7 +837,7 @@ export async function openBrowserGateway({
     }
   }
 
-  async function mutateLogin(slot, revision, task, beforeDispatch) {
+  async function mutateLogin(slot, revision, task, { beforeDispatch, signal = epochController.signal, timeout = driverTimeout } = {}) {
     let dispatched = false;
     try {
       return await browserCall(() => {
@@ -839,7 +845,7 @@ export async function openBrowserGateway({
         beforeDispatch?.();
         dispatched = true;
         return task();
-      }, epochController.signal);
+      }, signal, timeout);
     } catch (error) {
       if (!dispatched) throw error;
       // The driver can reject before the browser has finished applying the action.
@@ -849,14 +855,8 @@ export async function openBrowserGateway({
     }
   }
 
-  async function refreshPanel(slot, action, beforeDispatch) {
-    const revision = pageRevision;
-    assertView(revision);
-    const { page, viewProbe } = slot;
-    const inspect = () => page.evaluate(panelScript, { viewProbe, ...action });
-    const result = await (action?.action === 'open' ?
-      mutateLogin(slot, revision, inspect, beforeDispatch) : browserCall(inspect, epochController.signal));
-    assertView(revision);
+  async function applyPanel(slot, result) {
+    let appliedRevision = pageRevision;
     let panel = null;
     if (validPanel(result) && result.x + result.width <= viewport.width && result.y + result.height <= viewport.height &&
         Number.isSafeInteger(result.id) && result.id > 0) {
@@ -865,10 +865,76 @@ export async function openBrowserGateway({
     }
     if (JSON.stringify(panel) !== JSON.stringify(slot.panel)) {
       slot.panel = panel;
-      pageRevision++;
+      appliedRevision = ++pageRevision;
       if (slot.pressed) await retireLogin(slot);
     }
+    return appliedRevision;
+  }
+
+  async function refreshPanel(slot, action) {
+    const revision = pageRevision;
+    assertView(revision);
+    const { page, viewProbe } = slot;
+    const result = await browserCall(() => page.evaluate(panelScript, { viewProbe, ...action }), epochController.signal);
+    assertView(revision);
+    await applyPanel(slot, result);
     return result?.allowed === true;
+  }
+
+  async function waitForLoginPanel(slot, requestSignal, assertOpening) {
+    const { page, viewProbe, qrAuthority, storageFrames } = slot;
+    const signal = requestSignal ? AbortSignal.any([requestSignal, epochController.signal]) : epochController.signal;
+    const assertCurrent = () => {
+      assertOpening();
+      assertVerificationAvailable();
+      if (slot !== login || !trustedView(slot) || slot.qrAuthority !== qrAuthority ||
+          slot.storageFrames !== storageFrames) throw staleView();
+    };
+    const started = clock.now();
+    const deadline = started + loginReadinessMs;
+    const remaining = () => Math.ceil(deadline - clock.now());
+    let dispatched = false;
+    loginStage.loginEntry = 'not-checked';
+
+    while (remaining() > 0) {
+      assertCurrent();
+      const revision = pageRevision;
+      const result = await browserCall(() => {
+        assertCurrent();
+        return page.evaluate(panelScript, { viewProbe, action: 'probe-open' });
+      }, signal, Math.min(driverTimeout, remaining()));
+      assertCurrent();
+      const appliedRevision = await applyPanel(slot, revision === pageRevision ? result : null);
+      assertCurrent();
+      if (appliedRevision !== pageRevision) await applyPanel(slot, null);
+      if (revision === pageRevision && result?.loginEntry === 'not-present' && !dispatched) {
+        loginStage.loginEntry = 'not-present';
+      }
+      if (slot.panel) {
+        if (loginStage.loginEntry !== 'clicked') loginStage.loginEntry = 'panel-present';
+        return;
+      }
+      if (!dispatched && revision === pageRevision && result?.loginEntry === 'ready' &&
+          clock.now() - started >= loginObservationMs && remaining() > 0) {
+        dispatched = true;
+        const action = await mutateLogin(slot, pageRevision, () => page.evaluate(panelScript, { viewProbe, action: 'open' }), {
+          beforeDispatch() {
+            assertCurrent();
+            if (remaining() <= 0) throw timedOut();
+          },
+          signal, timeout: Math.min(driverTimeout, remaining())
+        });
+        assertCurrent();
+        if (action?.loginEntry === 'clicked') loginStage.loginEntry = 'clicked';
+        else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
+      }
+      const wait = Math.min(loginObservationMs, remaining());
+      if (wait <= 0) break;
+      let timer;
+      try { await abortable(new Promise(resolve => { timer = schedule(resolve, wait); }), signal); }
+      finally { unschedule(timer); }
+    }
+    assertCurrent();
   }
 
   function openLogin({ signal, guard, assertQrRequest } = {}) {
@@ -889,12 +955,12 @@ export async function openBrowserGateway({
           loginStage.passportRoutes.clear();
           login = await makePage('login');
           pageRevision++;
-        } else if (login.panel) await refreshPanel(login);
+        }
         if (login) {
           loginStage.qrRequest = { state: 'not-requested' };
           login.qrAuthority = typeof assertQrRequest === 'function' ?
             { assert: assertQrRequest } : undefined;
-          if (!login.panel) await refreshPanel(login, { action: 'open' }, assertOpening);
+          await waitForLoginPanel(login, signal, assertOpening);
         }
         return viewState();
       } catch (error) {
@@ -1234,7 +1300,7 @@ export async function openBrowserGateway({
     }
     return {
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
-      qrRequest: loginStage.qrRequest.state,
+      qrRequest: loginStage.qrRequest.state, loginEntry: loginStage.loginEntry,
       helper: { ...loginStage.helper },
       blockedPassport: {
         ...loginStage.blockedPassport, routes: [...loginStage.passportRoutes.values()].map(route => ({ ...route }))
