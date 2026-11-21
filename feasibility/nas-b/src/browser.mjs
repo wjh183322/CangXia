@@ -19,6 +19,9 @@ const viewport = Object.freeze({ width: 1000, height: 760 });
 const requestTimeout = 12000;
 const driverTimeout = 2500;
 const maxResponseBytes = 8 * 1024 * 1024;
+const maxStorageHelperBytes = 64 * 1024;
+const storageHelperUrls = new Set(['4.0.5', '4.0.7'].map(version =>
+  'https://lf-zt.douyin.com/obj/uc-assets/zt/@byted/x-storage-web/' + version + '/dist/latest/index.html'));
 const keys = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
 const pointerTypes = new Set(['click', 'move', 'down', 'up']);
 const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form', 'beforeDispatch', 'onReceivedRows']);
@@ -171,6 +174,63 @@ function approvedBrowserTraffic(request, slot, mainFrame) {
   return method === 'GET' && isMediaURL(url) && !!assetPaths.get(type)?.test(target.pathname);
 }
 
+function directLoginChild(slot, frame) {
+  return slot.kind === 'login' && sourcePage(slot.page.url(), 'login') &&
+    frame.parentFrame?.() === slot.page.mainFrame();
+}
+
+function trustedLoginChild(slot, frame) {
+  if (!directLoginChild(slot, frame)) return false;
+  const url = frame.url();
+  const authorization = slot.storageFrames.get(frame);
+  return url === 'about:blank' || (authorization?.phase === 'committed' && authorization.url === url);
+}
+
+function commitLoginChild(slot, frame) {
+  if (!directLoginChild(slot, frame)) return false;
+  const url = frame.url();
+  if (url === 'about:blank') {
+    slot.storageFrames.delete(frame);
+    return true;
+  }
+  const authorization = slot.storageFrames.get(frame);
+  if (authorization?.phase !== 'provided' || authorization.url !== url) return false;
+  authorization.phase = 'committed';
+  return true;
+}
+
+async function readStorageHelper(url, fetchStorageHelper) {
+  // This is a public asset. Never inherit the browser's cookies or follow a redirect.
+  const response = await fetchStorageHelper(url, {
+    method: 'GET', credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+  });
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  try {
+    if (response.status !== 200 || response.redirected || response.url !== url ||
+        response.headers.has('location') ||
+        response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'text/html') return null;
+    const chunks = [];
+    let length = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxStorageHelperBytes) return null;
+      chunks.push(value);
+    }
+    if (!length) return null;
+    const headers = { 'content-type': 'text/html; charset=utf-8' };
+    for (const name of ['content-security-policy', 'x-frame-options', 'cross-origin-resource-policy']) {
+      if (response.headers.has(name)) headers[name] = response.headers.get(name);
+    }
+    return { status: 200, headers, body: Buffer.concat(chunks, length) };
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 function readParams(value, allowed) {
   if (value === undefined) return undefined;
   if (!value || ![null, Object.prototype].includes(Object.getPrototypeOf(value))) throw invalidRoute();
@@ -196,7 +256,7 @@ function approvedRead(route, options) {
   }
 }
 
-function browserTraffic(context, pages) {
+function browserTraffic(context, pages, fetchStorageHelper) {
   const totals = { completedRequests: 0, sentBytes: 0, receivedBytes: 0, blockedRequests: 0, failedRequests: 0, unknownSizes: 0 };
   const blocked = new WeakSet();
   context.on('requestfailed', request => {
@@ -223,8 +283,28 @@ function browserTraffic(context, pages) {
         const frame = request.frame();
         const page = frame.page();
         const slot = pages.get(page);
-        // Child verification documents require a reviewed exact origin and path.
         allowed = !!slot && approvedBrowserTraffic(request, slot, frame === page.mainFrame());
+        const url = request.url();
+        if (slot && request.isNavigationRequest() && directLoginChild(slot, frame)) {
+          slot.storageFrames.delete(frame);
+          if (storageHelperUrls.has(url) && request.method() === 'GET' &&
+              !request.redirectedFrom() && request.resourceType() === 'document') {
+            const revision = slot.revision;
+            const authorization = { url, phase: 'fetching' };
+            slot.storageFrames.set(frame, authorization);
+            const document = await readStorageHelper(url, fetchStorageHelper);
+            if (document && pages.get(page) === slot && !page.isClosed() && slot.revision === revision &&
+                slot.storageFrames.get(frame) === authorization && directLoginChild(slot, frame) && page.frames().includes(frame)) {
+              authorization.phase = 'provided';
+              try {
+                await route.fulfill(document);
+                return;
+              } catch {
+                if (slot.storageFrames.get(frame) === authorization) slot.storageFrames.delete(frame);
+              }
+            }
+          }
+        }
       } catch {
         // Requests without an owned frame cannot load a source document.
       }
@@ -429,7 +509,7 @@ function queue() {
   };
 }
 
-export async function openBrowserGateway({ config, chromium, store, clock = performance }) {
+export async function openBrowserGateway({ config, chromium, store, clock = performance, fetchStorageHelper = globalThis.fetch }) {
   const root = config?.root;
   if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root ||
       path.parse(root).root === root || (!chromium && (process.platform !== 'linux' || root !== PROBE.root))) throw unsafeProfile();
@@ -453,7 +533,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       args: ['--autoplay-policy=user-gesture-required']
     });
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
-    const traffic = browserTraffic(context, pages);
+    const traffic = browserTraffic(context, pages, fetchStorageHelper);
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
@@ -517,7 +597,10 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   async function makePage(kind, signal = epochController.signal) {
     const page = await browserCall(() => context.newPage(), signal);
-    const slot = { page, kind, revision: 0, pressed: false, panel: null, viewProbe: '__cangxia_view_' + randomUUID() };
+    const slot = {
+      page, kind, revision: 0, pressed: false, panel: null,
+      viewProbe: '__cangxia_view_' + randomUUID(), storageFrames: new WeakMap()
+    };
     pages.set(page, slot);
     page.on('popup', popup => { void popup.close().catch(() => {}); });
     page.on('close', () => {
@@ -525,14 +608,24 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       if (slot === login) pageRevision++;
     });
     const viewChanged = () => { if (kind === 'login') pageRevision++; };
-    page.on('frameattached', viewChanged);
-    page.on('framedetached', viewChanged);
-    page.on('framenavigated', frame => {
+    const rejectChild = () => {
       viewChanged();
+      pages.delete(page);
+      void page.close().catch(() => {});
+    };
+    page.on('frameattached', frame => {
+      if (kind === 'login' && !directLoginChild(slot, frame)) rejectChild();
+    });
+    page.on('framedetached', frame => {
+      slot.storageFrames.delete(frame);
+      viewChanged();
+    });
+    page.on('framenavigated', frame => {
       if (frame !== page.mainFrame()) {
-        if (kind === 'login' && frame.url() !== 'about:blank') void page.close().catch(() => {});
+        if (kind === 'login' && !commitLoginChild(slot, frame)) rejectChild();
         return;
       }
+      viewChanged();
       slot.revision++;
       if ((slot.pressed || !sourcePage(page.url(), kind)) && page.url() !== 'about:blank') {
         void page.close().catch(() => {});
@@ -564,8 +657,8 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   }
 
   function trustedView(slot) {
-    return !!slot && !slot.page.isClosed() && sourcePage(slot.page.url(), 'login') &&
-      slot.page.frames().every(frame => frame === slot.page.mainFrame());
+    return !!slot && pages.get(slot.page) === slot && !slot.page.isClosed() && sourcePage(slot.page.url(), 'login') &&
+      slot.page.frames().every(frame => frame === slot.page.mainFrame() || trustedLoginChild(slot, frame));
   }
 
   function viewState() {
@@ -581,6 +674,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     assertVerificationAvailable();
     if (!trustedView(login) || revision !== pageRevision) throw staleView();
     return login;
+  }
+
+  function assertMainOnlyView(revision) {
+    const slot = assertView(revision);
+    if (slot.page.frames().some(frame => frame !== slot.page.mainFrame())) throw staleView();
+    return slot;
   }
 
   async function retireLogin(slot) {
@@ -693,21 +792,21 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   function frame({ pageRevision: revision } = {}) {
     return withView(async () => {
-      const slot = assertView(revision);
+      const slot = assertMainOnlyView(revision);
       try {
         await refreshPanel(slot);
-        assertView(revision);
+        assertMainOnlyView(revision);
         if (!slot.panel) throw panelRequired();
         const { x, y, width, height } = slot.panel;
         const bytes = await slot.page.screenshot({ type: 'png', timeout: 3000, scale: 'css', clip: { x, y, width, height } });
-        assertView(revision);
+        assertMainOnlyView(revision);
         await refreshPanel(slot);
-        assertView(revision);
+        assertMainOnlyView(revision);
         if (Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 4 * 1024 * 1024) {
           return { ...viewState(), mime: 'image/png', bytes };
         }
       } catch (error) {
-        assertView(revision);
+        assertMainOnlyView(revision);
         if (error instanceof ProbeError) throw error;
       }
       throw new ProbeError('PROBE_BROWSER_FRAME', 'The verification view could not be captured.');
@@ -716,7 +815,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   function input({ pageRevision: revision, type, x, y, text, key } = {}) {
     return withView(async () => {
-      const slot = assertView(revision);
+      const slot = assertMainOnlyView(revision);
       const { mouse, keyboard } = slot.page;
       try {
         if (!slot.panel) throw panelRequired();
@@ -727,9 +826,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         if (!valid) throw invalidInput();
         const position = pointer ? { x: x + panel.x, y: y + panel.y } : {};
         const allowed = await refreshPanel(slot, { action: type, ...position });
-        assertView(revision);
+        assertMainOnlyView(revision);
         if (!allowed) throw invalidInput();
-        const run = task => mutateLogin(slot, revision, task);
+        const run = task => mutateLogin(slot, revision, () => {
+          assertMainOnlyView(revision);
+          return task();
+        });
         if (type === 'text') await run(() => keyboard.insertText(text));
         else if (type === 'key') await run(() => keyboard.press(key));
         else if (type === 'click' && !slot.pressed) await run(() => mouse.click(position.x, position.y));
@@ -739,17 +841,17 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
           if (slot.pressed === pressed) throw invalidInput();
           await run(() => mouse.move(position.x, position.y));
           const stillAllowed = await refreshPanel(slot, { action: type, ...position });
-          assertView(revision);
+          assertMainOnlyView(revision);
           if (!stillAllowed) throw invalidInput();
           slot.pressed = pressed;
           await run(() => mouse[type]());
         } else throw invalidInput();
       } catch (error) {
         if (error instanceof ProbeError) throw error;
-        assertView(revision);
+        assertMainOnlyView(revision);
         throw new ProbeError('PROBE_BROWSER_INPUT', 'The verification page could not receive input.');
       }
-      assertView(revision);
+      assertMainOnlyView(revision);
       return viewState();
     });
   }

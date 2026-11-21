@@ -16,6 +16,7 @@ import { parseSourcePage } from '../src/page-parser.mjs';
 const self = 'https://www.douyin.com/user/self';
 const collection = '/aweme/v1/web/aweme/listcollection/';
 const detail = '/aweme/v1/web/aweme/detail/';
+const storageHelper = version => 'https://lf-zt.douyin.com/obj/uc-assets/zt/@byted/x-storage-web/' + version + '/dist/latest/index.html';
 const ownId = '9357260389275234771';
 const authorId = '8765602039312834059';
 const sourceText = ` { "aweme_list": [{ "aweme_id": 8999555333221111111, "author": {"uid":${authorId}} }], "has_more": 0 } `;
@@ -53,6 +54,7 @@ class FakeContext extends EventEmitter {
   reads = [];
   input = [];
   navigations = [];
+  fulfillments = [];
   uid = ownId;
   session = 'private-fixture-session';
   panel = { id: 1, ...panelRect };
@@ -95,12 +97,18 @@ class FakeContext extends EventEmitter {
       page.navigate(url);
     };
     page.navigate = url => { href = url; page.emit('framenavigated', frame); };
-    page.childNavigate = url => {
-      const child = { page: () => page, url: () => url };
+    page.childNavigate = (url, parent = frame) => {
+      let childUrl = 'about:blank';
+      const child = { page: () => page, url: () => childUrl, parentFrame: () => parent };
+      child.navigate = next => { childUrl = next; page.emit('framenavigated', child); };
       children.push(child);
       page.emit('frameattached', child);
-      page.emit('framenavigated', child);
+      child.navigate(url);
       return child;
+    };
+    page.detachChild = child => {
+      children.splice(children.indexOf(child), 1);
+      page.emit('framedetached', child);
     };
     page.close = async () => {
       await context.beforePageClose?.(page);
@@ -145,17 +153,18 @@ class FakeContext extends EventEmitter {
     return page;
   }
 
-  async visit(frame, url, type, method = 'GET', isNavigation = type === 'document') {
+  async visit(frame, url, type, method = 'GET', isNavigation = type === 'document', redirectedFrom = null) {
     const request = {
       url: () => url, resourceType: () => type, method: () => method,
-      isNavigationRequest: () => isNavigation, frame: () => frame,
+      isNavigationRequest: () => isNavigation, redirectedFrom: () => redirectedFrom, frame: () => frame,
       sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
     };
     let permitted;
     await this.routeRequest({
       request: () => request,
       abort: async () => { permitted = false; this.emit('requestfailed', request); },
-      continue: async () => { permitted = true; this.emit('requestfinished', request); }
+      continue: async () => { permitted = true; this.emit('requestfinished', request); },
+      fulfill: async response => { this.fulfillments.push(response); permitted = true; this.emit('requestfinished', request); }
     });
     return permitted;
   }
@@ -163,7 +172,7 @@ class FakeContext extends EventEmitter {
   async close() { await Promise.all(this.pages().map(page => page.close())); this.emit('close'); }
 }
 
-async function fixture(t, { launch, defer = false } = {}) {
+async function fixture(t, { launch, defer = false, fetchStorageHelper = () => assert.fail('unexpected helper request') } = {}) {
   const sandbox = await makeSandbox(t);
   const layout = await sandbox.prepare();
   const store = openProbeStore({ file: path.join(layout.state, 'library.sqlite'), libraryId: sandbox.config.libraryId, initialize: true });
@@ -187,7 +196,7 @@ async function fixture(t, { launch, defer = false } = {}) {
     return browser;
   } };
   const open = async () => {
-    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock });
+    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock, fetchStorageHelper });
     sandbox.onCleanup(() => gateway.close());
     return gateway;
   };
@@ -568,6 +577,158 @@ test('a read-only panel inspection failure leaves the same view usable', async t
   browser.beforePanel = undefined;
   assert.equal(page.isClosed(), false);
   assert.equal((await gateway.frame(view)).pageRevision, view.pageRevision);
+});
+
+function helperResponse(url, { status = 200, type = 'text/html; charset=utf-8', location, body = '<!doctype html><script></script>' } = {}) {
+  const headers = { 'Content-Type': type };
+  if (location) headers.Location = location;
+  const response = new Response(body, { status, headers });
+  Object.defineProperty(response, 'url', { value: url });
+  return response;
+}
+
+test('only both verified direct login helpers can coexist with a main-document QR', async t => {
+  const fetched = [];
+  const { browser, gateway } = await fixture(t, { fetchStorageHelper: async (url, options) => {
+    fetched.push(url);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.credentials, 'omit');
+    return helperResponse(url);
+  } });
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  for (const version of ['4.0.5', '4.0.7']) {
+    const child = page.childNavigate('about:blank');
+    const url = storageHelper(version);
+    assert.equal(await browser.visit(child, url, 'document'), true);
+    child.navigate(url);
+    assert.equal(await browser.visit(child, url, 'xhr'), false);
+    assert.equal(await browser.visit(child, 'https://static.douyinstatic.com/helper.js', 'script'), false);
+  }
+  assert.equal(await browser.visit(page.mainFrame(), storageHelper('4.0.5'), 'document'), false);
+  assert.deepEqual(fetched, [storageHelper('4.0.5'), storageHelper('4.0.7')]);
+  assert.equal(browser.fulfillments.length, 2);
+  assert.equal((await gateway.openLogin()).pageRevision, view.pageRevision);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
+  await assert.rejects(gateway.input({ ...view, type: 'move', x: 1, y: 1 }), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(browser.lastShot, undefined);
+  assert.equal(browser.input.length, 0);
+});
+
+test('storage helpers reject unverified URLs, uncontrolled frames and non-login requests', async t => {
+  const { browser, gateway } = await fixture(t);
+  await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  const child = page.childNavigate('about:blank');
+  const url = storageHelper('4.0.7');
+  for (const invalid of [
+    storageHelper('4.0.6'), url + '?version=1', url + '#target', url.replace('https:', 'http:'),
+    url.replace('lf-zt.douyin.com', 'lf-zt.douyin.com.outside.invalid'),
+    url.replace('lf-zt.douyin.com', 'user:pass@lf-zt.douyin.com'),
+    url.replace('lf-zt.douyin.com', 'lf-zt.douyin.com:443'),
+    url.replace('@byted', 'unrelated'), url.replace('index.html', 'extra/index.html')
+  ]) assert.equal(await browser.visit(child, invalid, 'document'), false);
+
+  const blank = browser.pages().find(tab => tab.url() === 'about:blank');
+  assert.equal(await browser.visit(blank.childNavigate('about:blank'), url, 'document'), false);
+  assert.equal(await browser.visit(child, url, 'document', 'POST'), false);
+  assert.equal(await browser.visit(child, url, 'document', 'GET', true, {}), false);
+  await gateway.verifyIdentity();
+  const reader = browser.sourcePages()[0];
+  assert.notEqual(reader, page);
+  assert.equal(await browser.visit(reader.childNavigate('about:blank'), url, 'document'), false);
+
+  const next = await gateway.openLogin();
+  const active = browser.sourcePages().at(-1);
+  const parent = active.childNavigate('about:blank');
+  const nested = { page: () => active, parentFrame: () => parent, url: () => 'about:blank' };
+  assert.equal(await browser.visit(nested, url, 'document'), false);
+  const retired = once(active, 'close');
+  active.childNavigate('about:blank', parent);
+  await retired;
+  await assert.rejects(gateway.loginQr(next), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(browser.fulfillments.length, 0);
+});
+
+test('helper redirects, wrong responses and unfulfilled committed frames fail closed', async t => {
+  const url = storageHelper('4.0.7');
+  let reply;
+  const { browser, gateway } = await fixture(t, { fetchStorageHelper: async () => reply() });
+  await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  const child = page.childNavigate('about:blank');
+  for (const response of [
+    () => helperResponse(url, { status: 302, location: 'https://outside.invalid/redirect' }),
+    () => helperResponse(url, { type: 'text/javascript' }),
+    () => helperResponse(url, { location: 'https://outside.invalid/redirect' }),
+    () => helperResponse(url, { body: 'x'.repeat(64 * 1024 + 1) }),
+    () => helperResponse('https://outside.invalid/redirect'),
+    () => helperResponse(url, { status: 500 }),
+    () => { throw new Error('private redirect fixture'); }
+  ]) {
+    reply = response;
+    assert.equal(await browser.visit(child, url, 'document'), false);
+  }
+  assert.equal(browser.fulfillments.length, 0);
+  const retired = once(page, 'close');
+  child.navigate(url);
+  await retired;
+});
+
+test('pending storage helpers cannot fulfill after the direct frame or trusted document is lost', async t => {
+  for (const change of ['detach', 'fresh blank in the same frame', 'replace main document', 'close login']) {
+    await t.test(change, async t => {
+      const response = Promise.withResolvers();
+      const started = Promise.withResolvers();
+      const url = storageHelper('4.0.5');
+      const { browser, gateway } = await fixture(t, {
+        fetchStorageHelper: async () => { started.resolve(); return response.promise; }
+      });
+      await gateway.openLogin();
+      const page = browser.sourcePages()[0];
+      const child = page.childNavigate('about:blank');
+      const visit = browser.visit(child, url, 'document');
+      await started.promise;
+      if (change === 'detach') page.detachChild(child);
+      else if (change === 'fresh blank in the same frame') child.navigate('about:blank');
+      else if (change === 'replace main document') page.navigate(self + '?refresh');
+      else await page.close();
+      response.resolve(helperResponse(url));
+      assert.equal(await visit, false);
+      assert.equal(browser.fulfillments.length, 0);
+    });
+  }
+});
+
+test('a newer request in a direct child supersedes a pending helper response', async t => {
+  const previous = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const oldUrl = storageHelper('4.0.5');
+  const newUrl = storageHelper('4.0.7');
+  const { browser, gateway } = await fixture(t, { fetchStorageHelper: async url => {
+    if (url === oldUrl) { started.resolve(); return previous.promise; }
+    return helperResponse(url);
+  } });
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const child = browser.sourcePages()[0].childNavigate('about:blank');
+  const oldVisit = browser.visit(child, oldUrl, 'document');
+  await started.promise;
+  assert.equal(await browser.visit(child, newUrl, 'document'), true);
+  child.navigate(newUrl);
+  previous.resolve(helperResponse(oldUrl));
+  assert.equal(await oldVisit, false);
+  assert.equal(browser.fulfillments.length, 1);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+
+  const retired = once(browser.sourcePages()[0], 'close');
+  child.navigate('about:blank');
+  child.navigate(newUrl);
+  await retired;
+  await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
 });
 
 test('foreign child document requests and a committed redirected frame cannot be exposed', async t => {
