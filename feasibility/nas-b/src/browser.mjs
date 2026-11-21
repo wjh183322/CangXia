@@ -345,7 +345,8 @@ async function deliverPassportQr(route, pages, slot, frame, url, observation, fe
   const { page, qrAuthority } = slot;
   if (!qrAuthority) return false;
   const current = () => pages.get(page) === slot && slot.qrAuthority === qrAuthority &&
-    frame === page.mainFrame() && trustedLoginView(slot) && qrAuthority.assert() === undefined;
+    slot.assetAuthority?.bootstrap !== 'reloading' && frame === page.mainFrame() &&
+    trustedLoginView(slot) && qrAuthority.assert() === undefined;
   try {
     if (!current()) return false;
     const observed = await browserCall(() => route.request().allHeaders());
@@ -401,10 +402,11 @@ function loginResourceType(request, url) {
 
 async function deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset) {
   const { page, assetAuthority, storageFrames } = slot;
-  if (!assetAuthority || assetAuthority.initial) return false;
+  if (!assetAuthority || assetAuthority.bootstrap === 'initial' || assetAuthority.bootstrap === 'reloading') return false;
   let delivered = false;
   const current = () => pages.get(page) === slot && slot.assetAuthority === assetAuthority &&
-    slot.storageFrames === storageFrames && frame === page.mainFrame() && trustedLoginView(slot) &&
+    assetAuthority.bootstrap !== 'reloading' && slot.storageFrames === storageFrames &&
+    frame === page.mainFrame() && trustedLoginView(slot) &&
     assetAuthority.assert() === undefined;
   try {
     if (!assetAuthority.remaining || !current()) return false;
@@ -444,21 +446,29 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
   const blocked = new WeakSet();
   context.on('request', request => {
     if (!request.isNavigationRequest()) return;
+    let slot;
     try {
       const frame = request.frame();
       const page = frame.page();
-      const slot = pages.get(page);
+      if (frame !== page.mainFrame()) return;
+      slot = pages.get(page);
       const authority = slot?.assetAuthority;
-      if (!authority || frame !== page.mainFrame()) return;
+      if (!authority) return;
       const url = request.url(), from = request.redirectedFrom();
-      // Only the actual initial goto and its approved redirect chain may carry an unused grant.
-      if (authority.initial && page.url() === 'about:blank' && request.method() === 'GET' &&
+      if (authority.bootstrap === 'initial' && page.url() === 'about:blank' && request.method() === 'GET' &&
           sourcePage(url, 'login') &&
           (authority.initialRequest ? from === authority.initialRequest : !from && url === home)) {
         authority.initialRequest = request;
+      } else if (authority.open && !authority.requestSignal?.aborted && authority.bootstrap === 'eligible' && !from &&
+          request.method() === 'GET' && url === home && page.url() === home && authority.assert() === undefined) {
+        // The normal bootstrap can reload the same owned page once before the login action.
+        authority.bootstrap = 'reloading';
+        authority.reloadFrom = slot.storageFrames;
+        authority.initialRequest = request;
+        slot.qrAuthority = undefined;
       } else slot.assetAuthority = undefined;
     } catch {
-      // Requests without an owned frame cannot start this grant.
+      if (slot) slot.assetAuthority = undefined;
     }
   });
   context.on('requestfailed', request => {
@@ -488,8 +498,14 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
         const mainFrame = frame === page.mainFrame();
         allowed = !!slot && approvedBrowserTraffic(request, slot, mainFrame);
         if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) {
-          if (allowed) clearLoginDocument(slot);
-          else {
+          if (allowed) {
+            clearLoginDocument(slot);
+            const authority = slot.assetAuthority;
+            if (authority?.bootstrap === 'reloading' && authority.initialRequest === request) {
+              authority.reloadDocument = slot.storageFrames;
+              slot.panel = null;
+            }
+          } else {
             slot.qrAuthority = undefined;
             slot.assetAuthority = undefined;
           }
@@ -840,7 +856,7 @@ export async function openBrowserGateway({
       page, kind, revision: 0, pressed: false, panel: null,
       viewProbe: '__cangxia_view_' + randomUUID(), storageFrames: new WeakMap(), assetAuthority
     };
-    if (assetAuthority) assetAuthority.initial = true;
+    if (assetAuthority) assetAuthority.bootstrap = 'initial';
     pages.set(page, slot);
     page.on('popup', popup => { void popup.close().catch(() => {}); });
     page.on('close', () => {
@@ -868,9 +884,11 @@ export async function openBrowserGateway({
       viewChanged();
       slot.revision++;
       const authority = slot.assetAuthority;
-      if (authority?.initial && page.url() !== 'about:blank') {
-        if (authority.initialRequest?.url() === page.url()) {
-          authority.initial = false;
+      if ((authority?.bootstrap === 'initial' || authority?.bootstrap === 'reloading') && page.url() !== 'about:blank') {
+        if (authority.initialRequest?.url() === page.url() &&
+            (authority.bootstrap === 'initial' || authority.open && !authority.requestSignal?.aborted &&
+              authority.reloadDocument === slot.storageFrames)) {
+          authority.bootstrap = authority.bootstrap === 'initial' && page.url() === home ? 'eligible' : 'done';
           authority.initialRequest = undefined;
         } else slot.assetAuthority = undefined;
       }
@@ -992,30 +1010,64 @@ export async function openBrowserGateway({
   }
 
   async function waitForLoginPanel(slot, requestSignal, assertOpening) {
-    const { page, viewProbe, qrAuthority, storageFrames } = slot;
+    const { page, viewProbe, qrAuthority, assetAuthority } = slot;
+    let { storageFrames } = slot;
     const signal = requestSignal ? AbortSignal.any([requestSignal, epochController.signal]) : epochController.signal;
-    const assertCurrent = () => {
-      assertOpening();
-      assertVerificationAvailable();
-      if (slot !== login || !trustedView(slot) || slot.qrAuthority !== qrAuthority ||
-          slot.storageFrames !== storageFrames) throw staleView();
-    };
     const started = clock.now();
     const deadline = started + loginReadinessMs;
     const remaining = () => Math.ceil(deadline - clock.now());
     let dispatched = false;
+    const ready = () => {
+      assertOpening();
+      assertVerificationAvailable();
+      if (slot !== login || pages.get(page) !== slot || page.isClosed()) throw staleView();
+      if (assetAuthority?.open && slot.assetAuthority === assetAuthority) {
+        if (assetAuthority.bootstrap === 'reloading') {
+          if (dispatched || !sourcePage(page.url(), 'login')) throw staleView();
+          return false;
+        }
+        if (!dispatched && slot.storageFrames !== storageFrames &&
+            assetAuthority.reloadDocument === slot.storageFrames && !slot.qrAuthority && trustedView(slot)) {
+          storageFrames = slot.storageFrames;
+          slot.qrAuthority = qrAuthority;
+        }
+      }
+      if (!trustedView(slot) || slot.qrAuthority !== qrAuthority || slot.storageFrames !== storageFrames) throw staleView();
+      return true;
+    };
+    const pause = async () => {
+      const wait = Math.min(loginObservationMs, remaining());
+      if (wait <= 0) return;
+      let timer;
+      try { await abortable(new Promise(resolve => { timer = schedule(resolve, wait); }), signal); }
+      finally { unschedule(timer); }
+    };
     loginStage.loginEntry = 'not-checked';
 
-    while (remaining() > 0) {
-      assertCurrent();
+    for (; remaining() > 0; await pause()) {
+      if (!ready()) continue;
       const revision = pageRevision;
-      const result = await browserCall(() => {
-        assertCurrent();
-        return page.evaluate(panelScript, { viewProbe, action: 'probe-open' });
-      }, signal, Math.min(driverTimeout, remaining()));
-      assertCurrent();
+      let result, sampledDocument;
+      try {
+        result = await browserCall(() => {
+          if (!ready()) return null;
+          if (assetAuthority?.bootstrap === 'eligible') sampledDocument = slot.storageFrames;
+          return page.evaluate(panelScript, { viewProbe, action: 'probe-open' });
+        }, signal, Math.min(driverTimeout, remaining()));
+      } catch (error) {
+        const trackedReload = sampledDocument && !dispatched && assetAuthority?.open &&
+          slot.assetAuthority === assetAuthority && assetAuthority.reloadFrom === sampledDocument &&
+          (assetAuthority.bootstrap === 'reloading' ||
+           assetAuthority.bootstrap === 'done' && assetAuthority.reloadDocument === slot.storageFrames);
+        // Chromium can retire the sampled execution context before returning a passive read.
+        if (!trackedReload || signal.aborted || remaining() <= 0 || error instanceof ProbeError ||
+            !/^(?:page[.]evaluate: )?Execution context was destroyed(?:,|[.]|$)/.test(error?.message ?? '')) throw error;
+        ready();
+        continue;
+      }
+      if (!ready()) continue;
       const appliedRevision = await applyPanel(slot, revision === pageRevision ? result : null);
-      assertCurrent();
+      if (!ready()) continue;
       if (appliedRevision !== pageRevision) await applyPanel(slot, null);
       if (revision === pageRevision && result?.loginEntry === 'not-present' && !dispatched) {
         loginStage.loginEntry = 'not-present';
@@ -1029,22 +1081,18 @@ export async function openBrowserGateway({
         dispatched = true;
         const action = await mutateLogin(slot, pageRevision, () => page.evaluate(panelScript, { viewProbe, action: 'open' }), {
           beforeDispatch() {
-            assertCurrent();
+            if (!ready()) throw staleView();
             if (remaining() <= 0) throw timedOut();
+            if (assetAuthority?.bootstrap === 'eligible') assetAuthority.bootstrap = 'done';
           },
           signal, timeout: Math.min(driverTimeout, remaining())
         });
-        assertCurrent();
+        if (!ready()) throw staleView();
         if (action?.loginEntry === 'clicked') loginStage.loginEntry = 'clicked';
         else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
       }
-      const wait = Math.min(loginObservationMs, remaining());
-      if (wait <= 0) break;
-      let timer;
-      try { await abortable(new Promise(resolve => { timer = schedule(resolve, wait); }), signal); }
-      finally { unschedule(timer); }
     }
-    assertCurrent();
+    if (!ready()) throw timedOut();
   }
 
   function openLogin({ signal, guard, assertQrRequest } = {}) {
@@ -1057,7 +1105,8 @@ export async function openBrowserGateway({
       assertVerificationAvailable();
       loginStage.loginResources = { loaded: 0, refused: 0 };
       const assetAuthority = typeof assertQrRequest === 'function' ?
-        { assert: assertQrRequest, remaining: maxLoginAssetRequests, stats: loginStage.loginResources } : undefined;
+        { assert: assertQrRequest, remaining: maxLoginAssetRequests, stats: loginStage.loginResources,
+          open: true, requestSignal: signal } : undefined;
       try {
         if (!trustedView(login)) {
           invalidate();
@@ -1079,6 +1128,8 @@ export async function openBrowserGateway({
       } catch (error) {
         if (error instanceof ProbeError) throw error;
         throw panelRequired();
+      } finally {
+        if (assetAuthority) assetAuthority.open = false;
       }
     });
   }

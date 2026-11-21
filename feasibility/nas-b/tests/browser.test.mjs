@@ -1209,6 +1209,140 @@ test('a linked initial login redirect loads assets but a later real reload canno
   assert.equal(await browser.visit(main, loginAsset, 'script'), true);
 });
 
+test('one same-URL bootstrap reload during passive opening starts fresh public resource loading', async t => {
+  const firstStarted = Promise.withResolvers();
+  const firstResponse = Promise.withResolvers();
+  const earlierAsset = loginAsset + '?fixture=first-document';
+  const { browser, gateway } = await fixture(t, {
+    fetchLoginAsset: async url => {
+      if (url === earlierAsset) {
+        firstStarted.resolve();
+        return firstResponse.promise;
+      }
+      return guestAssetResponse(url);
+    }
+  });
+  browser.panel = null;
+  browser.entryVisible = false;
+  let oldRequest, duringReload, freshRequest;
+  browser.onGoto = async page => {
+    oldRequest = browser.visit(page.mainFrame(), earlierAsset, 'script');
+    await firstStarted.promise;
+  };
+  let reloaded = false;
+  browser.beforePanel = async (action, page) => {
+    if (action !== 'probe-open' || reloaded) return;
+    reloaded = true;
+    const main = page.mainFrame();
+    assert.equal(await browser.visit(main, self, 'document'), true);
+    duringReload = await browser.visit(main, loginAsset, 'script');
+    // Return from the old inspection before the reload commits.
+    browser.clock.onPaceWait = () => {
+      browser.clock.onPaceWait = undefined;
+      page.navigate(self);
+      freshRequest = browser.visit(main, loginAsset, 'script');
+      firstResponse.resolve(guestAssetResponse(earlierAsset));
+      page.navigate(self + '?same-document');
+      browser.panel = { id: 1, ...panelRect };
+    };
+  };
+  const result = await gateway.openLogin({ assertQrRequest() {} });
+  assert.ok(reloaded);
+  assert.equal(duringReload, false);
+  assert.equal(await freshRequest, true);
+  assert.equal(await oldRequest, false);
+  assert.equal(result.width, panelRect.width);
+  assert.equal(browser.fulfillments.length, 1);
+});
+
+test('a passive execution-context error is resampled only across the tracked bootstrap reload', async t => {
+  const contextError = 'page.evaluate: Execution context was destroyed, most likely because of a navigation';
+  for (const transition of ['pending', 'committed', 'none', 'other-error']) {
+    await t.test(transition, async t => {
+      const { browser, gateway } = await fixture(t);
+      browser.panel = null;
+      browser.entryVisible = false;
+      let observations = 0;
+      browser.beforePanel = async (action, page) => {
+        assert.equal(action, 'probe-open');
+        if (++observations !== 1) return;
+        if (transition !== 'none') {
+          assert.equal(await browser.visit(page.mainFrame(), self, 'document'), true);
+          const commit = () => {
+            browser.clock.onPaceWait = undefined;
+            page.navigate(self);
+            browser.panel = { id: 1, ...panelRect };
+          };
+          if (transition === 'pending') browser.clock.onPaceWait = commit;
+          else commit();
+        }
+        throw new Error(transition === 'other-error' ? 'fixture evaluator failed' : contextError);
+      };
+      const opening = gateway.openLogin({ assertQrRequest() {} });
+      if (transition === 'none' || transition === 'other-error') {
+        await assert.rejects(opening, { code: 'PROBE_VERIFICATION_PANEL_REQUIRED' });
+        assert.equal(observations, 1);
+      } else {
+        assert.equal((await opening).width, panelRect.width);
+        assert.equal(observations, 2);
+      }
+    });
+  }
+});
+
+test('unrelated, third, inactive and post-opening main reloads cannot obtain the bootstrap exception', async t => {
+  for (const change of ['unrelated', 'third', 'inactive', 'canceled', 'post-opening']) {
+    await t.test(change, async t => {
+      let live = true, loads = 0, second, final;
+      const request = new AbortController();
+      const { browser, gateway } = await fixture(t, { fetchLoginAsset: async url => {
+        loads++;
+        return guestAssetResponse(url);
+      } });
+      const authorize = () => { if (!live) throw new ProbeError('STALE_LEASE'); };
+      const navigateAndRequest = async (page, url) => {
+        const main = page.mainFrame();
+        assert.equal(await browser.visit(main, url, 'document'), true);
+        page.navigate(url);
+        return browser.visit(main, loginAsset, 'script');
+      };
+      if (change !== 'post-opening') browser.onGoto = async page => {
+        if (change === 'third') second = await navigateAndRequest(page, self);
+        if (change === 'inactive') live = false;
+        if (change === 'canceled') request.abort(new ProbeError('STALE_LEASE'));
+        final = await navigateAndRequest(page, change === 'unrelated' ? self + '?different' : self);
+      };
+      const opening = gateway.openLogin({ assertQrRequest: authorize, signal: request.signal });
+      if (change === 'canceled') await assert.rejects(opening, { code: 'STALE_LEASE' });
+      else await opening;
+      if (change === 'post-opening') final = await navigateAndRequest(browser.sourcePages()[0], self);
+      if (change === 'third') assert.equal(second, true);
+      assert.equal(final, false);
+      assert.equal(loads, change === 'third' ? 1 : 0);
+    });
+  }
+});
+
+test('the same-URL bootstrap reload cannot obtain a grant after the opening click was dispatched', async t => {
+  let loads = 0, actionObserved = false;
+  const { browser, gateway } = await fixture(t, { fetchLoginAsset: async url => {
+    loads++;
+    return guestAssetResponse(url);
+  } });
+  browser.panel = null;
+  browser.beforePanel = async (action, page) => {
+    if (action !== 'open') return;
+    actionObserved = true;
+    const main = page.mainFrame();
+    assert.equal(await browser.visit(main, self, 'document'), true);
+    page.navigate(self);
+    assert.equal(await browser.visit(main, loginAsset, 'script'), false);
+  };
+  await assert.rejects(gateway.openLogin({ assertQrRequest() {} }), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(actionObserved, true);
+  assert.equal(loads, 0);
+});
+
 test('an unrelated request cannot extend the initial login redirect grant', async t => {
   let loads = 0;
   const { browser, gateway } = await fixture(t, {
