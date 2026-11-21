@@ -391,8 +391,11 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
         const page = frame.page();
         const slot = pages.get(page);
         const mainFrame = frame === page.mainFrame();
-        if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) clearLoginDocument(slot);
         allowed = !!slot && approvedBrowserTraffic(request, slot, mainFrame);
+        if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) {
+          if (allowed) clearLoginDocument(slot);
+          else slot.qrAuthority = undefined;
+        }
         const url = request.url();
         if (!allowed && slot?.kind === 'login' && frame === page.mainFrame() && sourcePage(page.url(), 'login')) {
           if (isPassportQrRequest(request, url)) {
