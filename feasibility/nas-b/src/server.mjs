@@ -375,15 +375,30 @@ export async function startProbe(options) {
               const opening = { generation: lease.generation };
               session.view = opening;
               authEpoch = undefined;
-              const guardOpening = () => {
-                guard();
+              const assertQrRequest = () => {
+                if (session.expires <= Date.now()) fail('PROBE_UNAUTHENTICATED');
+                const current = session.grant;
+                if (current?.generation !== lease.generation || current.bootId !== lease.bootId ||
+                    current.proof !== lease.proof) fail('STALE_LEASE');
+                leases.assertLease(current);
                 if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
               };
-              const view = await (options.fixtureView ?? gateway).openLogin({ signal, guard: guardOpening });
-              guardOpening();
-              const descriptor = pick(view, ['pageRevision', 'width', 'height']);
-              session.view = { ...opening, ...descriptor };
-              return json({ ...descriptor, localVerification: !options.fixtureView });
+              const guardOpening = () => {
+                signal.throwIfAborted();
+                assertQrRequest();
+              };
+              try {
+                const view = await (options.fixtureView ?? gateway).openLogin({
+                  signal, guard: guardOpening, assertQrRequest
+                });
+                guardOpening();
+                const descriptor = pick(view, ['pageRevision', 'width', 'height']);
+                Object.assign(opening, descriptor);
+                return json({ ...descriptor, localVerification: !options.fixtureView });
+              } catch (error) {
+                if (session.view === opening) session.view = null;
+                throw error;
+              }
             }
             if (id === 'qr' && method === 'GET') {
               const view = session.view;

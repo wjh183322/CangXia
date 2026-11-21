@@ -14,12 +14,22 @@ const origin = 'https://www.douyin.com';
 const home = `${origin}/user/self`;
 const selfRoute = '/aweme/v1/web/user/profile/self/';
 const detailRoute = '/aweme/v1/web/aweme/detail/';
+const passportQr = origin + '/passport/web/get_qrcode';
 const collectionRoute = '/aweme/v1/web/aweme/listcollection/';
 const viewport = Object.freeze({ width: 1000, height: 760 });
 const requestTimeout = 12000;
 const driverTimeout = 2500;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
+const maxPassportQrBytes = 256 * 1024;
+const passportRequestHeaders = [
+  'accept', 'accept-language', 'cookie', 'origin', 'referer', 'user-agent',
+  'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
+];
+const transportResponseHeaders = [
+  'connection', 'content-encoding', 'content-length', 'keep-alive', 'proxy-authenticate',
+  'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'
+];
 const storageHelperOrigin = 'https://lf-zt.douyin.com';
 const storageHelperPrefix = '/obj/uc-assets/zt/@byted/x-storage-web/';
 const storageHelperVersions = new Set(['4.0.5', '4.0.7']);
@@ -183,12 +193,17 @@ function directLoginChild(slot, frame) {
     frame.parentFrame?.() === slot.page.mainFrame();
 }
 
+function clearLoginDocument(slot) {
+  slot.qrAuthority = undefined;
+  slot.storageFrames = new WeakMap();
+}
+
 function trustedLoginChild(slot, frame) {
   if (!directLoginChild(slot, frame)) return false;
   const url = frame.url();
   const authorization = slot.storageFrames.get(frame);
   return url === 'about:blank' ||
-    (authorization?.phase === 'committed' && authorization.revision === slot.revision && authorization.url === url);
+    (authorization?.phase === 'committed' && authorization.url === url);
 }
 
 function commitLoginChild(slot, frame) {
@@ -205,36 +220,45 @@ function commitLoginChild(slot, frame) {
   return true;
 }
 
-async function readStorageHelper(url, fetchStorageHelper) {
-  // This is a public asset. Never inherit the browser's cookies or follow a redirect.
-  const response = await fetchStorageHelper(url, {
-    method: 'GET', credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
-  });
+function isDirectResponse(response, url, contentType) {
+  return response.status === 200 && !response.redirected && response.url === url &&
+    !response.headers.has('location') &&
+    response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === contentType;
+}
+
+async function boundedResponseBody(response, limit, accepted) {
   const reader = response.body?.getReader();
   if (!reader) return null;
   try {
-    if (response.status !== 200 || response.redirected || response.url !== url ||
-        response.headers.has('location') ||
-        response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'text/html') return null;
+    if (!accepted) return null;
     const chunks = [];
     let length = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.byteLength;
-      if (length > maxStorageHelperBytes) return null;
+      if (length > limit) return null;
       chunks.push(value);
     }
-    if (!length) return null;
-    const headers = { 'content-type': 'text/html; charset=utf-8' };
-    for (const name of ['content-security-policy', 'x-frame-options', 'cross-origin-resource-policy']) {
-      if (response.headers.has(name)) headers[name] = response.headers.get(name);
-    }
-    return { status: 200, headers, body: Buffer.concat(chunks, length) };
+    return length ? Buffer.concat(chunks, length) : null;
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+}
+
+async function readStorageHelper(url, fetchStorageHelper) {
+  // This is a public asset. Never inherit the browser's cookies or follow a redirect.
+  const response = await fetchStorageHelper(url, {
+    method: 'GET', credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+  });
+  const body = await boundedResponseBody(response, maxStorageHelperBytes, isDirectResponse(response, url, 'text/html'));
+  if (!body) return null;
+  const headers = { 'content-type': 'text/html; charset=utf-8' };
+  for (const name of ['content-security-policy', 'x-frame-options', 'cross-origin-resource-policy']) {
+    if (response.headers.has(name)) headers[name] = response.headers.get(name);
+  }
+  return { status: 200, headers, body };
 }
 
 function readParams(value, allowed) {
@@ -262,6 +286,67 @@ function approvedRead(route, options) {
   }
 }
 
+function trustedLoginView(slot) {
+  return !slot.page.isClosed() && sourcePage(slot.page.url(), 'login') &&
+    slot.page.frames().every(frame => frame === slot.page.mainFrame() || trustedLoginChild(slot, frame));
+}
+
+function isPassportQrRequest(request, url) {
+  const endpoint = url.split('?', 1)[0];
+  return (endpoint === passportQr || endpoint === passportQr + '/') && !url.includes('#') &&
+    request.method() === 'GET' && !request.isNavigationRequest() && !request.redirectedFrom() &&
+    ['fetch', 'xhr'].includes(request.resourceType());
+}
+
+function forwardPassportHeaders(observed) {
+  const headers = new Headers();
+  for (const name of passportRequestHeaders) {
+    const value = observed[name];
+    if (typeof value !== 'string' || value.length > 16384 || /[\x00-\x1f\x7f]/.test(value)) continue;
+    if (name === 'origin' && value !== origin || name === 'referer' && !sourcePage(value, 'login')) continue;
+    headers.set(name, value);
+  }
+  return headers;
+}
+
+function passportFulfillHeaders(source) {
+  const omitted = new Set(transportResponseHeaders);
+  for (const name of (source.get('connection') ?? '').split(',')) omitted.add(name.trim().toLowerCase());
+  const headers = Object.fromEntries([...source].filter(([name]) => name !== 'set-cookie' && !omitted.has(name)));
+  const cookies = source.getSetCookie();
+  // Playwright's Chromium fulfill path splits this value into separate Set-Cookie headers.
+  if (cookies.length && !omitted.has('set-cookie')) headers['set-cookie'] = cookies.join('\n');
+  return headers;
+}
+
+async function deliverPassportQr(route, pages, slot, frame, url, observation, fetchPassportQr) {
+  const { page, qrAuthority } = slot;
+  if (!qrAuthority) return false;
+  const current = () => pages.get(page) === slot && slot.qrAuthority === qrAuthority &&
+    frame === page.mainFrame() && trustedLoginView(slot) && qrAuthority.assert() === undefined;
+  try {
+    if (!current()) return false;
+    const observed = await browserCall(() => route.request().allHeaders());
+    const headers = forwardPassportHeaders(observed);
+    if (!current()) return false;
+    observation.state = 'requested';
+    // Forward the authorized browser's exact request without using a shared HTTP cookie jar.
+    const response = await fetchPassportQr(url, {
+      method: 'GET', headers, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+    });
+    const accepted = isDirectResponse(response, url, 'application/json') && !response.headers.has('refresh');
+    const body = await boundedResponseBody(response, maxPassportQrBytes, accepted);
+    if (!body || !current()) return false;
+    const responseHeaders = passportFulfillHeaders(response.headers);
+    if (!responseHeaders['content-type']) return false;
+    await route.fulfill({ status: 200, headers: responseHeaders, body });
+    observation.state = 'delivered';
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function observedHelperVersion(url) {
   const target = webTarget(url);
   if (target?.origin !== storageHelperOrigin || !target.pathname.startsWith(storageHelperPrefix)) return;
@@ -278,7 +363,7 @@ function recordBlockedPassport(loginStage, url, method) {
   if (reportedPassportNames.has(name)) loginStage.passportRoutes.set(method + '/' + name, { method, name });
 }
 
-function browserTraffic(context, pages, fetchStorageHelper, loginStage) {
+function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr) {
   const totals = { completedRequests: 0, sentBytes: 0, receivedBytes: 0, blockedRequests: 0, failedRequests: 0, unknownSizes: 0 };
   const blocked = new WeakSet();
   context.on('requestfailed', request => {
@@ -305,10 +390,18 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage) {
         const frame = request.frame();
         const page = frame.page();
         const slot = pages.get(page);
-        allowed = !!slot && approvedBrowserTraffic(request, slot, frame === page.mainFrame());
+        const mainFrame = frame === page.mainFrame();
+        if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) clearLoginDocument(slot);
+        allowed = !!slot && approvedBrowserTraffic(request, slot, mainFrame);
         const url = request.url();
         if (!allowed && slot?.kind === 'login' && frame === page.mainFrame() && sourcePage(page.url(), 'login')) {
-          recordBlockedPassport(loginStage, url, request.method());
+          if (isPassportQrRequest(request, url)) {
+            const qrRequest = { state: 'refused' };
+            loginStage.qrRequest = qrRequest;
+            if (await deliverPassportQr(route, pages, slot, frame, url, qrRequest, fetchPassportQr)) return;
+            qrRequest.state = 'refused';
+            if (loginStage.qrRequest === qrRequest) recordBlockedPassport(loginStage, url, request.method());
+          } else recordBlockedPassport(loginStage, url, request.method());
         }
         if (slot && request.isNavigationRequest() && directLoginChild(slot, frame)) {
           slot.storageFrames.delete(frame);
@@ -540,7 +633,9 @@ function queue() {
   };
 }
 
-export async function openBrowserGateway({ config, chromium, store, clock = performance, fetchStorageHelper = globalThis.fetch }) {
+export async function openBrowserGateway({
+  config, chromium, store, clock = performance, fetchStorageHelper = globalThis.fetch, fetchPassportQr = globalThis.fetch
+}) {
   const root = config?.root;
   if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root ||
       path.parse(root).root === root || (!chromium && (process.platform !== 'linux' || root !== PROBE.root))) throw unsafeProfile();
@@ -551,7 +646,8 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   const pages = new Map();
   let observeTraffic;
   const loginStage = {
-    helper: { state: 'not-requested' }, blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
+    helper: { state: 'not-requested' }, qrRequest: { state: 'not-requested' },
+    blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
   };
   let lastQr = 'not-requested';
   try {
@@ -568,7 +664,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       args: ['--autoplay-policy=user-gesture-required']
     });
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
-    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage);
+    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr);
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
@@ -662,8 +758,9 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       }
       viewChanged();
       slot.revision++;
-      if ((slot.pressed || !sourcePage(page.url(), kind)) && page.url() !== 'about:blank') {
-        void page.close().catch(() => {});
+      if (slot.pressed || !sourcePage(page.url(), kind)) {
+        if (kind === 'login') clearLoginDocument(slot);
+        if (page.url() !== 'about:blank') void page.close().catch(() => {});
       }
     });
     try {
@@ -692,8 +789,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   }
 
   function trustedView(slot) {
-    return !!slot && pages.get(slot.page) === slot && !slot.page.isClosed() && sourcePage(slot.page.url(), 'login') &&
-      slot.page.frames().every(frame => frame === slot.page.mainFrame() || trustedLoginChild(slot, frame));
+    return !!slot && pages.get(slot.page) === slot && trustedLoginView(slot);
   }
 
   function viewState() {
@@ -772,7 +868,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     return result?.allowed === true;
   }
 
-  function openLogin({ signal, guard } = {}) {
+  function openLogin({ signal, guard, assertQrRequest } = {}) {
     const assertOpening = () => {
       signal?.throwIfAborted();
       guard?.();
@@ -791,7 +887,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
           login = await makePage('login');
           pageRevision++;
         } else if (login.panel) await refreshPanel(login);
-        if (login && !login.panel) await refreshPanel(login, { action: 'open' }, assertOpening);
+        if (login) {
+          loginStage.qrRequest = { state: 'not-requested' };
+          login.qrAuthority = typeof assertQrRequest === 'function' ?
+            { assert: assertQrRequest } : undefined;
+          if (!login.panel) await refreshPanel(login, { action: 'open' }, assertOpening);
+        }
         return viewState();
       } catch (error) {
         if (error instanceof ProbeError) throw error;
@@ -1130,6 +1231,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     }
     return {
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
+      qrRequest: loginStage.qrRequest.state,
       helper: { ...loginStage.helper },
       blockedPassport: {
         ...loginStage.blockedPassport, routes: [...loginStage.passportRoutes.values()].map(route => ({ ...route }))

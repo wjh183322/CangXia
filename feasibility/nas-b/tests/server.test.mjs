@@ -123,6 +123,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     epochs = [],
     qrCaptures = 0,
     onQrCapture;
+  const openings = [];
   const qrPng = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAATElEQVR4nO3NAQkAAAwDoPUvvcU4HC1geiRisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFou/xQMh7wsJH5s1mQAAAABJRU5ErkJggg==',
     'base64'
@@ -139,9 +140,11 @@ test('HTTPS requires authentication and current ownership before library or veri
       return { main: 'trusted', frames: 'main-only', panelDetected: false, qr: 'unavailable',
         helper: { state: 'not-requested' }, blockedPassport: { GET: 0, POST: 0, routes: [] } };
     },
-    async openLogin({ signal, guard }) {
+    async openLogin({ signal, guard, assertQrRequest }) {
       assert.ok(signal instanceof AbortSignal);
       guard();
+      assert.doesNotThrow(assertQrRequest);
+      openings.push({ signal, assertQrRequest });
       return { pageRevision: 7, width: 120, height: 80 };
     },
     async loginQr({ pageRevision }) {
@@ -239,6 +242,15 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
   const opened = await request('identity/open', {}, a.cookie);
   assert.equal(opened.body.localVerification, true);
+  const firstOpening = openings.at(-1);
+  assert.doesNotThrow(firstOpening.assertQrRequest);
+  assert.equal((await request('session/renew', {}, a.cookie)).status, 200);
+  assert.equal(firstOpening.signal.aborted, true);
+  assert.doesNotThrow(firstOpening.assertQrRequest);
+  assert.equal((await request('identity/open', {}, a.cookie)).status, 200);
+  assert.throws(firstOpening.assertQrRequest, { code: 'PROBE_VIEW_REQUIRED' });
+  const secondOpening = openings.at(-1);
+  assert.doesNotThrow(secondOpening.assertQrRequest);
   assert.equal((await request('identity/qr?revision=7', null, a.cookie, { origin: 'https://other.invalid' })).status, 403);
   assert.equal((await request('identity/qr?revision=6', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
   assert.equal((await request('identity/qr?revision=07', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
@@ -267,6 +279,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     uid: '123',
     nickname: 'fixture'
   });
+  assert.throws(secondOpening.assertQrRequest, { code: 'PROBE_VIEW_REQUIRED' });
   finishCapture();
   assert.equal((await staleCapture).body.code, 'PROBE_VIEW_REQUIRED');
   assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
@@ -313,11 +326,13 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.equal((await client.lookup('release')).operationId, lostId);
   assert.equal((await client.lookup('release')).released, true);
   assert.equal((await request('identity/open', {}, a.cookie)).status, 200);
+  const releasedOpening = openings.at(-1);
   const leaseCaptureReady = new Promise(resolve => { captureStarted = resolve; });
   const leaseCapture = assert.rejects(request('identity/qr?revision=7', null, a.cookie), { code: 'ECONNRESET' });
   await leaseCaptureReady;
   await client.send('session/release', {});
   assert.notEqual(client.last('release'), lostId);
+  assert.throws(releasedOpening.assertQrRequest, { code: 'STALE_LEASE' });
   finishCapture();
   await leaseCapture;
   await client.send('session/acquire', {});

@@ -16,6 +16,7 @@ import { parseSourcePage } from '../src/page-parser.mjs';
 const self = 'https://www.douyin.com/user/self';
 const collection = '/aweme/v1/web/aweme/listcollection/';
 const detail = '/aweme/v1/web/aweme/detail/';
+const passportQr = 'https://www.douyin.com/passport/web/get_qrcode';
 const storageHelper = version => 'https://lf-zt.douyin.com/obj/uc-assets/zt/@byted/x-storage-web/' + version + '/dist/latest/index.html';
 const ownId = '9357260389275234771';
 const authorId = '8765602039312834059';
@@ -157,6 +158,7 @@ class FakeContext extends EventEmitter {
     const request = {
       url: () => url, resourceType: () => type, method: () => method,
       isNavigationRequest: () => isNavigation, redirectedFrom: () => redirectedFrom, frame: () => frame,
+      allHeaders: async () => this.requestHeaders ?? {},
       sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
     };
     let permitted;
@@ -177,7 +179,11 @@ class FakeContext extends EventEmitter {
   async close() { await Promise.all(this.pages().map(page => page.close())); this.emit('close'); }
 }
 
-async function fixture(t, { launch, defer = false, fetchStorageHelper = () => assert.fail('unexpected helper request') } = {}) {
+async function fixture(t, {
+  launch, defer = false,
+  fetchStorageHelper = () => assert.fail('unexpected helper request'),
+  fetchPassportQr = () => assert.fail('unexpected provider QR request')
+} = {}) {
   const sandbox = await makeSandbox(t);
   const layout = await sandbox.prepare();
   const store = openProbeStore({ file: path.join(layout.state, 'library.sqlite'), libraryId: sandbox.config.libraryId, initialize: true });
@@ -201,7 +207,7 @@ async function fixture(t, { launch, defer = false, fetchStorageHelper = () => as
     return browser;
   } };
   const open = async () => {
-    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock, fetchStorageHelper });
+    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock, fetchStorageHelper, fetchPassportQr });
     sandbox.onCleanup(() => gateway.close());
     return gateway;
   };
@@ -706,7 +712,7 @@ test('login diagnostics report only bounded public stages and blocked operation 
   assert.equal(await browser.visit(next, storageHelper('4.0.8') + '?token=never-export', 'document'), false);
   const stage = gateway.reportStage();
   assert.deepEqual(stage, {
-    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available',
+    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused',
     helper: { state: 'new-version', version: '4.0.8' },
     blockedPassport: { GET: 2, POST: 1, routes: [
       { method: 'GET', name: 'get_qrcode' },
@@ -878,6 +884,157 @@ test('foreign child document requests and a committed redirected frame cannot be
   const refreshed = await gateway.openLogin();
   assert.notEqual(refreshed.pageRevision, view.pageRevision);
   assert.equal(browser.input.length, 0);
+});
+
+const qrFixtureCookies = [
+  'fixture_one=one; Expires=Wed, 21 Oct 2030 07:28:00 GMT; Secure',
+  'fixture_two=two; Path=/; HttpOnly'
+];
+
+function passportResponse(url, {
+  status = 200, type = 'application/json; charset=utf-8', location, body = '{"fixture":true}',
+  redirected = false
+} = {}) {
+  const headers = new Headers({
+    'content-type': type, 'content-encoding': 'gzip', 'content-length': '99',
+    'cache-control': 'no-store', connection: 'x-hop', 'x-hop': 'discard'
+  });
+  for (const cookie of qrFixtureCookies) headers.append('set-cookie', cookie);
+  if (location) headers.set('location', location);
+  const response = new Response(body, { status, headers });
+  Object.defineProperties(response, { url: { value: url }, redirected: { value: redirected } });
+  return response;
+}
+
+test('only the current owned main login view forwards the original official QR GET', async t => {
+  const calls = [];
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async (url, options) => {
+    calls.push({ url, options });
+    return passportResponse(url);
+  } });
+  assert.equal(gateway.reportStage().qrRequest, 'not-requested');
+  await gateway.openLogin();
+  let page = browser.sourcePages()[0];
+  assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), false);
+  assert.equal(gateway.reportStage().qrRequest, 'refused');
+  assert.equal(calls.length, 0);
+
+  let checks = 0;
+  await gateway.openLogin({ assertQrRequest() { checks++; } });
+  page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  browser.requestHeaders = {
+    accept: 'application/json', cookie: 'browser_fixture=private-marker', referer: self,
+    host: 'wrong.invalid', 'content-length': '99', authorization: 'private-authorization'
+  };
+  for (const [type, url] of [['xhr', passportQr + '/?fixture=never-reported'], ['fetch', passportQr]]) {
+    assert.equal(await browser.visit(main, url, type), true);
+    assert.equal(gateway.reportStage().qrRequest, 'delivered');
+  }
+  assert.equal(checks, 6);
+  assert.deepEqual(calls.map(({ url, options }) => [url, options.method, options.redirect, options.credentials]), [
+    [passportQr + '/?fixture=never-reported', 'GET', 'error', 'omit'],
+    [passportQr, 'GET', 'error', 'omit']
+  ]);
+  for (const { options } of calls) {
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.deepEqual(Object.fromEntries(new Headers(options.headers)),
+      { accept: 'application/json', cookie: 'browser_fixture=private-marker', referer: self });
+  }
+  for (const { status, headers, body } of browser.fulfillments) {
+    assert.equal(status, 200);
+    assert.equal(headers['set-cookie'], qrFixtureCookies.join('\n'));
+    assert.equal(headers['cache-control'], 'no-store');
+    for (const name of ['content-encoding', 'content-length', 'connection', 'x-hop']) assert.equal(headers[name], undefined);
+    assert.equal(body.toString(), '{"fixture":true}');
+  }
+  assert.doesNotMatch(JSON.stringify(gateway.reportStage()), /never-reported|https:|private-marker|fixture_one/);
+
+  for (const [frame, url, type, method, nav, redirected] of [
+    [main, passportQr, 'xhr', 'POST'],
+    [main, passportQr, 'document', 'GET', true],
+    [main, passportQr, 'fetch', 'GET', false, {}],
+    [main, passportQr.replace('www.douyin.com', 'www.douyin.com.outside.invalid'), 'xhr', 'GET'],
+    [main, passportQr.replace('www.douyin.com', 'www.douyin.com:443'), 'xhr', 'GET'],
+    [main, passportQr.replace('www.', 'login.'), 'xhr', 'GET'],
+    [main, passportQr.replace('get_qrcode', 'challenge'), 'xhr', 'POST'],
+    [main, passportQr.replace('get_qrcode', 'check_qrconnect'), 'xhr', 'GET'],
+    [page.childNavigate('about:blank'), passportQr, 'xhr', 'GET']
+  ]) assert.equal(await browser.visit(frame, url, type, method, nav, redirected), false);
+  await gateway.verifyIdentity();
+  assert.equal(await browser.visit(browser.sourcePages()[0].mainFrame(), passportQr, 'xhr'), false);
+  assert.equal(calls.length, 2);
+});
+
+test('provider QR GET rejects redirects, oversized or wrong responses, and lost authority', async t => {
+  let nextResponse, calls = 0;
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async () => {
+    calls++;
+    return nextResponse();
+  } });
+  let live = true;
+  await gateway.openLogin({ assertQrRequest() { if (!live) throw new ProbeError('STALE_LEASE'); } });
+  const page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  for (const response of [
+    passportResponse(passportQr, { status: 302, location: 'https://outside.invalid/' }),
+    passportResponse(passportQr, { location: 'https://outside.invalid/' }),
+    passportResponse(passportQr, { type: 'text/html' }),
+    passportResponse('https://outside.invalid/'),
+    passportResponse(passportQr, { redirected: true }),
+    passportResponse(passportQr, { status: 403 }),
+    passportResponse(passportQr, { body: 'x'.repeat(256 * 1024 + 1) })
+  ]) {
+    nextResponse = () => response;
+    assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
+    assert.equal(gateway.reportStage().qrRequest, 'refused');
+  }
+
+  const started = Promise.withResolvers();
+  const pending = Promise.withResolvers();
+  nextResponse = () => { started.resolve(); return pending.promise; };
+  const visit = browser.visit(main, passportQr, 'xhr');
+  await started.promise;
+  assert.equal(gateway.reportStage().qrRequest, 'requested');
+  live = false;
+  pending.resolve(passportResponse(passportQr));
+  assert.equal(await visit, false);
+  assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
+  assert.equal(calls, 8);
+  assert.equal(browser.fulfillments.length, 0);
+  assert.equal(gateway.reportStage().qrRequest, 'refused');
+});
+
+test('approved same-document login preserves QR authority but a real main reload revokes it', async t => {
+  let nextResponse = url => passportResponse(url), calls = 0;
+  const { browser, gateway } = await fixture(t, {
+    fetchStorageHelper: async url => helperResponse(url),
+    fetchPassportQr: async url => { calls++; return nextResponse(url); }
+  });
+  const assertQrRequest = () => {};
+  await gateway.openLogin({ assertQrRequest });
+  const page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  const helper = page.childNavigate('about:blank');
+  const helperUrl = storageHelper('4.0.7');
+  assert.equal(await browser.visit(helper, helperUrl, 'document'), true);
+  helper.navigate(helperUrl);
+  page.navigate(self + '?same-document');
+  assert.equal(gateway.reportStage().frames, 'helper-child');
+  assert.equal(await browser.visit(main, passportQr, 'xhr'), true);
+
+  const started = Promise.withResolvers();
+  const reply = Promise.withResolvers();
+  nextResponse = () => { started.resolve(); return reply.promise; };
+  const pending = browser.visit(main, passportQr, 'xhr');
+  await started.promise;
+  assert.equal(await browser.visit(main, self + '?reload', 'document'), true);
+  page.navigate(self + '?reload');
+  reply.resolve(passportResponse(passportQr));
+  assert.equal(await pending, false);
+  assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
+  assert.equal(calls, 2);
+  assert.equal(browser.fulfillments.length, 2);
 });
 
 test('browser routes admit the known page and read API without permitting account writes', async t => {
