@@ -135,7 +135,13 @@ test('HTTPS requires authentication and current ownership before library or veri
       return new Headers();
     },
     close() {},
-    async openLogin() {
+    reportStage() {
+      return { main: 'trusted', frames: 'main-only', panelDetected: false, qr: 'unavailable',
+        helper: { state: 'not-requested' }, blockedPassport: { GET: 0, POST: 0, routes: [] } };
+    },
+    async openLogin({ signal, guard }) {
+      assert.ok(signal instanceof AbortSignal);
+      guard();
       return { pageRevision: 7, width: 120, height: 80 };
     },
     async loginQr({ pageRevision }) {
@@ -222,6 +228,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     });
   }
   assert.equal((await request('library')).status, 401);
+  assert.equal((await request('report')).status, 401);
   assert.equal((await request('identity/qr?revision=7')).status, 401);
   const a = await request('access/login', { token }),
     b = await request('access/login', { token });
@@ -318,7 +325,9 @@ test('HTTPS requires authentication and current ownership before library or veri
   await client.send('session/release', {});
   assert.equal((await request('session/acquire', { operationId: 'beta' }, b.cookie)).status, 200);
   assert.equal((await request('operations/' + lostId, null, b.cookie)).body.released, true);
-  assert.equal((await request('report', null, b.cookie)).body.service, 'cangxia-server-probe');
+  const report = (await request('report', null, b.cookie)).body;
+  assert.equal(report.service, 'cangxia-server-probe');
+  assert.deepEqual(report.browser, { stage: gateway.reportStage() });
 });
 test('heartbeat keeps foreground data and expires a hung renewal', async () => {
   const clock = fakeClock();

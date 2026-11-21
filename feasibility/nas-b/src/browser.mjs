@@ -20,8 +20,12 @@ const requestTimeout = 12000;
 const driverTimeout = 2500;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
-const storageHelperUrls = new Set(['4.0.5', '4.0.7'].map(version =>
-  'https://lf-zt.douyin.com/obj/uc-assets/zt/@byted/x-storage-web/' + version + '/dist/latest/index.html'));
+const storageHelperOrigin = 'https://lf-zt.douyin.com';
+const storageHelperPrefix = '/obj/uc-assets/zt/@byted/x-storage-web/';
+const storageHelperVersions = new Set(['4.0.5', '4.0.7']);
+const storageHelperUrls = new Set([...storageHelperVersions].map(version =>
+  storageHelperOrigin + storageHelperPrefix + version + '/dist/latest/index.html'));
+const reportedPassportNames = new Set(['get_qrcode', 'check_qrconnect', 'challenge']);
 const keys = new Set(['Enter', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
 const pointerTypes = new Set(['click', 'move', 'down', 'up']);
 const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form', 'beforeDispatch', 'onReceivedRows']);
@@ -197,6 +201,7 @@ function commitLoginChild(slot, frame) {
   const authorization = slot.storageFrames.get(frame);
   if (authorization?.phase !== 'provided' || authorization.revision !== slot.revision || authorization.url !== url) return false;
   authorization.phase = 'committed';
+  if (authorization.observation) authorization.observation.state = 'completed';
   return true;
 }
 
@@ -257,7 +262,23 @@ function approvedRead(route, options) {
   }
 }
 
-function browserTraffic(context, pages, fetchStorageHelper) {
+function observedHelperVersion(url) {
+  const target = webTarget(url);
+  if (target?.origin !== storageHelperOrigin || !target.pathname.startsWith(storageHelperPrefix)) return;
+  return /^([0-9]{1,3}(?:\.[0-9]{1,3}){2})\/dist\/latest\/index\.html$/
+    .exec(target.pathname.slice(storageHelperPrefix.length))?.[1];
+}
+
+function recordBlockedPassport(loginStage, url, method) {
+  const target = webTarget(url);
+  if (target?.origin !== origin || (method !== 'GET' && method !== 'POST')) return;
+  const name = /^\/passport\/web\/([a-z_]{2,30})\/?$/.exec(target.pathname)?.[1];
+  if (!name) return;
+  loginStage.blockedPassport[method] = Math.min(1000, loginStage.blockedPassport[method] + 1);
+  if (reportedPassportNames.has(name)) loginStage.passportRoutes.set(method + '/' + name, { method, name });
+}
+
+function browserTraffic(context, pages, fetchStorageHelper, loginStage) {
   const totals = { completedRequests: 0, sentBytes: 0, receivedBytes: 0, blockedRequests: 0, failedRequests: 0, unknownSizes: 0 };
   const blocked = new WeakSet();
   context.on('requestfailed', request => {
@@ -279,18 +300,27 @@ function browserTraffic(context, pages, fetchStorageHelper) {
     observe: () => ({ browser: { ...totals } }),
     install: () => context.route('**/*', async route => {
       const request = route.request();
-      let allowed = false;
+      let allowed = false, observation;
       try {
         const frame = request.frame();
         const page = frame.page();
         const slot = pages.get(page);
         allowed = !!slot && approvedBrowserTraffic(request, slot, frame === page.mainFrame());
         const url = request.url();
+        if (!allowed && slot?.kind === 'login' && frame === page.mainFrame() && sourcePage(page.url(), 'login')) {
+          recordBlockedPassport(loginStage, url, request.method());
+        }
         if (slot && request.isNavigationRequest() && directLoginChild(slot, frame)) {
           slot.storageFrames.delete(frame);
+          const version = observedHelperVersion(url);
+          if (version) {
+            observation = { version, state: storageHelperVersions.has(version) ? 'refused' : 'new-version' };
+            loginStage.helper = observation;
+          }
           if (storageHelperUrls.has(url) && request.method() === 'GET' &&
               !request.redirectedFrom() && request.resourceType() === 'document') {
-            const authorization = { url, revision: slot.revision, phase: 'fetching' };
+            if (observation) observation.state = 'requested';
+            const authorization = { url, revision: slot.revision, phase: 'fetching', observation };
             slot.storageFrames.set(frame, authorization);
             const document = await readStorageHelper(url, fetchStorageHelper);
             if (document && pages.get(page) === slot && !page.isClosed() && slot.revision === authorization.revision &&
@@ -310,6 +340,7 @@ function browserTraffic(context, pages, fetchStorageHelper) {
       }
       if (allowed) await route.continue();
       else {
+        if (observation?.state === 'requested') observation.state = 'refused';
         blocked.add(request);
         totals.blockedRequests++;
         await route.abort();
@@ -519,6 +550,10 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
   let state;
   const pages = new Map();
   let observeTraffic;
+  const loginStage = {
+    helper: { state: 'not-requested' }, blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
+  };
+  let lastQr = 'not-requested';
   try {
     chromium ??= (await import('playwright-core')).chromium;
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
@@ -533,7 +568,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
       args: ['--autoplay-policy=user-gesture-required']
     });
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
-    const traffic = browserTraffic(context, pages, fetchStorageHelper);
+    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage);
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
@@ -697,11 +732,12 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     }
   }
 
-  async function mutateLogin(slot, revision, task) {
+  async function mutateLogin(slot, revision, task, beforeDispatch) {
     let dispatched = false;
     try {
       return await browserCall(() => {
         assertView(revision);
+        beforeDispatch?.();
         dispatched = true;
         return task();
       }, epochController.signal);
@@ -714,12 +750,13 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     }
   }
 
-  async function refreshPanel(slot, action) {
+  async function refreshPanel(slot, action, beforeDispatch) {
     const revision = pageRevision;
     assertView(revision);
     const { page, viewProbe } = slot;
     const inspect = () => page.evaluate(panelScript, { viewProbe, ...action });
-    const result = await (action?.action === 'open' ? mutateLogin(slot, revision, inspect) : browserCall(inspect, epochController.signal));
+    const result = await (action?.action === 'open' ?
+      mutateLogin(slot, revision, inspect, beforeDispatch) : browserCall(inspect, epochController.signal));
     assertView(revision);
     let panel = null;
     if (validPanel(result) && result.x + result.width <= viewport.width && result.y + result.height <= viewport.height &&
@@ -735,17 +772,26 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     return result?.allowed === true;
   }
 
-  function openLogin() {
+  function openLogin({ signal, guard } = {}) {
+    const assertOpening = () => {
+      signal?.throwIfAborted();
+      guard?.();
+    };
     return withView(async () => {
+      assertOpening();
       assertVerificationAvailable();
       try {
         if (!trustedView(login)) {
           invalidate();
           if (login && !login.page.isClosed()) await browserCall(() => login.page.close(), epochController.signal);
+          lastQr = 'not-requested';
+          loginStage.helper = { state: 'not-requested' };
+          loginStage.blockedPassport = { GET: 0, POST: 0 };
+          loginStage.passportRoutes.clear();
           login = await makePage('login');
           pageRevision++;
-          await refreshPanel(login, { action: 'open' });
-        } else await refreshPanel(login);
+        } else if (login.panel) await refreshPanel(login);
+        if (login && !login.panel) await refreshPanel(login, { action: 'open' }, assertOpening);
         return viewState();
       } catch (error) {
         if (error instanceof ProbeError) throw error;
@@ -769,6 +815,7 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
 
   function loginQr({ pageRevision: revision, signal } = {}) {
     return withView(async () => {
+      lastQr = 'requested';
       const slot = assertView(revision);
       try {
         signal?.throwIfAborted();
@@ -787,6 +834,13 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
         if (error instanceof ProbeError) throw error;
         throw qrUnavailable();
       }
+    }).then(result => {
+      lastQr = 'available';
+      return result;
+    }, error => {
+      lastQr = error?.code === 'STALE_BROWSER_VIEW' ? 'stale' :
+        error?.code === 'PROBE_BROWSER_CLOSED' ? 'closed' : 'unavailable';
+      throw error;
     });
   }
 
@@ -1061,6 +1115,28 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     }
   }
 
+  function reportStage() {
+    let main = closed ? 'browser-closed' : 'not-open';
+    let frames = 'unavailable';
+    if (!closed && login) {
+      const { page } = login;
+      main = page.isClosed() ? 'retired' : trustedView(login) ? 'trusted' : 'untrusted';
+      if (!page.isClosed()) {
+        const children = page.frames().filter(frame => frame !== page.mainFrame());
+        frames = !children.length ? 'main-only' :
+          !children.every(frame => trustedLoginChild(login, frame)) ? 'untrusted-child' :
+          children.some(frame => frame.url() !== 'about:blank') ? 'helper-child' : 'blank-child';
+      }
+    }
+    return {
+      main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
+      helper: { ...loginStage.helper },
+      blockedPassport: {
+        ...loginStage.blockedPassport, routes: [...loginStage.passportRoutes.values()].map(route => ({ ...route }))
+      }
+    };
+  }
+
   function close() {
     if (closeTask) return closeTask;
     if (closed) return Promise.resolve();
@@ -1069,5 +1145,5 @@ export async function openBrowserGateway({ config, chromium, store, clock = perf
     return closeTask;
   }
 
-  return Object.freeze({ openLogin, loginQr, frame, input, verifyIdentity, request, assertAuthEpoch, mediaHeaders, traffic: observeTraffic, close });
+  return Object.freeze({ openLogin, loginQr, frame, input, verifyIdentity, request, assertAuthEpoch, mediaHeaders, traffic: observeTraffic, reportStage, close });
 }

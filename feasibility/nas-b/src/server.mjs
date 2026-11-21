@@ -375,9 +375,12 @@ export async function startProbe(options) {
               const opening = { generation: lease.generation };
               session.view = opening;
               authEpoch = undefined;
-              const view = await (options.fixtureView ?? gateway).openLogin();
-              guard();
-              if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              const guardOpening = () => {
+                guard();
+                if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              };
+              const view = await (options.fixtureView ?? gateway).openLogin({ signal, guard: guardOpening });
+              guardOpening();
               const descriptor = pick(view, ['pageRevision', 'width', 'height']);
               session.view = { ...opening, ...descriptor };
               return json({ ...descriptor, localVerification: !options.fixtureView });
@@ -593,15 +596,18 @@ export async function startProbe(options) {
           }
           if (group === 'operations' && id && !action && method === 'GET')
             return json(receipt(store.operation(id)));
-          if (group === 'report' && !id && method === 'GET')
+          if (group === 'report' && !id && method === 'GET') {
+            const stage = gateway.reportStage?.();
             return json({
               service: PROBE.service,
               version: PROBE.version,
               mode: PROBE.mode,
               fieldValidation: 'pending',
               verification: 'operator-browser',
-              downloadError
+              downloadError,
+              ...(stage ? { browser: { stage } } : {})
             });
+          }
           fail('PROBE_NOT_FOUND');
         } catch (error) {
           if (res.headersSent || signal.aborted) {

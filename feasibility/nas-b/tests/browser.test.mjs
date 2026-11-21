@@ -355,6 +355,57 @@ test('retiring the only managed login cannot close headed Chromium', async t => 
   }
 });
 
+test('an explicit second opening retries a missing panel on the same trusted login page', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.panel = null;
+  let attempts = 0;
+  browser.beforePanel = action => {
+    if (action === 'open' && ++attempts === 2) browser.panel = { id: 1, ...panelRect };
+  };
+  const first = await gateway.openLogin();
+  assert.equal(first.width, 0);
+  await assert.rejects(gateway.loginQr(first), { code: 'PROBE_QR_UNAVAILABLE' });
+  assert.equal(gateway.reportStage().qr, 'unavailable');
+  assert.equal(gateway.reportStage().panelDetected, false);
+  assert.equal(attempts, 1);
+  const second = await gateway.openLogin();
+  assert.equal(second.width, panelRect.width);
+  assert.equal(browser.navigations.length, 1);
+  assert.equal(attempts, 2);
+});
+
+test('a canceled queued opening and a lost lease before dispatch cannot retry the login click', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.panel = null;
+  const clickStarted = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  let clicks = 0;
+  browser.beforePanel = async action => {
+    if (action !== 'open') return;
+    if (++clicks === 1) {
+      clickStarted.resolve();
+      await finish.promise;
+    }
+  };
+  const first = gateway.openLogin();
+  await clickStarted.promise;
+  const request = new AbortController();
+  const canceled = assert.rejects(gateway.openLogin({ signal: request.signal }), { code: 'STALE_LEASE' });
+  request.abort(new ProbeError('STALE_LEASE'));
+  finish.resolve();
+  await first;
+  await canceled;
+  assert.equal(clicks, 1);
+
+  let checks = 0;
+  await assert.rejects(gateway.openLogin({ guard() {
+    if (++checks === 2) throw new ProbeError('STALE_LEASE');
+  } }), { code: 'STALE_LEASE' });
+  assert.equal(checks, 2);
+  assert.equal(clicks, 1);
+  assert.equal(browser.sourcePages()[0].isClosed(), false);
+});
+
 test('ordinary profile with no recognized auth panel produces no pixels or input', async t => {
   const { browser, gateway } = await fixture(t);
   browser.panel = null;
@@ -621,6 +672,61 @@ test('only both verified direct login helpers can coexist with a main-document Q
   await assert.rejects(gateway.input({ ...view, type: 'move', x: 1, y: 1 }), { code: 'STALE_BROWSER_VIEW' });
   assert.equal(browser.lastShot, undefined);
   assert.equal(browser.input.length, 0);
+});
+
+test('login diagnostics report only bounded public stages and blocked operation summaries', async t => {
+  const url = storageHelper('4.0.7');
+  const gate = Promise.withResolvers();
+  const { browser, gateway } = await fixture(t, { fetchStorageHelper: () => gate.promise });
+  assert.equal(gateway.reportStage().main, 'not-open');
+  assert.equal(gateway.reportStage().qr, 'not-requested');
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  const child = page.childNavigate('about:blank');
+  assert.equal(gateway.reportStage().frames, 'blank-child');
+  const pending = browser.visit(child, url, 'document');
+  assert.deepEqual(gateway.reportStage().helper, { state: 'requested', version: '4.0.7' });
+  gate.resolve(helperResponse(url));
+  assert.equal(await pending, true);
+  child.navigate(url);
+  assert.equal(gateway.reportStage().frames, 'helper-child');
+  assert.deepEqual(gateway.reportStage().helper, { state: 'completed', version: '4.0.7' });
+  await gateway.loginQr(view);
+  assert.equal(gateway.reportStage().qr, 'available');
+
+  const main = page.mainFrame();
+  assert.equal(await browser.visit(main, 'https://www.douyin.com/passport/web/get_qrcode/?token=never-export', 'xhr'), false);
+  assert.equal(await browser.visit(main, 'https://www.douyin.com/passport/web/check_qrconnect/', 'fetch', 'POST'), false);
+  assert.equal(await browser.visit(main, 'https://www.douyin.com/passport/web/possible_username/', 'xhr'), false);
+  assert.equal(await browser.visit(main, 'https://login.douyin.com/passport/web/challenge/', 'xhr', 'POST'), false);
+  const next = page.childNavigate('about:blank');
+  assert.equal(await browser.visit(next, url + '?token=never-export', 'document'), false);
+  assert.deepEqual(gateway.reportStage().helper, { state: 'refused', version: '4.0.7' });
+  assert.equal(await browser.visit(next, storageHelper('4.0.8') + '?token=never-export', 'document'), false);
+  const stage = gateway.reportStage();
+  assert.deepEqual(stage, {
+    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available',
+    helper: { state: 'new-version', version: '4.0.8' },
+    blockedPassport: { GET: 2, POST: 1, routes: [
+      { method: 'GET', name: 'get_qrcode' },
+      { method: 'POST', name: 'check_qrconnect' }
+    ] }
+  });
+  assert.doesNotMatch(JSON.stringify(stage), /never-export|possible_username|https|89504e47|private-fixture-session/);
+  for (let n = 0; n < 1000; n++) {
+    assert.equal(await browser.visit(main, 'https://www.douyin.com/passport/web/get_qrcode/', 'xhr'), false);
+  }
+  assert.equal(gateway.reportStage().blockedPassport.GET, 1000);
+  assert.deepEqual(gateway.reportStage().blockedPassport.routes, stage.blockedPassport.routes);
+  const retired = once(page, 'close');
+  page.navigate('https://outside.invalid/');
+  await retired;
+  assert.equal(gateway.reportStage().main, 'retired');
+  await gateway.openLogin();
+  assert.equal(gateway.reportStage().qr, 'not-requested');
+  assert.deepEqual(gateway.reportStage().helper, { state: 'not-requested' });
+  assert.deepEqual(gateway.reportStage().blockedPassport, { GET: 0, POST: 0, routes: [] });
 });
 
 test('storage helpers reject unverified URLs, uncontrolled frames and non-login requests', async t => {
