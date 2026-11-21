@@ -7,6 +7,7 @@ import {
   auditImageManifest, validateImageInputs
 } from '../scripts/image-inputs.mjs';
 import { renderDeployment } from '../render-deployment.mjs';
+import { parseProbeBuildInfo } from '../src/contracts.mjs';
 
 const revision = 'a'.repeat(40);
 const digest = 'sha256:' + 'b'.repeat(64);
@@ -117,6 +118,8 @@ test('DEPLOY-03 context allowlist and content audit exclude secrets, old app, an
   assert.ok(ignore.slice(1).every(line => line.startsWith('!')));
   assert.deepEqual(ignore.slice(1).map(line => line.slice(1)).sort(), [...RUNTIME_FILES, 'tests/cover-frame-test.py'].sort());
   const paths = RUNTIME_FILES.map(file => PROJECT_ROOT + '/' + file);
+  const buildInfo = PROJECT_ROOT + '/feasibility/nas-b/build-info.json';
+  paths.push(buildInfo);
   paths.push('usr/bin/node', 'usr/bin/Xvfb', 'usr/bin/ffmpeg', 'usr/bin/ffprobe', 'usr/bin/openssl',
     'usr/bin/python3.12', 'opt/cover-runtime/bin/python',
     PROJECT_ROOT + '/feasibility/nas-b/node_modules/playwright-core/LICENSE',
@@ -124,6 +127,7 @@ test('DEPLOY-03 context allowlist and content audit exclude secrets, old app, an
     PROJECT_ROOT + '/feasibility/nas-b/node_modules/.bin/playwright-core');
   const manifest = { paths };
   assert.equal(auditImageManifest(manifest).ok, true);
+  assert.deepEqual(auditImageManifest({ paths: paths.filter(file => file !== buildInfo) }).missingRuntimeFiles, [buildInfo]);
   assert.equal(auditImageManifest(manifest).unexpectedGoldenMountParent, false);
   const undisclosed = PROJECT_ROOT + '/ci-unknown/fixture-private-name';
   const oldGoldenMountParent = auditImageManifest({ paths: [...paths, './' + PROJECT_ROOT + '/tests/', undisclosed] });
@@ -181,4 +185,16 @@ test('DEPLOY-01 the sandbox rule allows chroot without adding container capabili
   assert.match(workflow, /--security-opt no-new-privileges:true/);
   assert.match(workflow, /unshare --user --map-root-user/);
   assert.doesNotMatch(compose + workflow, /cap_add:|--cap-add|apparmor=unconfined|seccomp=unconfined|--privileged|--no-sandbox/);
+});
+
+test('DEPLOY-01 build metadata must match the numbered tag and full source revision', () => {
+  assert.deepEqual(parseProbeBuildInfo({ imageVersion: image.tag, sourceRevision: revision }),
+    { imageVersion: image.tag, sourceRevision: revision });
+  for (const invalid of [
+    null,
+    { imageVersion: 'preview', sourceRevision: revision },
+    { imageVersion: image.tag, sourceRevision: 'b'.repeat(40) },
+    { imageVersion: image.tag, sourceRevision: revision.slice(0, 12) },
+    { imageVersion: '<img src=/private>', sourceRevision: revision }
+  ]) assert.equal(parseProbeBuildInfo(invalid), null);
 });

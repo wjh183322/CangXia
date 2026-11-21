@@ -52,6 +52,7 @@ export function validateImageInputs(input = {}) {
 }
 
 const expectedFiles = new Set([
+  PROJECT_ROOT + '/' + runtime + 'build-info.json',
   ...RUNTIME_FILES.map(file => PROJECT_ROOT + '/' + file),
   'usr/bin/Xvfb', 'usr/bin/ffmpeg', 'usr/bin/ffprobe', 'usr/bin/node', 'usr/bin/openssl', 'usr/bin/python3.12',
   'opt/cover-runtime/bin/python',

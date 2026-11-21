@@ -12,6 +12,13 @@ export const PROBE = Object.freeze({
   containerPort: 8443
 });
 
+export function parseProbeBuildInfo(value) {
+  const { imageVersion, sourceRevision } = value ?? {};
+  if (typeof sourceRevision !== 'string' || !/^[a-f0-9]{40}$/.test(sourceRevision) ||
+      imageVersion !== PROBE.version + '-' + sourceRevision.slice(0, 12)) return null;
+  return Object.freeze({ imageVersion, sourceRevision });
+}
+
 export const LIMITS = Object.freeze({
   cpus: 2,
   memoryBytes: 2 ** 31,

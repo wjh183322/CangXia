@@ -47,6 +47,15 @@ COPY feasibility/nas-b/src/ ./src/
 COPY feasibility/nas-b/web/ ./web/
 COPY feasibility/nas-b/scripts/container-start.mjs feasibility/nas-b/scripts/health.mjs ./scripts/
 COPY --chmod=0555 feasibility/nas-b/nas-entrypoint.sh ./
+RUN node --input-type=module <<'BUILD_INFO'
+import { writeFileSync } from 'node:fs';
+import { parseProbeBuildInfo } from './src/contracts.mjs';
+
+const { PROBE_VERSION: imageVersion, PROBE_REVISION: sourceRevision } = process.env;
+const buildInfo = parseProbeBuildInfo({ imageVersion, sourceRevision });
+if (!buildInfo) throw new Error('Invalid probe build version or revision.');
+writeFileSync('build-info.json', JSON.stringify(buildInfo) + '\n', { flag: 'wx', mode: 0o444 });
+BUILD_INFO
 RUN mkdir /probe
 
 USER 1000:1000

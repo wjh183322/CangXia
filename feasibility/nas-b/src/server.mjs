@@ -15,7 +15,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { bootstrapDatabasePath, completeDataRootBootstrap, prepareDataRoot, validateAccessHost } from './config.mjs';
-import { PROBE, ProbeError } from './contracts.mjs';
+import { PROBE, ProbeError, parseProbeBuildInfo } from './contracts.mjs';
 import { openBootstrapProbeStore, openProbeStore } from './store.mjs';
 import { createLeaseManager } from './lease.mjs';
 import { isLoginQrPng, openBrowserGateway } from './browser.mjs';
@@ -97,6 +97,15 @@ const names = new Map([
   ['/app.mjs', ['app.mjs', 'text/javascript']],
   ['/style.css', ['style.css', 'text/css']]
 ]);
+const unknownBuildInfo = Object.freeze({ imageVersion: 'unknown', sourceRevision: null });
+async function readBuildInfo() {
+  try {
+    return parseProbeBuildInfo(JSON.parse(await readFile(new URL('../build-info.json', import.meta.url), 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
 async function readOptional(file, encoding) {
   try {
     return await readFile(file, encoding);
@@ -191,6 +200,8 @@ async function credentials(layout, bootstrap, options, accessHost) {
 
 export async function startProbe(options) {
   const { config } = options;
+  const buildInfo = (options.buildInfo === undefined ? await readBuildInfo() : parseProbeBuildInfo(options.buildInfo)) ??
+    unknownBuildInfo;
   const host = options.host ?? '0.0.0.0';
   const localFixture =
     config.root !== PROBE.root &&
@@ -314,6 +325,10 @@ export async function startProbe(options) {
             const [name, mime] = names.get(route);
             const bytes = await readFile(new URL('../web/' + name, import.meta.url));
             res.writeHead(200, { 'Content-Type': mime + '; charset=utf-8' });
+            if (route === '/') {
+              const imageVersion = buildInfo === unknownBuildInfo ? '未知（无镜像构建信息）' : buildInfo.imageVersion;
+              return res.end(bytes.toString('utf8').replace('<!-- image-version -->', imageVersion));
+            }
             return res.end(bytes);
           }
           if (!route.startsWith('/probe/v1/')) fail('PROBE_NOT_FOUND');
@@ -616,6 +631,7 @@ export async function startProbe(options) {
             return json({
               service: PROBE.service,
               version: PROBE.version,
+              ...buildInfo,
               mode: PROBE.mode,
               fieldValidation: 'pending',
               verification: 'operator-browser',

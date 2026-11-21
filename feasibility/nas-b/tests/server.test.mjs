@@ -179,11 +179,14 @@ test('HTTPS requires authentication and current ownership before library or veri
     fetchAsset: async () =>
       new Response(png, { headers: { 'Content-Type': 'image/png', 'Content-Length': String(png.length) } })
   });
+  const sourceRevision = 'f'.repeat(40);
+  const buildInfo = { imageVersion: PROBE.version + '-' + sourceRevision.slice(0, 12), sourceRevision };
   const probe = await startProbe({
     config: s.config,
     layout,
     store,
     downloads,
+    buildInfo,
     tls: { cert, key: identity.private },
     token,
     host: '127.0.0.1',
@@ -194,7 +197,7 @@ test('HTTPS requires authentication and current ownership before library or veri
   function request(route, body, cookie, { method, range, discardResponse, origin } = {}) {
     return new Promise((resolve, reject) => {
       const req = https.request(
-        new URL('/probe/v1/' + route, probe.url),
+        new URL(route.startsWith('/') ? route : '/probe/v1/' + route, probe.url),
         {
           ca: cert,
           servername: 'localhost',
@@ -230,6 +233,11 @@ test('HTTPS requires authentication and current ownership before library or veri
       req.end(body ? JSON.stringify(body) : undefined);
     });
   }
+  const dashboard = await request('/');
+  assert.equal(dashboard.status, 200);
+  assert.ok(dashboard.body.toString().includes(
+    '<h1>藏匣 NAS 验证工具</h1>\n      <p>镜像版本 <code>' + buildInfo.imageVersion + '</code></p>'
+  ));
   assert.equal((await request('library')).status, 401);
   assert.equal((await request('report')).status, 401);
   assert.equal((await request('identity/qr?revision=7')).status, 401);
@@ -342,6 +350,9 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.equal((await request('operations/' + lostId, null, b.cookie)).body.released, true);
   const report = (await request('report', null, b.cookie)).body;
   assert.equal(report.service, 'cangxia-server-probe');
+  assert.equal(report.version, PROBE.version);
+  assert.equal(report.imageVersion, buildInfo.imageVersion);
+  assert.equal(report.sourceRevision, buildInfo.sourceRevision);
   assert.deepEqual(report.browser, { stage: gateway.reportStage() });
 });
 test('heartbeat keeps foreground data and expires a hung renewal', async () => {
