@@ -1,55 +1,48 @@
 
-name: Publish the audited server probe once
+name: Build and verify server probe
 
 on:
   push:
     branches: [codex/server-edition]
-    paths: ['.github/workflows/server-probe.yml']
+    paths:
+      - 'feasibility/nas-b/**'
+      - 'electron/account-identity.mjs'
+      - 'electron/api-pagination.mjs'
+      - 'electron/audio-info.mjs'
+      - 'electron/browser-api.mjs'
+      - 'electron/filter.mjs'
+      - 'electron/hd-cover.mjs'
+      - 'electron/media-info.mjs'
+      - 'electron/model.mjs'
+      - 'electron/qr-page.mjs'
+      - 'electron/resumable-transfer.mjs'
+      - 'electron/verification-panel.mjs'
+      - 'electron/work-audio.mjs'
+      - 'shared/backup-protocol.mjs'
+      - 'shared/creators.mjs'
+      - 'shared/douyin-web.mjs'
+      - 'shared/music.mjs'
+      - 'shared/source-state.mjs'
+      - 'scripts/cover-frame.py'
+      - 'tests/cover-frame-test.py'
+      - '.github/workflows/server-probe.yml'
 
 permissions:
   contents: read
 
 jobs:
-  release_guard:
-    if: >-
-      github.event_name == 'push' && github.repository == 'wjh183322/CangXia' &&
-      github.ref == 'refs/heads/codex/server-edition' && github.run_attempt == '1' &&
-      github.event.before == '0e20daa2a666975d016bc5ab32d00e211a5eb3b8' &&
-      github.event.head_commit.message == 'ci: publish the verified QR browser fix'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    permissions: {}
-    outputs:
-      authorized: ${{ steps.verify.outputs.authorized }}
-    steps:
-      - name: Verify the exact release control message
-        id: verify
-        shell: bash
-        run: |
-          set -euo pipefail
-          # GitHub expression string comparisons ignore case.
-          jq -e --arg expected 'ci: publish the verified QR browser fix' \
-            '.head_commit.message == $expected' "$GITHUB_EVENT_PATH" >/dev/null
-          printf 'authorized=true\n' >> "$GITHUB_OUTPUT"
-
   image:
-    needs: release_guard
-    if: github.run_attempt == '1' && needs.release_guard.outputs.authorized == 'true'
-    permissions:
-      contents: read
-      packages: write
+    if: github.ref == 'refs/heads/codex/server-edition'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       PROBE_ARCH: amd64
-      PROBE_SOURCE_SHA: 05c84fd55bc0c253a2f17833ef2d56e2c2ca7e60
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.PROBE_SOURCE_SHA }}
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -58,7 +51,6 @@ jobs:
 
       - name: Run probe tests
         run: |
-          test "$(git rev-parse HEAD)" = "$PROBE_SOURCE_SHA"
           npm ci --prefix feasibility/nas-b --ignore-scripts --no-audit --no-fund
           npm test --prefix feasibility/nas-b
           python3 -B feasibility/nas-b/tests/image-layers-test.py
@@ -66,12 +58,12 @@ jobs:
       - name: Build the verified amd64 image and run the Python golden
         run: |
           set -euo pipefail
-          plan=$(GITHUB_SHA="$PROBE_SOURCE_SHA" node feasibility/nas-b/scripts/image-inputs.mjs plan)
+          plan=$(node feasibility/nas-b/scripts/image-inputs.mjs plan)
           version=$(jq -er .tag <<< "$plan")
           image="$(jq -er .repository <<< "$plan"):$version"
 
           docker buildx build --load --platform linux/amd64 --provenance=false --sbom=false \
-            --build-arg "PROBE_REVISION=$PROBE_SOURCE_SHA" --build-arg "PROBE_VERSION=$version" \
+            --build-arg "PROBE_REVISION=$GITHUB_SHA" --build-arg "PROBE_VERSION=$version" \
             --metadata-file "$RUNNER_TEMP/probe-build.json" \
             -t "$image" -f feasibility/nas-b/Dockerfile .
           build_digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/probe-build.json")
@@ -84,7 +76,7 @@ jobs:
           docker image inspect "$PROBE_IMAGE" > "$RUNNER_TEMP/probe-inspect.json"
           container=$(docker create "$PROBE_IMAGE")
           trap 'docker rm "$container" >/dev/null' EXIT
-          docker export "$container" | tar -tf - | GITHUB_SHA="$PROBE_SOURCE_SHA" node feasibility/nas-b/scripts/image-inputs.mjs \
+          docker export "$container" | tar -tf - | node feasibility/nas-b/scripts/image-inputs.mjs \
             audit "$RUNNER_TEMP/probe-inspect.json" | tee "$RUNNER_TEMP/probe-audit.json"
 
       - name: Audit the filesystem changes in every post-base layer
@@ -303,62 +295,5 @@ jobs:
             printf -- '- Merged filesystem and layer ancestry: `%s`\n' "$(cat "$RUNNER_TEMP/probe-audit.json")"
             printf -- '- Post-base layer audit: `%s`\n' "$(cat "$RUNNER_TEMP/probe-layer-audit.json")"
             printf -- '- Non-root app, TLS, same-mount restart and disposable Linux file checks passed.\n'
-            printf -- '- Registry results are recorded separately after verification.\n'
+            printf -- '- Registry publication and NAS deployment are pending.\n'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish and verify the isolated GHCR image
-        if: success() && github.run_attempt == '1'
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          expected="ghcr.io/wjh183322/cangxia-server-probe:0.4.0-alpha.1-${PROBE_SOURCE_SHA:0:12}"
-          [[ "$PROBE_IMAGE" == "$expected" ]]
-          local_config=$(docker image inspect --format '{{.Id}}' "$PROBE_IMAGE")
-          [[ "$local_config" == "$(jq -er '.[0].Id' "$RUNNER_TEMP/probe-inspect.json")" ]]
-
-          umask 077
-          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/cangxia-ghcr.XXXXXXXX")
-          export DOCKER_CONFIG
-          cleanup_registry() {
-            docker logout ghcr.io >/dev/null 2>&1 || true
-            rm -rf -- "$DOCKER_CONFIG"
-          }
-          trap cleanup_registry EXIT
-          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
-          unset GHCR_TOKEN
-
-          docker push "$PROBE_IMAGE" | tee "$DOCKER_CONFIG/push.log"
-          tag=${PROBE_IMAGE##*:}
-          digest=$(awk -v tag="$tag:" '$1 == tag && $2 == "digest:" && $4 == "size:" {print $3}' \
-            "$DOCKER_CONFIG/push.log")
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          pinned="${PROBE_IMAGE%:*}@$digest"
-
-          docker buildx imagetools inspect --raw "$PROBE_IMAGE" > "$DOCKER_CONFIG/tag-manifest.json"
-          docker buildx imagetools inspect --raw "$pinned" > "$DOCKER_CONFIG/digest-manifest.json"
-          cmp -s "$DOCKER_CONFIG/tag-manifest.json" "$DOCKER_CONFIG/digest-manifest.json"
-          manifest_hash=$(sha256sum "$DOCKER_CONFIG/digest-manifest.json")
-          [[ "sha256:${manifest_hash%% *}" == "$digest" ]]
-          jq -e --arg config "$local_config" '
-            .schemaVersion == 2 and .config.digest == $config and
-            (.mediaType == "application/vnd.oci.image.manifest.v1+json" or
-              .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
-          ' "$DOCKER_CONFIG/digest-manifest.json" >/dev/null
-
-          {
-            printf '\n### Verified GHCR publication\n\n'
-            printf -- '- Audited source: `%s`\n' "$PROBE_SOURCE_SHA"
-            printf -- '- Tagged image: `%s`\n' "$PROBE_IMAGE"
-            printf -- '- Verified registry manifest: `%s`\n' "$pinned"
-            printf -- '- Visibility and NAS deployment require separate verification.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-          printf 'Verified GHCR manifest %s\n' "$pinned"
-          repository=ghcr.io/wjh183322/cangxia-server-probe
-          docker buildx imagetools inspect --raw "$repository:preview" > "$DOCKER_CONFIG/previous-preview.json"
-          read -r previous_digest _ < <(sha256sum "$DOCKER_CONFIG/previous-preview.json")
-          [[ "sha256:$previous_digest" == 'sha256:d6c1a4b70d478ab937d869bbfd0c7d5db2ff07df23519ab7247d1f5b8fa7c1ec' ]]
-          docker buildx imagetools create --prefer-index=false --tag "$repository:preview" "$pinned"
-          docker buildx imagetools inspect --raw "$repository:preview" > "$DOCKER_CONFIG/preview.json"
-          cmp -s "$DOCKER_CONFIG/digest-manifest.json" "$DOCKER_CONFIG/preview.json"
-          printf 'Verified preview alias %s:preview -> %s\n' "$repository" "$digest"
