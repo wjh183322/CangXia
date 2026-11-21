@@ -164,7 +164,12 @@ class FakeContext extends EventEmitter {
       request: () => request,
       abort: async () => { permitted = false; this.emit('requestfailed', request); },
       continue: async () => { permitted = true; this.emit('requestfinished', request); },
-      fulfill: async response => { this.fulfillments.push(response); permitted = true; this.emit('requestfinished', request); }
+      fulfill: async response => {
+        this.fulfillments.push(response);
+        await this.beforeFulfill?.();
+        permitted = true;
+        this.emit('requestfinished', request);
+      }
     });
     return permitted;
   }
@@ -701,6 +706,26 @@ test('pending storage helpers cannot fulfill after the direct frame or trusted d
       assert.equal(browser.fulfillments.length, 0);
     });
   }
+});
+
+test('a provided helper cannot commit after the main page changes its navigation revision', async t => {
+  const provided = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  const url = storageHelper('4.0.7');
+  const { browser, gateway } = await fixture(t, { fetchStorageHelper: async () => helperResponse(url) });
+  browser.beforeFulfill = () => { provided.resolve(); return finish.promise; };
+  const view = await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  const child = page.childNavigate('about:blank');
+  const visit = browser.visit(child, url, 'document');
+  await provided.promise;
+
+  page.navigate(self + '?same-document');
+  child.navigate(url);
+  finish.resolve();
+  await visit;
+  assert.equal(page.isClosed(), true);
+  await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
 });
 
 test('a newer request in a direct child supersedes a pending helper response', async t => {

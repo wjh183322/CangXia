@@ -183,7 +183,8 @@ function trustedLoginChild(slot, frame) {
   if (!directLoginChild(slot, frame)) return false;
   const url = frame.url();
   const authorization = slot.storageFrames.get(frame);
-  return url === 'about:blank' || (authorization?.phase === 'committed' && authorization.url === url);
+  return url === 'about:blank' ||
+    (authorization?.phase === 'committed' && authorization.revision === slot.revision && authorization.url === url);
 }
 
 function commitLoginChild(slot, frame) {
@@ -194,7 +195,7 @@ function commitLoginChild(slot, frame) {
     return true;
   }
   const authorization = slot.storageFrames.get(frame);
-  if (authorization?.phase !== 'provided' || authorization.url !== url) return false;
+  if (authorization?.phase !== 'provided' || authorization.revision !== slot.revision || authorization.url !== url) return false;
   authorization.phase = 'committed';
   return true;
 }
@@ -289,11 +290,10 @@ function browserTraffic(context, pages, fetchStorageHelper) {
           slot.storageFrames.delete(frame);
           if (storageHelperUrls.has(url) && request.method() === 'GET' &&
               !request.redirectedFrom() && request.resourceType() === 'document') {
-            const revision = slot.revision;
-            const authorization = { url, phase: 'fetching' };
+            const authorization = { url, revision: slot.revision, phase: 'fetching' };
             slot.storageFrames.set(frame, authorization);
             const document = await readStorageHelper(url, fetchStorageHelper);
-            if (document && pages.get(page) === slot && !page.isClosed() && slot.revision === revision &&
+            if (document && pages.get(page) === slot && !page.isClosed() && slot.revision === authorization.revision &&
                 slot.storageFrames.get(frame) === authorization && directLoginChild(slot, frame) && page.frames().includes(frame)) {
               authorization.phase = 'provided';
               try {
