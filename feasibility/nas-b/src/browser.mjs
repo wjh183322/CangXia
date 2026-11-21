@@ -32,6 +32,26 @@ const transportResponseHeaders = [
   'connection', 'content-encoding', 'content-length', 'keep-alive', 'proxy-authenticate',
   'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'
 ];
+const loginAssetHosts = new Set([
+  'lf-c-flwb.bytetos.com', 'lf-headquarters-speed.yhgfb-cn-static.com',
+  'lf-ucenter-web.yhgfb-cn-static.com', 'lf-security.bytegoofy.com',
+  'lf-security-backup.bytegoofy.com', 'lf-cdn-tos.bytescm.com',
+  'lf-static.applogcdn.com', 'lf3-short.ibytedapm.com', 'privacy.zijieapi.com',
+  'lf3-static.bytednsdoc.com'
+]);
+const loginAssetTypes = {
+  script: /^(?:application|text)\/(?:x-)?javascript$/,
+  stylesheet: /^text\/css$/,
+  font: /^(?:font\/(?:woff2?|ttf|otf)|application\/(?:font-woff2?|octet-stream))$/,
+  image: /^image\/(?:png|jpeg|webp|avif|svg\+xml|x-icon|vnd[.]microsoft[.]icon)$/
+};
+const loginBootstrapPaths = new Set([
+  '/aweme/v1/web/social/count', '/aweme/v1/web/solution/resource/list/',
+  '/aweme/v1/web/get/user/settings/', '/aweme/v1/web/query/user/'
+]);
+const maxLoginAssetBytes = 4 * 1024 * 1024;
+const maxLoginAssetRequests = 64;
+
 const storageHelperOrigin = 'https://lf-zt.douyin.com';
 const storageHelperPrefix = '/obj/uc-assets/zt/@byted/x-storage-web/';
 const storageHelperVersions = new Set(['4.0.5', '4.0.7']);
@@ -365,9 +385,82 @@ function recordBlockedPassport(loginStage, url, method) {
   if (reportedPassportNames.has(name)) loginStage.passportRoutes.set(method + '/' + name, { method, name });
 }
 
-function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr) {
+function loginResourceType(request, url) {
+  const target = webTarget(url);
+  if (!target || target.hash || !url.startsWith(target.origin + '/') ||
+      request.isNavigationRequest() || request.redirectedFrom()) return null;
+  const type = request.resourceType();
+  const method = request.method();
+  if (target.origin === origin && method === 'GET' && ['fetch', 'xhr'].includes(type) &&
+      loginBootstrapPaths.has(target.pathname) && url.split('?', 1)[0] === origin + target.pathname)
+    return /^application\/json$/;
+  if (loginAssetHosts.has(target.hostname) && ['GET', 'HEAD'].includes(method) &&
+      assetPaths.get(type)?.test(target.pathname)) return loginAssetTypes[type];
+  return null;
+}
+
+async function deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset) {
+  const { page, assetAuthority, storageFrames } = slot;
+  if (!assetAuthority || assetAuthority.initial) return false;
+  let delivered = false;
+  const current = () => pages.get(page) === slot && slot.assetAuthority === assetAuthority &&
+    slot.storageFrames === storageFrames && frame === page.mainFrame() && trustedLoginView(slot) &&
+    assetAuthority.assert() === undefined;
+  try {
+    if (!assetAuthority.remaining || !current()) return false;
+    assetAuthority.remaining--;
+    const request = route.request();
+    const method = request.method();
+    const response = await fetchLoginAsset(url, {
+      method, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+    });
+    const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+    const accepted = mimePattern.test(type) &&
+      isDirectResponse(response, url, type) && !response.headers.has('refresh');
+    let body;
+    if (method === 'HEAD') {
+      await response.body?.cancel().catch(() => {});
+      if (accepted) body = Buffer.alloc(0);
+    } else body = await boundedResponseBody(response, maxLoginAssetBytes, accepted);
+    if (!body || !current()) return false;
+    const headers = { 'content-type': response.headers.get('content-type') };
+    for (const name of ['access-control-allow-origin', 'cross-origin-resource-policy']) {
+      if (response.headers.has(name)) headers[name] = response.headers.get(name);
+    }
+    await route.fulfill({ status: 200, headers, body });
+    delivered = true;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    const stats = assetAuthority.stats;
+    if (delivered) stats.loaded++;
+    else stats.refused = Math.min(maxLoginAssetRequests, stats.refused + 1);
+  }
+}
+
+function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset) {
   const totals = { completedRequests: 0, sentBytes: 0, receivedBytes: 0, blockedRequests: 0, failedRequests: 0, unknownSizes: 0 };
   const blocked = new WeakSet();
+  context.on('request', request => {
+    if (!request.isNavigationRequest()) return;
+    try {
+      const frame = request.frame();
+      const page = frame.page();
+      const slot = pages.get(page);
+      const authority = slot?.assetAuthority;
+      if (!authority || frame !== page.mainFrame()) return;
+      const url = request.url(), from = request.redirectedFrom();
+      // Only the actual initial goto and its approved redirect chain may carry an unused grant.
+      if (authority.initial && page.url() === 'about:blank' && request.method() === 'GET' &&
+          sourcePage(url, 'login') &&
+          (authority.initialRequest ? from === authority.initialRequest : !from && url === home)) {
+        authority.initialRequest = request;
+      } else slot.assetAuthority = undefined;
+    } catch {
+      // Requests without an owned frame cannot start this grant.
+    }
+  });
   context.on('requestfailed', request => {
     if (!blocked.has(request)) totals.failedRequests++;
   });
@@ -396,10 +489,15 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
         allowed = !!slot && approvedBrowserTraffic(request, slot, mainFrame);
         if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) {
           if (allowed) clearLoginDocument(slot);
-          else slot.qrAuthority = undefined;
+          else {
+            slot.qrAuthority = undefined;
+            slot.assetAuthority = undefined;
+          }
         }
         const url = request.url();
-        if (!allowed && slot?.kind === 'login' && frame === page.mainFrame() && sourcePage(page.url(), 'login')) {
+        if (!allowed && slot?.kind === 'login' && mainFrame && sourcePage(page.url(), 'login')) {
+          const mimePattern = loginResourceType(request, url);
+          if (mimePattern && await deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset)) return;
           if (isPassportQrRequest(request, url)) {
             const qrRequest = { state: 'refused' };
             loginStage.qrRequest = qrRequest;
@@ -643,7 +741,8 @@ function queue() {
 }
 
 export async function openBrowserGateway({
-  config, chromium, store, clock = performance, fetchStorageHelper = globalThis.fetch, fetchPassportQr = globalThis.fetch
+  config, chromium, store, clock = performance, fetchStorageHelper = globalThis.fetch,
+  fetchPassportQr = globalThis.fetch, fetchLoginAsset = globalThis.fetch
 }) {
   const root = config?.root;
   if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root ||
@@ -656,7 +755,7 @@ export async function openBrowserGateway({
   let observeTraffic;
   const loginStage = {
     helper: { state: 'not-requested' }, qrRequest: { state: 'not-requested' }, loginEntry: 'not-checked',
-    blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
+    loginResources: { loaded: 0, refused: 0 }, blockedPassport: { GET: 0, POST: 0 }, passportRoutes: new Map()
   };
   let lastQr = 'not-requested';
   try {
@@ -673,7 +772,7 @@ export async function openBrowserGateway({
       args: ['--autoplay-policy=user-gesture-required']
     });
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
-    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr);
+    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset);
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
@@ -735,12 +834,13 @@ export async function openBrowserGateway({
   }
   context.on('close', stopped);
 
-  async function makePage(kind, signal = epochController.signal) {
+  async function makePage(kind, signal = epochController.signal, assetAuthority) {
     const page = await browserCall(() => context.newPage(), signal);
     const slot = {
       page, kind, revision: 0, pressed: false, panel: null,
-      viewProbe: '__cangxia_view_' + randomUUID(), storageFrames: new WeakMap()
+      viewProbe: '__cangxia_view_' + randomUUID(), storageFrames: new WeakMap(), assetAuthority
     };
+    if (assetAuthority) assetAuthority.initial = true;
     pages.set(page, slot);
     page.on('popup', popup => { void popup.close().catch(() => {}); });
     page.on('close', () => {
@@ -767,8 +867,18 @@ export async function openBrowserGateway({
       }
       viewChanged();
       slot.revision++;
+      const authority = slot.assetAuthority;
+      if (authority?.initial && page.url() !== 'about:blank') {
+        if (authority.initialRequest?.url() === page.url()) {
+          authority.initial = false;
+          authority.initialRequest = undefined;
+        } else slot.assetAuthority = undefined;
+      }
       if (slot.pressed || !sourcePage(page.url(), kind)) {
-        if (kind === 'login') clearLoginDocument(slot);
+        if (kind === 'login') {
+          clearLoginDocument(slot);
+          slot.assetAuthority = undefined;
+        }
         if (page.url() !== 'about:blank') void page.close().catch(() => {});
       }
     });
@@ -945,6 +1055,9 @@ export async function openBrowserGateway({
     return withView(async () => {
       assertOpening();
       assertVerificationAvailable();
+      loginStage.loginResources = { loaded: 0, refused: 0 };
+      const assetAuthority = typeof assertQrRequest === 'function' ?
+        { assert: assertQrRequest, remaining: maxLoginAssetRequests, stats: loginStage.loginResources } : undefined;
       try {
         if (!trustedView(login)) {
           invalidate();
@@ -953,9 +1066,9 @@ export async function openBrowserGateway({
           loginStage.helper = { state: 'not-requested' };
           loginStage.blockedPassport = { GET: 0, POST: 0 };
           loginStage.passportRoutes.clear();
-          login = await makePage('login');
+          login = await makePage('login', epochController.signal, assetAuthority);
           pageRevision++;
-        }
+        } else login.assetAuthority = assetAuthority;
         if (login) {
           loginStage.qrRequest = { state: 'not-requested' };
           login.qrAuthority = typeof assertQrRequest === 'function' ?
@@ -1302,6 +1415,7 @@ export async function openBrowserGateway({
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
       qrRequest: loginStage.qrRequest.state, loginEntry: loginStage.loginEntry,
       helper: { ...loginStage.helper },
+      loginResources: { ...loginStage.loginResources },
       blockedPassport: {
         ...loginStage.blockedPassport, routes: [...loginStage.passportRoutes.values()].map(route => ({ ...route }))
       }

@@ -95,7 +95,14 @@ class FakeContext extends EventEmitter {
     page.isClosed = () => closed;
     page.goto = async url => {
       context.navigations.push({ page, url });
-      page.navigate(url);
+      const request = {
+        frame: () => frame, url: () => url, method: () => 'GET',
+        isNavigationRequest: () => true, redirectedFrom: () => null
+      };
+      context.emit('request', request);
+      const destination = context.onInitialRequest?.(request) ?? url;
+      page.navigate(destination);
+      await context.onGoto?.(page, destination);
     };
     page.navigate = url => { href = url; page.emit('framenavigated', frame); };
     page.childNavigate = (url, parent = frame) => {
@@ -167,6 +174,7 @@ class FakeContext extends EventEmitter {
       allHeaders: async () => this.requestHeaders ?? {},
       sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
     };
+    this.emit('request', request);
     let permitted;
     await this.routeRequest({
       request: () => request,
@@ -188,7 +196,8 @@ class FakeContext extends EventEmitter {
 async function fixture(t, {
   launch, defer = false,
   fetchStorageHelper = () => assert.fail('unexpected helper request'),
-  fetchPassportQr = () => assert.fail('unexpected provider QR request')
+  fetchPassportQr = () => assert.fail('unexpected provider QR request'),
+  fetchLoginAsset = () => assert.fail('unexpected guest asset request')
 } = {}) {
   const sandbox = await makeSandbox(t);
   const layout = await sandbox.prepare();
@@ -213,7 +222,7 @@ async function fixture(t, {
     return browser;
   } };
   const open = async () => {
-    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock, fetchStorageHelper, fetchPassportQr });
+    const gateway = await openBrowserGateway({ config: sandbox.config, store, chromium, clock, fetchStorageHelper, fetchPassportQr, fetchLoginAsset });
     sandbox.onCleanup(() => gateway.close());
     return gateway;
   };
@@ -789,6 +798,7 @@ test('login diagnostics report only bounded public stages and blocked operation 
   assert.deepEqual(stage, {
     main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused', loginEntry: 'panel-present',
     helper: { state: 'new-version', version: '4.0.8' },
+    loginResources: { loaded: 0, refused: 0 },
     blockedPassport: { GET: 2, POST: 1, routes: [
       { method: 'GET', name: 'get_qrcode' },
       { method: 'POST', name: 'check_qrconnect' }
@@ -1110,6 +1120,162 @@ test('approved same-document login preserves QR authority but a real main reload
   assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
   assert.equal(calls, 2);
   assert.equal(browser.fulfillments.length, 2);
+});
+
+const loginAsset = 'https://lf-ucenter-web.yhgfb-cn-static.com/static/login-boot.js';
+
+function guestAssetResponse(url, { status = 200, type = 'application/javascript', body = '/* guest fixture */' } = {}) {
+  const response = new Response(body, {
+    status, headers: { 'content-type': type, 'set-cookie': 'fixture=must-not-reach-browser' }
+  });
+  Object.defineProperty(response, 'url', { value: url });
+  return response;
+}
+
+test('leased public static loading is active inside the first owned login goto', async t => {
+  const calls = [];
+  const { browser, gateway } = await fixture(t, { fetchLoginAsset: async (url, options) => {
+    calls.push({ url, options });
+    return guestAssetResponse(url, { body: options.method === 'HEAD' ? null : '/* guest fixture */' });
+  } });
+  const observed = [];
+  browser.onGoto = async page => {
+    observed.push(await browser.visit(page.mainFrame(), loginAsset, 'script'));
+  };
+  // An unleased open retains the old deny boundary.
+  await gateway.openLogin();
+  assert.deepEqual(observed, [false]);
+  await browser.sourcePages()[0].close();
+
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(view.width, panelRect.width);
+  assert.deepEqual(observed, [false, true]);
+  const page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  assert.equal(await browser.visit(main, loginAsset, 'script', 'HEAD'), true);
+  assert.deepEqual(calls.map(({ url, options }) => [url, options.method, options.credentials, options.redirect]), [
+    [loginAsset, 'GET', 'omit', 'error'], [loginAsset, 'HEAD', 'omit', 'error']
+  ]);
+  assert.ok(calls.every(({ options }) => options.signal instanceof AbortSignal));
+  assert.equal(browser.fulfillments[0].headers['set-cookie'], undefined);
+  assert.equal(browser.fulfillments[0].body.toString(), '/* guest fixture */');
+  assert.equal(browser.fulfillments[1].body.length, 0);
+  assert.deepEqual(gateway.reportStage().loginResources, { loaded: 2, refused: 0 });
+
+  for (const [frame, url, resource, method, navigation, redirected] of [
+    [main, loginAsset.replace('https:', 'http:'), 'script'],
+    [main, loginAsset.replace('lf-ucenter', 'lookalike'), 'script'],
+    [main, loginAsset.replace('lf-ucenter-web.yhgfb-cn-static.com', '10.0.0.1'), 'script'],
+    [main, loginAsset.replace('/static', ':443/static'), 'script'],
+    [main, loginAsset.replace('/static', ':8443/static'), 'script'],
+    [main, loginAsset, 'fetch'],
+    [main, loginAsset, 'script', 'POST'],
+    [main, loginAsset, 'script', 'GET', false, {}],
+    [main, loginAsset, 'document', 'GET', true],
+    [page.childNavigate('about:blank'), loginAsset, 'script'],
+    [main, loginAsset.replace('/static/login-boot.js', '/passport/web/challenge/'), 'script']
+  ]) assert.equal(await browser.visit(frame, url, resource, method, navigation, redirected), false);
+  browser.onGoto = undefined;
+  await gateway.verifyIdentity();
+  assert.equal(await browser.visit(browser.sourcePages()[0].mainFrame(), loginAsset, 'script'), false);
+  assert.equal(calls.length, 2);
+});
+
+test('a linked initial login redirect loads assets but a later real reload cannot inherit that grant', async t => {
+  const { browser, gateway } = await fixture(t, {
+    fetchLoginAsset: async url => guestAssetResponse(url)
+  });
+  const root = 'https://www.douyin.com/';
+  browser.onInitialRequest = initial => {
+    browser.emit('request', { ...initial, url: () => root, redirectedFrom: () => initial });
+    return root;
+  };
+  let duringGoto;
+  browser.onGoto = async page => {
+    duringGoto = await browser.visit(page.mainFrame(), loginAsset, 'script');
+  };
+  const assertQrRequest = () => {};
+  await gateway.openLogin({ assertQrRequest });
+  assert.equal(duringGoto, true);
+  const page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  page.navigate(root + '?same-document');
+  assert.equal(await browser.visit(main, loginAsset, 'script'), true);
+  assert.equal(await browser.visit(main, self + '?reload', 'document'), true);
+  page.navigate(self + '?reload');
+  assert.equal(await browser.visit(main, loginAsset, 'script'), false);
+  await gateway.openLogin({ assertQrRequest });
+  assert.equal(browser.sourcePages()[0], page);
+  assert.equal(await browser.visit(main, loginAsset, 'script'), true);
+});
+
+test('an unrelated request cannot extend the initial login redirect grant', async t => {
+  let loads = 0;
+  const { browser, gateway } = await fixture(t, {
+    fetchLoginAsset: async url => { loads++; return guestAssetResponse(url); }
+  });
+  const root = 'https://www.douyin.com/';
+  browser.onInitialRequest = initial => {
+    browser.emit('request', { ...initial, url: () => root, redirectedFrom: () => ({}) });
+    return root;
+  };
+  await gateway.openLogin({ assertQrRequest() {} });
+  const page = browser.sourcePages()[0];
+  assert.equal(await browser.visit(page.mainFrame(), loginAsset, 'script'), false);
+  assert.equal(loads, 0);
+});
+
+test('leased login admits only the four observed credentialless public bootstrap GETs', async t => {
+  const calls = [];
+  const { browser, gateway } = await fixture(t, { fetchLoginAsset: async (url, options) => {
+    calls.push({ url, options });
+    return guestAssetResponse(url, { type: 'application/json', body: '{"fixture":true}' });
+  } });
+  await gateway.openLogin({ assertQrRequest() {} });
+  const page = browser.sourcePages()[0];
+  const main = page.mainFrame();
+  const paths = ['/aweme/v1/web/social/count', '/aweme/v1/web/solution/resource/list/',
+    '/aweme/v1/web/get/user/settings/', '/aweme/v1/web/query/user/'];
+  for (const pathname of paths) {
+    assert.equal(await browser.visit(main, 'https://www.douyin.com' + pathname + '?fixture=value', 'fetch'), true);
+  }
+  for (const [frame, pathname, method] of [
+    [main, paths[0] + '/', 'GET'],
+    [main, paths[1], 'POST'],
+    [main, paths[2], 'HEAD'],
+    [main, paths[3] + 'other', 'GET'],
+    [main, '/aweme/v1/web/other/boot/', 'GET'],
+    [page.childNavigate('about:blank'), paths[0], 'GET']
+  ]) assert.equal(await browser.visit(frame, 'https://www.douyin.com' + pathname, 'fetch', method), false);
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), paths);
+  assert.ok(calls.every(({ options }) => options.credentials === 'omit' && options.redirect === 'error'));
+  assert.ok(browser.fulfillments.every(({ headers }) => !('set-cookie' in headers)));
+});
+
+test('added static loads cannot fulfill redirects, non-static bodies, or a request after its lease is lost', async t => {
+  let reply, live = true;
+  const { browser, gateway } = await fixture(t, { fetchLoginAsset: () => reply() });
+  await gateway.openLogin({ assertQrRequest() { if (!live) throw new ProbeError('STALE_LEASE'); } });
+  const frame = browser.sourcePages()[0].mainFrame();
+  for (const response of [
+    guestAssetResponse(loginAsset, { status: 302 }),
+    guestAssetResponse('https://outside.invalid/boot.js'),
+    guestAssetResponse(loginAsset, { type: 'text/html' }),
+    guestAssetResponse(loginAsset, { body: 'x'.repeat(4 * 1024 * 1024 + 1) })
+  ]) {
+    reply = async () => response;
+    assert.equal(await browser.visit(frame, loginAsset, 'script'), false);
+  }
+  const started = Promise.withResolvers();
+  const pending = Promise.withResolvers();
+  reply = () => { started.resolve(); return pending.promise; };
+  const visit = browser.visit(frame, loginAsset, 'script');
+  await started.promise;
+  live = false;
+  pending.resolve(guestAssetResponse(loginAsset));
+  assert.equal(await visit, false);
+  assert.equal(browser.fulfillments.length, 0);
+  assert.deepEqual(gateway.reportStage().loginResources, { loaded: 0, refused: 5 });
 });
 
 test('browser routes admit the known page and read API without permitting account writes', async t => {
