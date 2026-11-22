@@ -102,7 +102,7 @@ export function createClientOperations(api, onRecord = () => {}) {
   };
 }
 
-export function createQrView({ image, load, clock = globalThis, urls = URL }) {
+export function createQrView({ image, load, clock = globalThis, urls = URL, onExpire = () => {} }) {
   let current, timer, source;
   function clear() {
     current?.abort();
@@ -127,7 +127,19 @@ export function createQrView({ image, load, clock = globalThis, urls = URL }) {
       }
       source = urls.createObjectURL(png);
       image.src = source;
+      await image.decode().catch(() => { throw Error('PROBE_QR_UNAVAILABLE'); });
+      if (current !== capture) return false;
+      if (!allowed()) {
+        clear();
+        return false;
+      }
       image.hidden = false;
+      image.scrollIntoView({ block: 'nearest' });
+      clock.clearTimeout(timer);
+      timer = clock.setTimeout(() => {
+        clear();
+        onExpire();
+      }, 40000);
       return true;
     } catch (error) {
       if (current !== capture) return false;
@@ -143,6 +155,7 @@ if (typeof document !== 'undefined') {
   const controls = el('controls'),
     status = el('status'),
     output = el('output');
+  const qrReadyMessage = '请用手机抖音扫码并确认，再点“核验账号”。';
   let holder = false,
     pulse,
     identityAttempt = 0;
@@ -163,6 +176,11 @@ if (typeof document !== 'undefined') {
   });
   const qrView = createQrView({
     image: el('login-qr'),
+    onExpire() {
+      if (output.textContent === qrReadyMessage) {
+        output.textContent = '二维码显示时间已到。已在手机确认可点“核验账号”继续，否则可重新打开登录页。';
+      }
+    },
     async load(revision, signal) {
       const res = await fetch('/probe/v1/identity/qr?revision=' + encodeURIComponent(revision), {
         cache: 'no-store', signal
@@ -271,7 +289,7 @@ if (typeof document !== 'undefined') {
       if (cmd === 'open') {
         output.textContent = '正在检查来源登录页…';
         if (await qrView.show(result.pageRevision, current) && current())
-          output.textContent = '请用手机抖音扫码并确认，再点“核验账号”。';
+          output.textContent = qrReadyMessage;
         return;
       }
       output.textContent = JSON.stringify(result, null, 2);

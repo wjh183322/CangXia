@@ -30,7 +30,7 @@ test('wake locks synchronously and losing the grant rejects a late renewal', asy
 });
 test('clearing the owner QR removes its image and ignores a late response', async () => {
   const { createQrView } = await import('../web/app.mjs');
-  const image = { hidden: true, removeAttribute() { delete this.src; } };
+  const image = { hidden: true, async decode() {}, scrollIntoView() {}, removeAttribute() { delete this.src; } };
   const clock = fakeClock();
   let response;
   let revoked;
@@ -50,11 +50,46 @@ test('clearing the owner QR removes its image and ignores a late response', asyn
   await fresh;
   assert.equal(image.src, 'blob:fixture');
   assert.equal(image.hidden, false);
-  clock.advance(20001);
+  clock.advance(40001);
   assert.equal(revoked, 'blob:fixture');
   assert.equal(image.hidden, true);
   assert.equal(image.src, undefined);
 });
+test('the QR display time starts after decoding and expiration is reported', async () => {
+  const { createQrView } = await import('../web/app.mjs');
+  const clock = fakeClock();
+  const response = Promise.withResolvers();
+  const decoded = Promise.withResolvers();
+  let scrolled = false, expired = false;
+  const image = {
+    hidden: true,
+    decode: () => decoded.promise,
+    removeAttribute() { delete this.src; },
+    scrollIntoView() { scrolled = true; }
+  };
+  const view = createQrView({
+    image, clock, load: () => response.promise,
+    urls: { createObjectURL: () => 'blob:fixture', revokeObjectURL() {} },
+    onExpire() { expired = true; }
+  });
+  const showing = view.show(7);
+  clock.advance(10000);
+  response.resolve(new Blob(['fixture'], { type: 'image/png' }));
+  await Promise.resolve();
+  assert.equal(image.hidden, true);
+  assert.equal(scrolled, false);
+  decoded.resolve();
+  assert.equal(await showing, true);
+  assert.equal(image.hidden, false);
+  assert.equal(scrolled, true);
+  clock.advance(39000);
+  assert.equal(image.hidden, false);
+  clock.advance(1001);
+  assert.equal(image.hidden, true);
+  assert.equal(image.src, undefined);
+  assert.equal(expired, true);
+});
+
 test('repeated release while confirmation is pending shares the same request', async () => {
   const { createClientOperations } = await import('../web/app.mjs');
   let complete;
