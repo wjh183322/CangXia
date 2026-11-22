@@ -1021,18 +1021,34 @@ export async function openBrowserGateway({
       assertOpening();
       assertVerificationAvailable();
       if (slot !== login || pages.get(page) !== slot || page.isClosed()) throw staleView();
-      if (assetAuthority?.open && slot.assetAuthority === assetAuthority) {
-        if (assetAuthority.bootstrap === 'reloading') {
-          if (dispatched || !sourcePage(page.url(), 'login')) throw staleView();
-          return false;
-        }
-        if (!dispatched && slot.storageFrames !== storageFrames &&
-            assetAuthority.reloadDocument === slot.storageFrames && !slot.qrAuthority && trustedView(slot)) {
-          storageFrames = slot.storageFrames;
-          slot.qrAuthority = qrAuthority;
-        }
+      const sameOpening = assetAuthority?.open && slot.assetAuthority === assetAuthority;
+      if (!sourcePage(page.url(), 'login')) throw staleView();
+      if (sameOpening && assetAuthority.bootstrap === 'reloading') {
+        if (dispatched) throw staleView();
+        return false;
       }
-      if (!trustedView(slot) || slot.qrAuthority !== qrAuthority || slot.storageFrames !== storageFrames) throw staleView();
+      const rebind = sameOpening && !dispatched && slot.storageFrames !== storageFrames &&
+        assetAuthority.reloadDocument === slot.storageFrames && !slot.qrAuthority;
+      if (!rebind && (slot.qrAuthority !== qrAuthority || slot.storageFrames !== storageFrames)) throw staleView();
+
+      const main = page.mainFrame();
+      let pendingHelper = false;
+      for (const frame of page.frames()) {
+        if (frame === main) continue;
+        const authorization = slot.storageFrames.get(frame);
+        const url = frame.url();
+        if (directLoginChild(slot, frame) && authorization?.revision === slot.revision &&
+            authorization.observation?.state === 'requested' &&
+            ['fetching', 'provided'].includes(authorization.phase) && storageHelperUrls.has(authorization.url) &&
+            (url === '' || url === 'about:blank' || url === authorization.url)) {
+          pendingHelper = true;
+        } else if (!trustedLoginChild(slot, frame)) throw staleView();
+      }
+      if (pendingHelper) return false;
+      if (rebind) {
+        storageFrames = slot.storageFrames;
+        slot.qrAuthority = qrAuthority;
+      }
       return true;
     };
     const pause = async () => {
@@ -1087,7 +1103,8 @@ export async function openBrowserGateway({
           },
           signal, timeout: Math.min(driverTimeout, remaining())
         });
-        if (!ready()) throw staleView();
+        // The authorized click may have started a helper. Validate the scope and let the next poll wait.
+        ready();
         if (action?.loginEntry === 'clicked') loginStage.loginEntry = 'clicked';
         else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
       }

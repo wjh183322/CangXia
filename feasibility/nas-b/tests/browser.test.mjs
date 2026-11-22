@@ -764,6 +764,97 @@ test('only both verified direct login helpers can coexist with a main-document Q
   assert.equal(browser.input.length, 0);
 });
 
+test('opening waits passively for a current direct storage helper before observing the QR panel', async t => {
+  for (const trigger of ['probe-open', 'open']) {
+    await t.test(trigger, async t => {
+      const url = storageHelper('4.0.7');
+      const started = Promise.withResolvers();
+      const response = Promise.withResolvers();
+      const { browser, gateway } = await fixture(t, { fetchStorageHelper: () => {
+        started.resolve();
+        return response.promise;
+      } });
+      loginQrFixture(browser);
+      const completedPanel = browser.panelDocument;
+      browser.panelDocument = undefined;
+      browser.panel = null;
+      browser.entryVisible = trigger === 'open';
+      let pending = false, delivered = false, visit, pauses = 0, clicks = 0;
+      browser.beforePanel = async (action, page) => {
+        assert.equal(pending, false, 'driver inspection while the helper is pending');
+        if (action === 'open') clicks++;
+        if (visit || action !== trigger) return;
+        const child = page.childNavigate('about:blank');
+        const committedUrl = child.url;
+        child.url = () => trigger === 'open' ? url : '';
+        pending = true;
+        visit = browser.visit(child, url, 'document').then(result => {
+          delivered = result;
+          return result;
+        });
+        await started.promise;
+        browser.clock.onPaceWait = () => {
+          pauses++;
+          if (pauses === 1) {
+            response.resolve(helperResponse(url));
+            return;
+          }
+          if (!delivered) return;
+          browser.clock.onPaceWait = undefined;
+          child.url = committedUrl;
+          child.navigate(url);
+          pending = false;
+          browser.panelDocument = completedPanel;
+        };
+      };
+      const view = await gateway.openLogin({ assertQrRequest() {} });
+      assert.equal(view.width, panelRect.width);
+      assert.equal(await visit, true);
+      assert.ok(pauses >= 2);
+      assert.equal(clicks, trigger === 'open' ? 1 : 0);
+      assert.equal(gateway.reportStage().loginEntry, trigger === 'open' ? 'clicked' : 'panel-present');
+      assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+      await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
+    });
+  }
+});
+
+test('a pending helper does not extend readiness beyond current frame, lease or timeout', async t => {
+  for (const stop of ['unmarked sibling', 'nested', 'lost lease', 'canceled', 'timeout']) {
+    await t.test(stop, async t => {
+      const started = Promise.withResolvers();
+      const { browser, gateway } = await fixture(t, { fetchStorageHelper: () => {
+        started.resolve();
+        return new Promise(() => {});
+      } });
+      browser.panel = null;
+      browser.entryVisible = false;
+      let live = true, inspections = 0;
+      const request = new AbortController();
+      browser.beforePanel = async (action, page) => {
+        assert.equal(action, 'probe-open');
+        assert.equal(++inspections, 1);
+        const child = page.childNavigate('about:blank');
+        child.url = () => '';
+        void browser.visit(child, storageHelper('4.0.7'), 'document');
+        await started.promise;
+        if (stop === 'unmarked sibling') page.childNavigate('about:blank').url = () => '';
+        if (stop === 'nested') page.childNavigate('about:blank', child);
+        if (stop === 'lost lease') browser.clock.onPaceWait = () => { live = false; };
+        if (stop === 'canceled') browser.clock.onPaceWait = () => request.abort(new ProbeError('STALE_LEASE'));
+      };
+      const code = stop === 'timeout' ? 'PROBE_BROWSER_TIMEOUT' :
+        ['lost lease', 'canceled'].includes(stop) ? 'STALE_LEASE' : 'STALE_BROWSER_VIEW';
+      await assert.rejects(gateway.openLogin({
+        signal: request.signal,
+        guard() { if (!live) throw new ProbeError('STALE_LEASE'); },
+        assertQrRequest() {}
+      }), { code });
+      assert.equal(inspections, 1);
+    });
+  }
+});
+
 test('login diagnostics report only bounded public stages and blocked operation summaries', async t => {
   const url = storageHelper('4.0.7');
   const gate = Promise.withResolvers();
