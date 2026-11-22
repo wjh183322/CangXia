@@ -248,9 +248,12 @@ function isDirectResponse(response, url, contentType) {
     response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === contentType;
 }
 
-async function boundedResponseBody(response, limit, accepted) {
+async function boundedResponseBody(response, limit, accepted, onRefusal) {
   const reader = response.body?.getReader();
-  if (!reader) return null;
+  if (!reader) {
+    if (accepted) onRefusal?.('body-empty');
+    return null;
+  }
   try {
     if (!accepted) return null;
     const chunks = [];
@@ -259,9 +262,13 @@ async function boundedResponseBody(response, limit, accepted) {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.byteLength;
-      if (length > limit) return null;
+      if (length > limit) {
+        onRefusal?.('body-oversized');
+        return null;
+      }
       chunks.push(value);
     }
+    if (!length) onRefusal?.('body-empty');
     return length ? Buffer.concat(chunks, length) : null;
   } finally {
     await reader.cancel().catch(() => {});
@@ -343,30 +350,56 @@ function passportFulfillHeaders(source) {
 
 async function deliverPassportQr(route, pages, slot, frame, url, observation, fetchPassportQr) {
   const { page, qrAuthority } = slot;
-  if (!qrAuthority) return false;
-  const current = () => pages.get(page) === slot && slot.qrAuthority === qrAuthority &&
-    slot.assetAuthority?.bootstrap !== 'reloading' && frame === page.mainFrame() &&
-    trustedLoginView(slot) && qrAuthority.assert() === undefined;
+  let refusalReason = 'no-authority', upstreamStatus;
+  const current = (delivering = false) => {
+    refusalReason = delivering ? 'stale-before-delivery' : 'view-guard';
+    if (pages.get(page) !== slot || slot.qrAuthority !== qrAuthority) return false;
+    if (slot.assetAuthority?.bootstrap === 'reloading') {
+      if (!delivering) refusalReason = 'bootstrap-reloading';
+      return false;
+    }
+    if (frame !== page.mainFrame() || !trustedLoginView(slot)) return false;
+    if (!delivering) refusalReason = 'lease-guard';
+    return qrAuthority.assert() === undefined;
+  };
   try {
-    if (!current()) return false;
+    if (!qrAuthority || !current()) return false;
+    refusalReason = 'request-headers';
     const observed = await browserCall(() => route.request().allHeaders());
     const headers = forwardPassportHeaders(observed);
     if (!current()) return false;
     observation.state = 'requested';
+    refusalReason = 'fetch-failed';
     // Forward the authorized browser's exact request without using a shared HTTP cookie jar.
     const response = await fetchPassportQr(url, {
       method: 'GET', headers, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
     });
+    refusalReason = 'response-metadata';
     const accepted = isDirectResponse(response, url, 'application/json') && !response.headers.has('refresh');
-    const body = await boundedResponseBody(response, maxPassportQrBytes, accepted);
-    if (!body || !current()) return false;
+    if (accepted) refusalReason = 'body-read-failed';
+    else {
+      const status = response.status;
+      if (typeof status === 'number' && status !== 200) {
+        refusalReason = 'http-status';
+        if (Number.isInteger(status) && status >= 100 && status <= 599) upstreamStatus = status;
+      }
+    }
+    const body = await boundedResponseBody(response, maxPassportQrBytes, accepted, reason => { refusalReason = reason; });
+    if (!body || !current(true)) return false;
+    refusalReason = 'response-metadata';
     const responseHeaders = passportFulfillHeaders(response.headers);
     if (!responseHeaders['content-type']) return false;
+    refusalReason = 'fulfill-failed';
     await route.fulfill({ status: 200, headers: responseHeaders, body });
     observation.state = 'delivered';
     return true;
   } catch {
     return false;
+  } finally {
+    if (observation.state !== 'delivered') {
+      observation.refusalReason = refusalReason;
+      if (upstreamStatus !== undefined) observation.upstreamStatus = upstreamStatus;
+    }
   }
 }
 
@@ -1479,9 +1512,14 @@ export async function openBrowserGateway({
           children.some(frame => frame.url() !== 'about:blank') ? 'helper-child' : 'blank-child';
       }
     }
+    const { qrRequest } = loginStage;
     return {
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
-      qrRequest: loginStage.qrRequest.state, loginEntry: loginStage.loginEntry,
+      qrRequest: qrRequest.state, loginEntry: loginStage.loginEntry,
+      ...(qrRequest.state === 'refused' && qrRequest.refusalReason ? {
+        qrRefusalReason: qrRequest.refusalReason,
+        ...(qrRequest.upstreamStatus === undefined ? {} : { qrUpstreamStatus: qrRequest.upstreamStatus })
+      } : {}),
       helper: { ...loginStage.helper },
       loginResources: { ...loginStage.loginResources },
       blockedPassport: {

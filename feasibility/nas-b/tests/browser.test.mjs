@@ -171,7 +171,10 @@ class FakeContext extends EventEmitter {
     const request = {
       url: () => url, resourceType: () => type, method: () => method,
       isNavigationRequest: () => isNavigation, redirectedFrom: () => redirectedFrom, frame: () => frame,
-      allHeaders: async () => this.requestHeaders ?? {},
+      allHeaders: async () => {
+        await this.beforeRequestHeaders?.();
+        return this.requestHeaders ?? {};
+      },
       sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
     };
     this.emit('request', request);
@@ -887,7 +890,7 @@ test('login diagnostics report only bounded public stages and blocked operation 
   assert.equal(await browser.visit(next, storageHelper('4.0.8') + '?token=never-export', 'document'), false);
   const stage = gateway.reportStage();
   assert.deepEqual(stage, {
-    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused', loginEntry: 'panel-present',
+    main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused', qrRefusalReason: 'no-authority', loginEntry: 'panel-present',
     helper: { state: 'new-version', version: '4.0.8' },
     loginResources: { loaded: 0, refused: 0 },
     blockedPassport: { GET: 2, POST: 1, routes: [
@@ -1093,6 +1096,7 @@ test('only the current owned main login view forwards the original official QR G
   let page = browser.sourcePages()[0];
   assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), false);
   assert.equal(gateway.reportStage().qrRequest, 'refused');
+  assert.equal(gateway.reportStage().qrRefusalReason, 'no-authority');
   assert.equal(calls.length, 0);
 
   let checks = 0;
@@ -1106,6 +1110,8 @@ test('only the current owned main login view forwards the original official QR G
   for (const [type, url] of [['xhr', passportQr + '/?fixture=never-reported'], ['fetch', passportQr]]) {
     assert.equal(await browser.visit(main, url, type), true);
     assert.equal(gateway.reportStage().qrRequest, 'delivered');
+    assert.equal(Object.hasOwn(gateway.reportStage(), 'qrRefusalReason'), false);
+    assert.equal(Object.hasOwn(gateway.reportStage(), 'qrUpstreamStatus'), false);
   }
   assert.equal(checks, 6);
   assert.deepEqual(calls.map(({ url, options }) => [url, options.method, options.redirect, options.credentials]), [
@@ -1152,18 +1158,28 @@ test('provider QR GET rejects redirects, oversized or wrong responses, and lost 
   await gateway.openLogin({ assertQrRequest() { if (!live) throw new ProbeError('STALE_LEASE'); } });
   const page = browser.sourcePages()[0];
   const main = page.mainFrame();
-  for (const response of [
-    passportResponse(passportQr, { status: 302, location: 'https://outside.invalid/' }),
-    passportResponse(passportQr, { location: 'https://outside.invalid/' }),
-    passportResponse(passportQr, { type: 'text/html' }),
-    passportResponse('https://outside.invalid/'),
-    passportResponse(passportQr, { redirected: true }),
-    passportResponse(passportQr, { status: 403 }),
-    passportResponse(passportQr, { body: 'x'.repeat(256 * 1024 + 1) })
+  const brokenBody = new ReadableStream({
+    pull(reader) { reader.error(new Error('fixture-body-private')); }
+  });
+  for (const [response, reason, status] of [
+    [passportResponse(passportQr, { status: 302, location: 'https://outside.invalid/' }), 'http-status', 302],
+    [passportResponse(passportQr, { location: 'https://outside.invalid/' }), 'response-metadata'],
+    [passportResponse(passportQr, { type: 'text/html' }), 'response-metadata'],
+    [passportResponse('https://outside.invalid/'), 'response-metadata'],
+    [passportResponse(passportQr, { redirected: true }), 'response-metadata'],
+    [passportResponse(passportQr, { status: 403 }), 'http-status', 403],
+    [passportResponse(passportQr, { body: 'x'.repeat(256 * 1024 + 1) }), 'body-oversized'],
+    [passportResponse(passportQr, { body: null }), 'body-empty'],
+    [passportResponse(passportQr, { body: '' }), 'body-empty'],
+    [passportResponse(passportQr, { body: brokenBody }), 'body-read-failed']
   ]) {
     nextResponse = () => response;
     assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
-    assert.equal(gateway.reportStage().qrRequest, 'refused');
+    const stage = gateway.reportStage();
+    assert.equal(stage.qrRequest, 'refused');
+    assert.equal(stage.qrRefusalReason, reason);
+    assert.equal(stage.qrUpstreamStatus, status);
+    assert.doesNotMatch(JSON.stringify(stage), /fixture-body-private|outside[.]invalid|https:/);
   }
 
   const started = Promise.withResolvers();
@@ -1175,10 +1191,37 @@ test('provider QR GET rejects redirects, oversized or wrong responses, and lost 
   live = false;
   pending.resolve(passportResponse(passportQr));
   assert.equal(await visit, false);
+  assert.equal(gateway.reportStage().qrRefusalReason, 'stale-before-delivery');
   assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
-  assert.equal(calls, 8);
+  assert.equal(gateway.reportStage().qrRefusalReason, 'lease-guard');
+  assert.equal(calls, 11);
   assert.equal(browser.fulfillments.length, 0);
   assert.equal(gateway.reportStage().qrRequest, 'refused');
+});
+
+test('provider QR refuses separately at view, header, fetch and fulfill stages without exposing errors', async t => {
+  for (const phase of ['view-guard', 'request-headers', 'fetch-failed', 'fulfill-failed']) {
+    await t.test(phase, async t => {
+      let fetches = 0;
+      const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => {
+        fetches++;
+        if (phase === 'fetch-failed') throw new Error('fixture-private-error');
+        return passportResponse(url);
+      } });
+      await gateway.openLogin({ assertQrRequest() {} });
+      const page = browser.sourcePages()[0];
+      if (phase === 'view-guard') page.childNavigate('about:blank').url = () => '';
+      if (phase === 'request-headers') browser.beforeRequestHeaders = () => { throw new Error('fixture-private-error'); };
+      if (phase === 'fulfill-failed') browser.beforeFulfill = () => { throw new Error('fixture-private-error'); };
+      assert.equal(await browser.visit(page.mainFrame(), passportQr + '?test=fixture-private-query', 'xhr'), false);
+      const stage = gateway.reportStage();
+      assert.equal(stage.qrRequest, 'refused');
+      assert.equal(stage.qrRefusalReason, phase);
+      assert.equal(Object.hasOwn(stage, 'qrUpstreamStatus'), false);
+      assert.equal(fetches, ['fetch-failed', 'fulfill-failed'].includes(phase) ? 1 : 0);
+      assert.doesNotMatch(JSON.stringify(stage), /fixture-private-|https:|set-cookie/);
+    });
+  }
 });
 
 test('approved same-document login preserves QR authority but a real main reload revokes it', async t => {
