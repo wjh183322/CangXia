@@ -361,7 +361,14 @@ async function deliverPassportQr(route, pages, slot, frame, url, observation, fe
     }
     if (frame !== page.mainFrame() || !trustedLoginView(slot)) return false;
     if (!delivering) refusalReason = 'lease-guard';
-    return qrAuthority.assert() === undefined;
+    try {
+      return qrAuthority.assert() === undefined;
+    } catch (error) {
+      if (error instanceof ProbeError &&
+          ['PROBE_UNAUTHENTICATED', 'STALE_LEASE', 'PROBE_VIEW_REQUIRED'].includes(error.code))
+        observation.guardFailure = error.code;
+      throw error;
+    }
   };
   try {
     if (!qrAuthority || !current()) return false;
@@ -1073,7 +1080,9 @@ export async function openBrowserGateway({
     let { storageFrames } = slot;
     const signal = requestSignal ? AbortSignal.any([requestSignal, epochController.signal]) : epochController.signal;
     const started = clock.now();
-    const deadline = started + loginReadinessMs;
+    const entryDeadline = started + loginReadinessMs;
+    let deadline = entryDeadline;
+    let qrDeadlineStarted = false;
     const remaining = () => Math.ceil(deadline - clock.now());
     let dispatched = false;
     let waitingForQr = false;
@@ -1155,6 +1164,11 @@ export async function openBrowserGateway({
       if (slot.panel) {
         if (loginStage.loginEntry !== 'clicked') loginStage.loginEntry = 'panel-present';
         if (waitingForQr) {
+          if (!qrDeadlineStarted) {
+            // The initial page readiness limit is independent of the provider QR response.
+            deadline = clock.now() + requestTimeout;
+            qrDeadlineStarted = true;
+          }
           const { panel } = slot;
           const observedRevision = pageRevision;
           const timeout = Math.min(driverTimeout, remaining());
@@ -1168,16 +1182,17 @@ export async function openBrowserGateway({
         }
         return;
       }
+      const entryRemaining = Math.ceil(entryDeadline - clock.now());
       if (!dispatched && revision === pageRevision && result?.loginEntry === 'ready' &&
-          clock.now() - started >= loginObservationMs && remaining() > 0) {
+          clock.now() - started >= loginObservationMs && entryRemaining > 0) {
         dispatched = true;
         const action = await mutateLogin(slot, pageRevision, () => page.evaluate(panelScript, { viewProbe, action: 'open' }), {
           beforeDispatch() {
             if (!ready()) throw staleView();
-            if (remaining() <= 0) throw timedOut();
+            if (clock.now() >= entryDeadline || remaining() <= 0) throw timedOut();
             if (assetAuthority?.bootstrap === 'eligible') assetAuthority.bootstrap = 'done';
           },
-          signal, timeout: Math.min(driverTimeout, remaining())
+          signal, timeout: Math.min(driverTimeout, entryRemaining)
         });
         // The authorized click may have started a helper. Validate the scope and let the next poll wait.
         ready();
@@ -1562,6 +1577,7 @@ export async function openBrowserGateway({
       qrRequest: qrRequest.state, loginEntry: loginStage.loginEntry,
       ...(qrRequest.state === 'refused' && qrRequest.refusalReason ? {
         qrRefusalReason: qrRequest.refusalReason,
+        ...(qrRequest.guardFailure === undefined ? {} : { qrGuardFailure: qrRequest.guardFailure }),
         ...(qrRequest.upstreamStatus === undefined ? {} : { qrUpstreamStatus: qrRequest.upstreamStatus })
       } : {}),
       helper: { ...loginStage.helper },

@@ -695,6 +695,43 @@ test('opening the official QR modal waits for its image without capturing or rep
   await assert.rejects(gateway.openLogin({ assertQrRequest() {} }), { code: 'PROBE_QR_UNAVAILABLE' });
 });
 
+test('a confirmed login panel keeps a delayed official QR request in the same opening', async t => {
+  let upstreamRequests = 0;
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => {
+    upstreamRequests++;
+    return passportResponse(url);
+  } });
+  const qr = loginQrFixture(browser, { semanticDialog: false, tag: 'img' });
+  qr.complete = false;
+  let routed = false;
+  browser.beforePanel = async (action, page) => {
+    if (action === 'probe-open' && !routed && browser.clock.now() >= 4500) {
+      routed = true;
+      assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), true);
+      qr.complete = true;
+    }
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(upstreamRequests, 1);
+  assert.equal(gateway.reportStage().qrRequest, 'delivered');
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+});
+
+test('QR image readiness does not extend the time to click a new login entry', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser, { semanticDialog: false, tag: 'img' }).complete = false;
+  let clicks = 0;
+  browser.clock.onPaceWait = () => {
+    if (browser.clock.now() < 4500) return;
+    browser.panelDocument = undefined;
+    browser.panel = null;
+    browser.entryVisible = true;
+  };
+  browser.beforePanel = action => { if (action === 'open') clicks++; };
+  assert.equal((await gateway.openLogin({ assertQrRequest() {} })).width, 0);
+  assert.equal(clicks, 0);
+});
+
 test('challenge, ambiguous crop, and changed official page withhold QR pixels', async t => {
   const { browser, gateway } = await fixture(t);
   for (const options of [{ challenge: true }, { ambiguous: true }]) {
@@ -1331,6 +1368,7 @@ test('provider QR GET rejects redirects, oversized or wrong responses, and lost 
   assert.equal(gateway.reportStage().qrRefusalReason, 'stale-before-delivery');
   assert.equal(await browser.visit(main, passportQr, 'xhr'), false);
   assert.equal(gateway.reportStage().qrRefusalReason, 'lease-guard');
+  assert.equal(gateway.reportStage().qrGuardFailure, 'STALE_LEASE');
   assert.equal(calls, 11);
   assert.equal(browser.fulfillments.length, 0);
   assert.equal(gateway.reportStage().qrRequest, 'refused');
