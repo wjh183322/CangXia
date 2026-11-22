@@ -532,6 +532,7 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
     install: () => context.route('**/*', async route => {
       const request = route.request();
       let allowed = false, observation;
+      let cancelBlankChildNavigation = false;
       try {
         const frame = request.frame();
         const page = frame.page();
@@ -564,6 +565,10 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
           } else recordBlockedPassport(loginStage, url, request.method());
         }
         if (slot && request.isNavigationRequest() && directLoginChild(slot, frame)) {
+          // A canceled navigation preserves the current blank document instead of committing a browser error page.
+          cancelBlankChildNavigation = frame.url() === 'about:blank' && !slot.storageFrames.has(frame) &&
+            !storageHelperUrls.has(url) && request.method() === 'GET' && !request.redirectedFrom() &&
+            request.resourceType() === 'document';
           slot.storageFrames.delete(frame);
           const version = observedHelperVersion(url);
           if (version) {
@@ -596,7 +601,7 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
         if (observation?.state === 'requested') observation.state = 'refused';
         blocked.add(request);
         totals.blockedRequests++;
-        await route.abort();
+        await route.abort(cancelBlankChildNavigation ? 'aborted' : undefined);
       }
     })
   };

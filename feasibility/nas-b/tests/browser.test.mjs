@@ -183,7 +183,7 @@ class FakeContext extends EventEmitter {
     let permitted;
     await this.routeRequest({
       request: () => request,
-      abort: async () => { permitted = false; this.emit('requestfailed', request); },
+      abort: async code => { this.lastAbortCode = code; permitted = false; this.emit('requestfailed', request); },
       continue: async () => { permitted = true; this.emit('requestfinished', request); },
       fulfill: async response => {
         this.fulfillments.push(response);
@@ -1223,6 +1223,27 @@ test('a newer request in a direct child supersedes a pending helper response', a
   child.navigate(newUrl);
   await retired;
   await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
+});
+
+test('a blocked navigation from an already blank direct child is canceled without allowing a document', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  const child = page.childNavigate('about:blank');
+  const outside = 'https://outside.invalid/';
+  assert.equal(await browser.visit(child, outside, 'document'), false);
+  assert.equal(browser.lastAbortCode, 'aborted');
+  assert.equal(child.url(), 'about:blank');
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+
+  assert.equal(await browser.visit(child, outside, 'document', 'POST'), false);
+  assert.equal(browser.lastAbortCode, undefined);
+  assert.equal(await browser.visit(child, outside, 'document', 'GET', true, {}), false);
+  assert.equal(browser.lastAbortCode, undefined);
+  child.url = () => '';
+  assert.equal(await browser.visit(child, outside, 'document'), false);
+  assert.equal(browser.lastAbortCode, undefined);
 });
 
 test('foreign child document requests and a committed redirected frame cannot be exposed', async t => {
