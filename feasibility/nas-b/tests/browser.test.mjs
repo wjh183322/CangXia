@@ -695,6 +695,43 @@ test('opening the official QR modal waits for its image without capturing or rep
   await assert.rejects(gateway.openLogin({ assertQrRequest() {} }), { code: 'PROBE_QR_UNAVAILABLE' });
 });
 
+test('a single login click keeps the same opening while a direct child and the QR panel settle after four seconds', async t => {
+  const { browser, gateway } = await fixture(t, {
+    fetchPassportQr: async url => passportResponse(url)
+  });
+  loginQrFixture(browser, { semanticDialog: false, tag: 'img' });
+  const qrDocument = browser.panelDocument;
+  browser.panelDocument = undefined;
+  browser.panel = null;
+
+  let clickedAt, child, childUrl;
+  let routed = false;
+  browser.beforePanel = async (action, page) => {
+    if (action === 'probe-open' && browser.panelDocument === qrDocument && !routed) {
+      routed = true;
+      assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), true);
+    }
+    if (action !== 'open') return;
+    assert.equal(clickedAt, undefined);
+    clickedAt = browser.clock.now();
+    child = page.childNavigate('about:blank');
+    childUrl = child.url;
+    child.url = () => '';
+  };
+  browser.clock.onPaceWait = () => {
+    if (!child || browser.clock.now() < clickedAt + 4600) return;
+    child.url = childUrl;
+    child.navigate('about:blank');
+    browser.panelDocument = qrDocument;
+    browser.clock.onPaceWait = undefined;
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.ok(browser.clock.now() >= clickedAt + 4600);
+  assert.equal(gateway.reportStage().loginEntry, 'clicked');
+  assert.equal(gateway.reportStage().qrRequest, 'delivered');
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+});
+
 test('a confirmed login panel keeps a delayed official QR request in the same opening', async t => {
   let upstreamRequests = 0;
   const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => {

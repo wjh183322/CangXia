@@ -1082,8 +1082,10 @@ export async function openBrowserGateway({
     const started = clock.now();
     const entryDeadline = started + loginReadinessMs;
     let deadline = entryDeadline;
-    let qrDeadlineStarted = false;
     const remaining = () => Math.ceil(deadline - clock.now());
+    const startQrWait = () => {
+      if (qrAuthority && deadline === entryDeadline) deadline = clock.now() + requestTimeout;
+    };
     let dispatched = false;
     let waitingForQr = false;
     const ready = () => {
@@ -1164,11 +1166,7 @@ export async function openBrowserGateway({
       if (slot.panel) {
         if (loginStage.loginEntry !== 'clicked') loginStage.loginEntry = 'panel-present';
         if (waitingForQr) {
-          if (!qrDeadlineStarted) {
-            // The initial page readiness limit is independent of the provider QR response.
-            deadline = clock.now() + requestTimeout;
-            qrDeadlineStarted = true;
-          }
+          startQrWait();
           const { panel } = slot;
           const observedRevision = pageRevision;
           const timeout = Math.min(driverTimeout, remaining());
@@ -1196,8 +1194,10 @@ export async function openBrowserGateway({
         });
         // The authorized click may have started a helper. Validate the scope and let the next poll wait.
         ready();
-        if (action?.loginEntry === 'clicked') loginStage.loginEntry = 'clicked';
-        else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
+        if (action?.loginEntry === 'clicked') {
+          loginStage.loginEntry = 'clicked';
+          startQrWait();
+        } else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
       }
     }
     if (!ready()) throw timedOut();
