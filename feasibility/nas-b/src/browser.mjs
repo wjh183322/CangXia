@@ -24,6 +24,7 @@ const loginObservationMs = 200;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
 const maxPassportQrBytes = 256 * 1024;
+const maxQrBitmapSize = 512;
 const passportRequestHeaders = [
   'accept', 'accept-language', 'cookie', 'origin', 'referer', 'user-agent',
   'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
@@ -96,7 +97,7 @@ export function isLoginQrPng(bytes) {
       bytes.toString('ascii', 12, 16) !== 'IHDR') return false;
   const width = bytes.readUInt32BE(16);
   const height = bytes.readUInt32BE(20);
-  return width >= 100 && width <= 450 && height >= 100 && height <= 450 &&
+  return width >= 100 && width <= maxQrBitmapSize && height >= 100 && height <= maxQrBitmapSize &&
     Math.abs(width / height - 1) <= 0.12;
 }
 
@@ -622,14 +623,27 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
   }
   let selected;
   let challenge;
+  let qrOnly = false;
+  const titlesOf = surface => [...surface.querySelectorAll('h1,h2,h3,[role="heading"],button,span,div')]
+    .filter(element => element.children.length < 3 && visible(element)).map(compact);
   for (const surface of surfaces) {
     const rect = box(surface);
     if (!fits(rect) || !visible(surface) || changesAccount.test(compact(surface))) continue;
-    const titles = [...surface.querySelectorAll('h1,h2,h3,[role="heading"],button,span,div')]
-      .filter(element => element.children.length < 3 && visible(element)).map(compact);
+    const titles = titlesOf(surface);
     challenge = !!knownRect && sameBox(rect, knownRect) && titles.some(title => challengeLabel.test(title));
     const qr = titles.some(title => qrLabel.test(title)) && !!surface.querySelector('canvas,img,svg');
     if (challenge || qr) { selected = surface; break; }
+  }
+  if (!selected && ['probe-open', 'open', 'qr'].includes(action)) {
+    // The official QR modal can omit dialog attributes. This recognition is only for the QR path.
+    selected = document.elementsFromPoint(innerWidth / 2, innerHeight / 2).find(surface => {
+      if (!fits(box(surface)) || !visible(surface) || !(parseFloat(getComputedStyle(surface).borderRadius) > 0) ||
+          changesAccount.test(compact(surface)) || !surface.querySelector('canvas,img,svg')) return false;
+      const titles = titlesOf(surface);
+      return titles.includes('如何扫码') && titles.includes('验证码登录') &&
+        titles.some(title => qrLabel.test(title)) && !titles.some(title => challengeLabel.test(title));
+    });
+    qrOnly = !!selected;
   }
   if (!selected) {
     if (action === 'probe-open' || action === 'open') {
@@ -646,8 +660,8 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
   }
   const identities = window[viewProbe] ??= { elements: new WeakMap(), next: 0 };
   if (!identities.elements.has(selected)) identities.elements.set(selected, ++identities.next);
-  const result = { ...box(selected), id: identities.elements.get(selected), allowed: false };
-  if (action === undefined || action === 'open' || action === 'probe-open') return result;
+  const result = { ...box(selected), id: identities.elements.get(selected), allowed: false, qrOnly };
+  if (action === undefined || action === 'open' || action === 'probe-open' || action === 'qr') return result;
 
   const keyboard = action === 'key' || action === 'text';
   const target = keyboard ? document.activeElement : document.elementFromPoint(x, y);
@@ -673,7 +687,7 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
 }
 
 // QR classification from electron/qr-page.mjs, restricted to the owned login panel.
-function loginQrRegion({ key, panel, encode }) {
+function loginQrRegion({ key, panel, encode, maxBitmapSize }) {
   const compact = element => (element.innerText || element.textContent || '').replace(/\s+/g, '');
   if (!document.body || scrollX || scrollY) return null;
   const body = compact(document.body);
@@ -715,12 +729,6 @@ function loginQrRegion({ key, panel, encode }) {
   }
   if (!marked) return null;
 
-  const { left, top, right, bottom } = element.getBoundingClientRect();
-  const x = Math.ceil(left), y = Math.ceil(top);
-  const width = Math.floor(right) - x, height = Math.floor(bottom) - y;
-  const points = [[x, y], [x + width - 1, y], [x, y + height - 1],
-    [x + width - 1, y + height - 1], [x + width / 2, y + height / 2]];
-  if (!points.every(([a, b]) => element.contains(document.elementFromPoint(a, b)))) return null;
   const isImage = element.tagName === 'IMG';
   if (!isImage && element.tagName !== 'CANVAS') return null;
   const source = isImage ? element.currentSrc : undefined;
@@ -729,8 +737,26 @@ function loginQrRegion({ key, panel, encode }) {
       !/^https:\/\/[^?#]+\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(source))) return null;
   const pixelWidth = isImage ? element.naturalWidth : element.width;
   const pixelHeight = isImage ? element.naturalHeight : element.height;
-  if (![pixelWidth, pixelHeight].every(size => Number.isInteger(size) && size >= 100 && size <= 450) ||
+  const inlineQr = isImage && /^data:image\/(?:png|jpeg|webp);base64,/i.test(source) &&
+    pixelWidth === maxBitmapSize && pixelHeight === maxBitmapSize;
+  if (![pixelWidth, pixelHeight].every(size => Number.isInteger(size) && size >= 100 && (size <= 450 || inlineQr)) ||
       Math.abs(pixelWidth / pixelHeight - 1) > 0.12) return null;
+  const { left, top, right, bottom } = element.getBoundingClientRect();
+  const x = Math.ceil(left), y = Math.ceil(top);
+  const width = Math.floor(right) - x, height = Math.floor(bottom) - y;
+  // The current inline QR has rounded corners and a separate small SVG logo at its center.
+  const inset = inlineQr ? Math.ceil(Math.min(width, height) / 10) : 0;
+  const x1 = x + inset, y1 = y + inset, x2 = x + width - 1 - inset, y2 = y + height - 1 - inset;
+  if (![[x1, y1], [x2, y1], [x1, y2], [x2, y2]].every(([a, b]) => element.contains(document.elementFromPoint(a, b)))) return null;
+  const cx = x + width / 2, cy = y + height / 2;
+  const center = document.elementFromPoint(cx, cy);
+  if (!element.contains(center)) {
+    const logo = inlineQr && center?.closest('svg');
+    if (!logo || !element.parentElement.contains(logo) || !document.elementsFromPoint(cx, cy).includes(element)) return null;
+    const rect = logo.getBoundingClientRect();
+    if (rect.width > width / 3 || rect.height > height / 3 ||
+        rect.left < left || rect.right > right || rect.top < top || rect.bottom > bottom) return null;
+  }
   const regions = state.qrRegions ??= new WeakMap();
   if (regions.get(element)?.source !== source || !regions.has(element)) {
     regions.set(element, { source, id: ++state.next });
@@ -1050,6 +1076,7 @@ export async function openBrowserGateway({
     const deadline = started + loginReadinessMs;
     const remaining = () => Math.ceil(deadline - clock.now());
     let dispatched = false;
+    let waitingForQr = false;
     const ready = () => {
       assertOpening();
       assertVerificationAvailable();
@@ -1065,19 +1092,22 @@ export async function openBrowserGateway({
       if (!rebind && (slot.qrAuthority !== qrAuthority || slot.storageFrames !== storageFrames)) throw staleView();
 
       const main = page.mainFrame();
-      let pendingHelper = false;
+      let pendingChild = false;
       for (const frame of page.frames()) {
         if (frame === main) continue;
         const authorization = slot.storageFrames.get(frame);
         const url = frame.url();
-        if (directLoginChild(slot, frame) && authorization?.revision === slot.revision &&
+        const directChild = directLoginChild(slot, frame);
+        // An attached child can have no committed document yet. Wait without trusting it.
+        if (dispatched && directChild && url === '') pendingChild = true;
+        else if (directChild && authorization?.revision === slot.revision &&
             authorization.observation?.state === 'requested' &&
             ['fetching', 'provided'].includes(authorization.phase) && storageHelperUrls.has(authorization.url) &&
             (url === '' || url === 'about:blank' || url === authorization.url)) {
-          pendingHelper = true;
+          pendingChild = true;
         } else if (!trustedLoginChild(slot, frame)) throw staleView();
       }
-      if (pendingHelper) return false;
+      if (pendingChild) return false;
       if (rebind) {
         storageFrames = slot.storageFrames;
         slot.qrAuthority = qrAuthority;
@@ -1121,8 +1151,21 @@ export async function openBrowserGateway({
       if (revision === pageRevision && result?.loginEntry === 'not-present' && !dispatched) {
         loginStage.loginEntry = 'not-present';
       }
+      waitingForQr = !!(slot.panel && result?.qrOnly && qrAuthority);
       if (slot.panel) {
         if (loginStage.loginEntry !== 'clicked') loginStage.loginEntry = 'panel-present';
+        if (waitingForQr) {
+          const { panel } = slot;
+          const observedRevision = pageRevision;
+          const timeout = Math.min(driverTimeout, remaining());
+          if (timeout <= 0) break;
+          const region = await browserCall(() => {
+            if (!ready() || observedRevision !== pageRevision) return null;
+            return page.evaluate(loginQrRegion, { key: viewProbe, panel, encode: false, maxBitmapSize: maxQrBitmapSize });
+          }, signal, timeout);
+          if (!ready() || observedRevision !== pageRevision || !validQrRect(region, viewport) ||
+              !Number.isSafeInteger(region.id)) continue;
+        }
         return;
       }
       if (!dispatched && revision === pageRevision && result?.loginEntry === 'ready' &&
@@ -1143,6 +1186,7 @@ export async function openBrowserGateway({
       }
     }
     if (!ready()) throw timedOut();
+    if (waitingForQr) throw qrUnavailable();
   }
 
   function openLogin({ signal, guard, assertQrRequest } = {}) {
@@ -1163,13 +1207,13 @@ export async function openBrowserGateway({
           if (login && !login.page.isClosed()) await browserCall(() => login.page.close(), epochController.signal);
           lastQr = 'not-requested';
           loginStage.helper = { state: 'not-requested' };
+          loginStage.qrRequest = { state: 'not-requested' };
           loginStage.blockedPassport = { GET: 0, POST: 0 };
           loginStage.passportRoutes.clear();
           login = await makePage('login', epochController.signal, assetAuthority);
           pageRevision++;
         } else login.assetAuthority = assetAuthority;
         if (login) {
-          loginStage.qrRequest = { state: 'not-requested' };
           login.qrAuthority = typeof assertQrRequest === 'function' ?
             { assert: assertQrRequest } : undefined;
           await waitForLoginPanel(login, signal, assertOpening);
@@ -1185,11 +1229,11 @@ export async function openBrowserGateway({
   }
 
   async function inspectQr(slot, revision, signal, encode = false) {
-    await refreshPanel(slot);
+    await refreshPanel(slot, { action: 'qr' });
     assertView(revision);
     if (!slot.panel) throw qrUnavailable();
     const region = await browserCall(
-      () => slot.page.evaluate(loginQrRegion, { key: slot.viewProbe, panel: slot.panel, encode }),
+      () => slot.page.evaluate(loginQrRegion, { key: slot.viewProbe, panel: slot.panel, encode, maxBitmapSize: maxQrBitmapSize }),
       signal
     );
     assertView(revision);

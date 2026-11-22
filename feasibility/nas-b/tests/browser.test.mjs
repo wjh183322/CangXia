@@ -26,6 +26,8 @@ const qrRect = { x: 260, y: 280, width: 120, height: 120 };
 const qrPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAATElEQVR4nO3NAQkAAAwDoPUvvcU4HC1geiRisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFou/xQMh7wsJH5s1mQAAAABJRU5ErkJggg==', 'base64');
 const qrWithNoticePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAAAAAAcD2kOAAAAU0lEQVR4nO3NsREAIAgEsN9/aay9s0UKkgWSGhKxWCwWi8VisVjcE+dBLBaLxeKl8Q9isVgsFovFYrFYLBaLxWKxWCwWi8VisVgsFovFYrFYLL4cg+7gFzmifzsAAAAASUVORK5CYII=', 'base64');
 
+const qr512Png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAQAAAADcA+lXAAAANklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8G4IAAAFjdVCkAAAAAElFTkSuQmCC', 'base64');
+
 function fixtureNode(tagName, { attrs = {}, rect = { x: 240, y: 230, width: 140, height: 30 }, text = '', children = [] } = {}) {
   const { x, y, width, height } = rect;
   const node = {
@@ -151,7 +153,7 @@ class FakeContext extends EventEmitter {
       arg, window, location: new URL(href), navigator: { userAgent: 'Fixture chromium' },
       document: context.panelDocument ?? { readyState: context.readyState ?? 'complete' }, AbortController, TextDecoder, setTimeout, clearTimeout,
       scrollX: 0, scrollY: 0, innerWidth: 1000, innerHeight: 760,
-      getComputedStyle: () => ({ visibility: 'visible', display: 'block', opacity: '1', borderRadius: '0px' }),
+      getComputedStyle: node => ({ visibility: 'visible', display: 'block', opacity: '1', borderRadius: node.borderRadius ?? '0px' }),
       fetch: async (url, options) => {
         const target = new URL(url);
         context.reads.push({ page, target, options, clock: context.clock.now() });
@@ -510,32 +512,44 @@ test('ordinary profile with no recognized auth panel produces no pixels or input
 
 function loginQrFixture(browser, {
   challenge = false, ambiguous = false, tag = 'canvas', tainted = false, overlay = false,
+  semanticDialog = true, scanHelp = true, nativeQr = false,
   qrUrl = tainted ? 'https://p3.douyinpic.com/qr/test.png' : 'https://www.douyin.com/qr/test.png'
 } = {}) {
   const qr = fixtureNode(tag, { attrs: { 'aria-label': '登录二维码' }, rect: qrRect });
+  const png = nativeQr ? qr512Png : qrPng;
   Object.assign(qr, {
-    width: 120, height: 120, naturalWidth: 120, naturalHeight: 120, complete: true,
-    currentSrc: tag === 'img' ? qrUrl : undefined,
+    width: 120, height: 120, naturalWidth: nativeQr ? 512 : 120, naturalHeight: nativeQr ? 512 : 120, complete: true,
+    currentSrc: nativeQr ? 'data:image/png;base64,' + png.toString('base64') : tag === 'img' ? qrUrl : undefined,
     toDataURL(type) {
       assert.equal(type, 'image/png');
       browser.onQrEncode?.();
-      return 'data:image/png;base64,' + qrPng.toString('base64');
+      return 'data:image/png;base64,' + png.toString('base64');
     }
   });
   const headings = [fixtureNode('h2', { text: '扫码登录' })];
+  if (!semanticDialog) headings.push(
+    fixtureNode('div', { text: '登录后观看更多精彩内容' }),
+    fixtureNode('span', { text: '验证码登录' })
+  );
+  if (!semanticDialog && scanHelp) headings.push(fixtureNode('button', { text: '如何扫码' }));
   if (challenge) headings.push(fixtureNode('h2', { text: '安全验证' }));
+  const logo = fixtureNode('svg', { rect: { x: 306, y: 326, width: 28, height: 28 } });
+  const qrContent = nativeQr ? fixtureNode('div', { rect: qrRect, children: [qr, logo] }) : qr;
   const panel = fixtureNode('section', {
-    attrs: { role: 'dialog' }, rect: panelRect,
-    children: [...headings, qr, ...(ambiguous ? [fixtureNode('canvas', { rect: qrRect })] : [])]
+    attrs: semanticDialog ? { role: 'dialog' } : {}, rect: panelRect,
+    children: [...headings, qrContent, ...(ambiguous ? [fixtureNode('canvas', { rect: qrRect })] : [])]
   });
+  if (!semanticDialog) panel.borderRadius = '20px';
   const notice = fixtureNode('div', {
     text: '与登录无关的通知', rect: { x: 280, y: 305, width: 20, height: 15 }
   });
   const body = fixtureNode('body', { children: [panel, ...(overlay ? [notice] : [])] });
   browser.panelDocument = {
-    body, querySelectorAll: selectors => body.querySelectorAll(selectors),
+    body, readyState: 'complete', querySelectorAll: selectors => body.querySelectorAll(selectors),
     // The notice is drawn above the QR but has pointer-events: none.
-    elementsFromPoint: () => [panel, body], elementFromPoint: () => qr,
+    elementsFromPoint: (x, y) => nativeQr && x === 320 && y === 340 ? [logo, qr, qrContent, panel, body] : [panel, body],
+    elementFromPoint: (x, y) => nativeQr && x === 320 && y === 340 ? logo :
+      nativeQr && (x === qrRect.x || y === qrRect.y || x === 379 || y === 399) ? qrContent : qr,
     createElement(tagName) {
       assert.equal(tagName, 'canvas');
       let drawn;
@@ -550,8 +564,8 @@ function loginQrFixture(browser, {
         },
         toDataURL(type) {
           assert.equal(drawn, qr);
-          assert.equal(this.width, 120);
-          assert.equal(this.height, 120);
+          assert.equal(this.width, nativeQr ? 512 : 120);
+          assert.equal(this.height, nativeQr ? 512 : 120);
           if (tainted) throw Object.assign(new Error('fixture canvas tainted'), { name: 'SecurityError' });
           return qr.toDataURL(type);
         }
@@ -573,6 +587,25 @@ test('a current official login QR produces its isolated canvas bitmap without an
   await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
 });
 
+test('the confirmed official QR modal without dialog attributes can provide only its QR bitmap', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser, { semanticDialog: false });
+  const view = await gateway.openLogin();
+  assert.equal(view.width, panelRect.width);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(browser.lastShot, undefined);
+
+  loginQrFixture(browser, { semanticDialog: false, scanHelp: false });
+  const unrelated = await gateway.openLogin();
+  assert.equal(unrelated.width, 0);
+  await assert.rejects(gateway.loginQr(unrelated), { code: 'PROBE_QR_UNAVAILABLE' });
+
+  loginQrFixture(browser, { semanticDialog: false, challenge: true });
+  const challenge = await gateway.openLogin();
+  await assert.rejects(gateway.loginQr(challenge), { code: 'PROBE_QR_UNAVAILABLE' });
+});
+
 test('an origin-clean IMG can produce its own PNG while tainted images and SVG are withheld', async t => {
   const { browser, gateway } = await fixture(t);
   loginQrFixture(browser, { tag: 'img', overlay: true });
@@ -589,6 +622,77 @@ test('an origin-clean IMG can produce its own PNG while tainted images and SVG a
     await assert.rejects(gateway.loginQr(unsafe), { code: 'PROBE_QR_UNAVAILABLE' });
     assert.equal(browser.lastShot, undefined);
   }
+});
+
+test('exports the 512 px official image alone with clipped corners and a small logo in its wrapper', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser, { semanticDialog: false, tag: 'img', nativeQr: true });
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qr512Png });
+  assert.equal(browser.lastShot, undefined);
+
+  const hitStack = browser.panelDocument.elementsFromPoint;
+  browser.panelDocument.elementsFromPoint = (x, y) => hitStack(x, y).filter(node => node.tagName !== 'IMG');
+  await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
+});
+
+test('opening waits without trusting a newly attached child until it settles', async t => {
+  for (const destination of ['about:blank', 'https://outside.invalid/']) await t.test(destination, async t => {
+    let upstreamRequests = 0;
+    const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => {
+      upstreamRequests++;
+      return passportResponse(url);
+    } });
+    browser.panel = null;
+    let clicks = 0;
+    let waiting = false;
+    browser.beforePanel = async (action, page) => {
+      assert.equal(waiting, false);
+      if (action !== 'open') return;
+      clicks++;
+      const child = page.childNavigate('about:blank');
+      const priorUrl = child.url;
+      child.url = () => '';
+      waiting = true;
+      assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), false);
+      browser.clock.onPaceWait = () => {
+        browser.clock.onPaceWait = undefined;
+        child.url = priorUrl;
+        child.navigate(destination);
+        waiting = false;
+        browser.panel = { id: 1, ...panelRect };
+      };
+    };
+    const opening = gateway.openLogin({ assertQrRequest() {} });
+    if (destination === 'about:blank') assert.equal((await opening).width, panelRect.width);
+    else await assert.rejects(opening, { code: 'STALE_BROWSER_VIEW' });
+    assert.equal(clicks, 1);
+    assert.equal(upstreamRequests, 0);
+  });
+});
+
+test('opening the official QR modal waits for its image without capturing or repeating the login click', async t => {
+  const { browser, gateway } = await fixture(t);
+  const qr = loginQrFixture(browser, { semanticDialog: false, tag: 'img' });
+  qr.complete = false;
+  let sampled = false;
+  let opened = false;
+  browser.beforePanel = action => { if (action === 'open') opened = true; };
+  browser.onQrEncode = () => assert.fail('Opening must not capture the image.');
+  browser.clock.onPaceWait = () => {
+    sampled = true;
+    qr.complete = true;
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(view.width, panelRect.width);
+  assert.equal(sampled, true);
+  assert.equal(opened, false);
+  browser.onQrEncode = undefined;
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+
+  qr.complete = false;
+  browser.clock.onPaceWait = undefined;
+  await assert.rejects(gateway.openLogin({ assertQrRequest() {} }), { code: 'PROBE_QR_UNAVAILABLE' });
 });
 
 test('challenge, ambiguous crop, and changed official page withhold QR pixels', async t => {
@@ -1084,6 +1188,39 @@ function passportResponse(url, {
   Object.defineProperties(response, { url: { value: url }, redirected: { value: redirected } });
   return response;
 }
+
+test('preserves QR rejection evidence for the current page including its initial load and reuse', async t => {
+  const { browser, gateway } = await fixture(t);
+  await gateway.openLogin();
+  const original = browser.sourcePages()[0];
+  await original.close();
+
+  browser.onGoto = async page => {
+    assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), false);
+  };
+  await gateway.openLogin();
+  const page = browser.sourcePages()[0];
+  assert.notEqual(page, original);
+  let stage = gateway.reportStage();
+  assert.equal(stage.blockedPassport.GET, 1);
+  assert.equal(stage.qrRequest, 'refused');
+  assert.equal(stage.qrRefusalReason, 'no-authority');
+
+  await gateway.openLogin();
+  stage = gateway.reportStage();
+  assert.equal(browser.sourcePages()[0], page);
+  assert.equal(stage.blockedPassport.GET, 1);
+  assert.equal(stage.qrRequest, 'refused');
+  assert.equal(stage.qrRefusalReason, 'no-authority');
+
+  browser.onGoto = undefined;
+  await page.close();
+  await gateway.openLogin();
+  stage = gateway.reportStage();
+  assert.equal(stage.blockedPassport.GET, 0);
+  assert.equal(stage.qrRequest, 'not-requested');
+  assert.equal(Object.hasOwn(stage, 'qrRefusalReason'), false);
+});
 
 test('only the current owned main login view forwards the original official QR GET', async t => {
   const calls = [];
