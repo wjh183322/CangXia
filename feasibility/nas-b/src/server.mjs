@@ -32,6 +32,25 @@ const fail = (code) => {
 };
 const sourceSessionChanged = error => error instanceof ProbeError && error.code === 'STALE_AUTH_EPOCH' &&
   ['before-read', 'after-read'].includes(error.details?.authSessionChange);
+const collectionAuthStages = new Set(['authorization', 'source-request', 'response-check', 'account-recheck']);
+const collectionSourceOutcomes = new Set(['http-rejected', 'empty-response', 'non-json-response', 'source-rejected']);
+const collectionErrorAt = (error, stage) =>
+  error instanceof ProbeError && error.code === 'STALE_AUTH_EPOCH' && !sourceSessionChanged(error)
+    ? new ProbeError(error.code, error.message, { collectionAuthStage: stage })
+    : error;
+function safeSourceDiagnostics(error) {
+  if (sourceSessionChanged(error)) return { authSessionChange: error.details.authSessionChange };
+  if (!(error instanceof ProbeError)) return {};
+  const { collectionAuthStage, sourceOutcome, sourceHttpStatus, sourceCode } = error.details ?? {};
+  if (error.code === 'STALE_AUTH_EPOCH' && collectionAuthStages.has(collectionAuthStage))
+    return { collectionAuthStage };
+  if (error.code !== 'PROBE_SOURCE_AUTH' || !collectionSourceOutcomes.has(sourceOutcome)) return {};
+  return {
+    sourceOutcome,
+    ...(Number.isInteger(sourceHttpStatus) && sourceHttpStatus >= 100 && sourceHttpStatus <= 599 ? { sourceHttpStatus } : {}),
+    ...(Number.isSafeInteger(sourceCode) && Math.abs(sourceCode) <= 999999 ? { sourceCode } : {})
+  };
+}
 const digest = (value) => createHash('sha256').update(value).digest();
 const text = (value) => (typeof value === 'string' ? redact(value.slice(0, 4096)) : undefined);
 const pick = (value, keys) =>
@@ -302,13 +321,20 @@ export async function startProbe(options) {
     async function listCollections(guard, signal) {
       const original = sourceAuth;
       const readCurrent = async () => {
-        const authEpoch = authorizeSource();
-        const response = await gateway.request('/aweme/v1/web/collects/list/', {
-          authEpoch, method: 'GET', params: { cursor: '0', count: '20' }, signal, beforeDispatch: guard
-        });
-        guard();
-        gateway.assertAuthEpoch(authEpoch);
-        return response;
+        let stage = 'authorization';
+        try {
+          const authEpoch = authorizeSource();
+          stage = 'source-request';
+          const response = await gateway.request('/aweme/v1/web/collects/list/', {
+            authEpoch, method: 'GET', params: { cursor: '0', count: '20' }, signal, beforeDispatch: guard
+          });
+          stage = 'response-check';
+          guard();
+          gateway.assertAuthEpoch(authEpoch);
+          return response;
+        } catch (error) {
+          throw collectionErrorAt(error, stage);
+        }
       };
       try {
         return await readCurrent();
@@ -319,10 +345,14 @@ export async function startProbe(options) {
           if (sourceAuth !== original) throw error;
         };
         guardRecovery();
-        const refreshed = await gateway.verifyIdentity({ signal, guard: guardRecovery });
-        guardRecovery();
-        if (refreshed.uid !== original.uid) fail('PROBE_ACCOUNT_MISMATCH');
-        rememberSource(refreshed);
+        try {
+          const refreshed = await gateway.verifyIdentity({ signal, guard: guardRecovery });
+          guardRecovery();
+          if (refreshed.uid !== original.uid) fail('PROBE_ACCOUNT_MISMATCH');
+          rememberSource(refreshed);
+        } catch (cause) {
+          throw collectionErrorAt(cause, 'account-recheck');
+        }
         return readCurrent();
       }
     }
@@ -682,7 +712,7 @@ export async function startProbe(options) {
               ? error.code
               : 'PROBE_REQUEST_FAILED';
           json(
-            { code, ...(sourceSessionChanged(error) ? { authSessionChange: error.details.authSessionChange } : {}) },
+            { code, ...safeSourceDiagnostics(error) },
             code === 'PROBE_UNAUTHENTICATED'
               ? 401
               : code === 'PROBE_NOT_FOUND'

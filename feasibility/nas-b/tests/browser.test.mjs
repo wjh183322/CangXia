@@ -278,6 +278,30 @@ test('self endpoint binds the exact UID even if source author has another UID', 
   assert.doesNotThrow(() => gateway.assertAuthEpoch(identity.authEpoch));
 });
 
+test('collection rejection reports the source outcome instead of returning a response from a revoked epoch', async t => {
+  const { browser, gateway } = await fixture(t);
+  for (const [status, text, sourceOutcome, sourceCode] of [
+    [403, 'private upstream error', 'http-rejected', undefined],
+    [200, '', 'empty-response', undefined],
+    [200, '<html>private upstream page</html>', 'non-json-response', undefined],
+    [200, '{"status_code":8,"status_msg":"private upstream detail"}', 'source-rejected', 8]
+  ]) {
+    const { authEpoch } = await gateway.verifyIdentity();
+    browser.reply = () => new Response(text, { status });
+    await assert.rejects(gateway.request('/aweme/v1/web/collects/list/', {
+      authEpoch, params: { cursor: '0', count: '20' }
+    }), error => {
+      assert.equal(error.code, 'PROBE_SOURCE_AUTH');
+      assert.equal(error.details.sourceOutcome, sourceOutcome);
+      assert.equal(error.details.sourceHttpStatus, status);
+      assert.equal(error.details.sourceCode, sourceCode);
+      assert.doesNotMatch(JSON.stringify(error), /private upstream/);
+      return true;
+    });
+    assert.throws(() => gateway.assertAuthEpoch(authEpoch), { code: 'STALE_AUTH_EPOCH' });
+  }
+});
+
 test('opening login fences a pending read and refuses to rebind the library to another account', async t => {
   const { browser, gateway, store } = await fixture(t);
   const identity = await gateway.verifyIdentity();

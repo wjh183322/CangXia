@@ -13,6 +13,7 @@ import { inspectSourceResponse } from './page-parser.mjs';
 const origin = 'https://www.douyin.com';
 const home = `${origin}/user/self`;
 const selfRoute = '/aweme/v1/web/user/profile/self/';
+const collectionListRoute = '/aweme/v1/web/collects/list/';
 const detailRoute = '/aweme/v1/web/aweme/detail/';
 const passportQr = origin + '/passport/web/get_qrcode';
 const passportQrStatus = origin + '/passport/web/check_qrconnect';
@@ -69,7 +70,7 @@ const requestFields = new Set(['authEpoch', 'signal', 'method', 'params', 'form'
 const routeParams = new Map([
   [selfRoute, []],
   [collectionRoute, []],
-  ['/aweme/v1/web/collects/list/', ['cursor', 'count']],
+  [collectionListRoute, ['cursor', 'count']],
   ['/aweme/v1/web/collects/video/list/', ['collects_id', 'cursor', 'count']],
   [detailRoute, ['aweme_id', 'origin_type']],
   ['/aweme/v1/web/user/profile/other/', ['sec_user_id', 'publish_video_strategy_type']],
@@ -1583,7 +1584,12 @@ export async function openBrowserGateway({
       await assertSession(authEpoch, signal, 'after-read');
       assertAuthEpoch(authEpoch);
       const issue = inspectSourceResponse(result);
-      if (issue.code === 'PROBE_SOURCE_AUTH') invalidate();
+      if (issue.code === 'PROBE_SOURCE_AUTH') {
+        invalidate();
+        if (route === collectionListRoute) throw new ProbeError(issue.code, 'The collection list was rejected by the source.', {
+          sourceOutcome: issue.sourceOutcome, sourceHttpStatus: result.status, sourceCode: issue.sourceCode
+        });
+      }
       if (issue.code === 'PROBE_SOURCE_RATE_LIMITED' && result.status === 200) rateLimit(issue.retryAfter);
       return result;
     });

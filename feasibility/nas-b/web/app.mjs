@@ -167,7 +167,9 @@ if (typeof document !== 'undefined') {
       body: body ? JSON.stringify(body) : undefined
     });
     const result = await res.json();
-    if (!res.ok) throw Object.assign(Error(result.code), { confirmed: true, authSessionChange: result.authSessionChange });
+    if (!res.ok) throw Object.assign(Error(result.code), { confirmed: true,
+      authSessionChange: result.authSessionChange, collectionAuthStage: result.collectionAuthStage,
+      sourceOutcome: result.sourceOutcome, sourceHttpStatus: result.sourceHttpStatus, sourceCode: result.sourceCode });
     return result;
   }
   const operations = createClientOperations(api, (kind, operationId) => {
@@ -319,6 +321,11 @@ if (typeof document !== 'undefined') {
           output.textContent = 'STALE_AUTH_EPOCH：抖音会话在发送读取请求前有变化。';
         } else if (cmd === 'collections' && err.authSessionChange === 'after-read') {
           output.textContent = 'STALE_AUTH_EPOCH：抖音会话在收到读取响应后有变化。';
+        } else if (cmd === 'collections' && err.collectionAuthStage) {
+          output.textContent = 'STALE_AUTH_EPOCH (' + err.collectionAuthStage + ')';
+        } else if (cmd === 'collections' && err.sourceOutcome) {
+          output.textContent = [err.message, err.sourceOutcome, 'HTTP ' + err.sourceHttpStatus,
+            ...(err.sourceCode === undefined ? [] : ['来源错误码 ' + err.sourceCode])].join(' · ');
         } else {
           output.textContent = err.message;
         }

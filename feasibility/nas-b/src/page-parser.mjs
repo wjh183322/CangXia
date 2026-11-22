@@ -85,14 +85,20 @@ export function inspectSourceResponse({ status, text, retryAfter }, countRows = 
     ? lists.reduce((sum, items) => sum + items.length, 0)
     : plainError ? 0 : null;
   if (status === 429) return { rows, code: 'PROBE_SOURCE_RATE_LIMITED', retryAfter: retryAfter || 60 };
-  if (status === 401 || status === 403) return { rows, code: 'PROBE_SOURCE_AUTH' };
+  if (status === 401 || status === 403) return { rows, code: 'PROBE_SOURCE_AUTH', sourceOutcome: 'http-rejected' };
   if (status !== 200) return { rows };
   if (/访问太频繁|访问过于频繁|操作频繁|请求过于频繁|too many requests/i.test(message)) {
     return { rows, code: 'PROBE_SOURCE_RATE_LIMITED', retryAfter: 60 };
   }
-  const rejected = [data?.status_code, body?.status_code].some(code => code != null && Number(code) !== 0);
-  if (!parsed || rejected && !goneMessage(message)) {
-    return { rows, code: 'PROBE_SOURCE_AUTH' };
+  if (!parsed) {
+    return { rows, code: 'PROBE_SOURCE_AUTH',
+      sourceOutcome: isText(text) && !text.trim() ? 'empty-response' : 'non-json-response' };
+  }
+  const rejected = [data?.status_code, body?.status_code].find(code => code != null && Number(code) !== 0);
+  if (rejected !== undefined && !goneMessage(message)) {
+    const sourceCode = Number(rejected);
+    return { rows, code: 'PROBE_SOURCE_AUTH', sourceOutcome: 'source-rejected',
+      ...(Number.isSafeInteger(sourceCode) && Math.abs(sourceCode) <= 999999 ? { sourceCode } : {}) };
   }
   return { rows };
 }

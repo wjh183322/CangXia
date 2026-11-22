@@ -158,6 +158,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     sourceConfirmed = true,
     sourceUid = '123',
     collectionFailures = 0,
+    collectionError,
     verifications = 0,
     epochs = [],
     qrCaptures = 0,
@@ -204,6 +205,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     async request(route, options) {
       epochs.push(options.authEpoch);
       assert.equal(route, '/aweme/v1/web/collects/list/');
+      if (collectionError) throw collectionError;
       if (collectionFailures > 0) {
         collectionFailures--;
         throw new ProbeError('STALE_AUTH_EPOCH', 'Fixture session changed.', { authSessionChange: 'after-read' });
@@ -363,6 +365,32 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.equal(mismatched.body.code, 'PROBE_ACCOUNT_MISMATCH');
   assert.equal(epochs.length, 5);
   sourceUid = '123';
+  collectionError = new ProbeError('PROBE_SOURCE_AUTH', 'private upstream body', {
+    sourceOutcome: 'source-rejected', sourceHttpStatus: 200, sourceCode: 8, raw: 'private upstream body'
+  });
+  assert.deepEqual((await request('sources/collections', null, a.cookie)).body, {
+    code: 'PROBE_SOURCE_AUTH', sourceOutcome: 'source-rejected', sourceHttpStatus: 200, sourceCode: 8
+  });
+  collectionError = new ProbeError('STALE_AUTH_EPOCH');
+  assert.deepEqual((await request('sources/collections', null, a.cookie)).body, {
+    code: 'STALE_AUTH_EPOCH', collectionAuthStage: 'source-request'
+  });
+  collectionError = undefined;
+  collectionFailures = 1;
+  const verifyIdentity = gateway.verifyIdentity;
+  gateway.verifyIdentity = async (...args) => {
+    const verified = await verifyIdentity(...args);
+    const assertAuthEpoch = gateway.assertAuthEpoch;
+    gateway.assertAuthEpoch = () => {
+      gateway.assertAuthEpoch = assertAuthEpoch;
+      throw new ProbeError('STALE_AUTH_EPOCH');
+    };
+    return verified;
+  };
+  assert.deepEqual((await request('sources/collections', null, a.cookie)).body, {
+    code: 'STALE_AUTH_EPOCH', collectionAuthStage: 'account-recheck'
+  });
+  gateway.verifyIdentity = verifyIdentity;
   assert.equal((await request('library', null, a.cookie)).body.total, 1);
   await request('downloads', { workIds: [workId], operationId: 'download' }, a.cookie);
   await downloads.run();
