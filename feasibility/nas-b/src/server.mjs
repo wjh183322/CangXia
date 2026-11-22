@@ -434,9 +434,17 @@ export async function startProbe(options) {
               return res.end(capture.bytes);
             }
             if (id === 'verify' && method === 'POST') {
-              session.view = null;
-              const verified = await gateway.verifyIdentity();
+              const opening = session.view;
+              let verified;
+              try {
+                verified = await gateway.verifyIdentity();
+              } catch (error) {
+                if (session.view === opening && error?.code !== 'PROBE_AUTH_REQUIRED') session.view = null;
+                throw error;
+              }
               guard();
+              if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              session.view = null;
               gateway.assertAuthEpoch(verified.authEpoch);
               authEpoch = verified.authEpoch;
               return json({

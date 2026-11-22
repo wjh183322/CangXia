@@ -120,6 +120,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     'base64'
   );
   let verified = false,
+    sourceConfirmed = true,
     epochs = [],
     qrCaptures = 0,
     onQrCapture;
@@ -153,6 +154,7 @@ test('HTTPS requires authentication and current ownership before library or veri
       return { pageRevision, bytes: qrPng };
     },
     async verifyIdentity() {
+      if (!sourceConfirmed) throw new ProbeError('PROBE_AUTH_REQUIRED');
       verified = true;
       store.db
         .prepare('INSERT OR REPLACE INTO runtime_meta VALUES (?,?)')
@@ -268,6 +270,10 @@ test('HTTPS requires authentication and current ownership before library or veri
   assert.equal(qr.headers['content-type'], 'image/png');
   assert.equal(qr.headers['cache-control'], 'no-store');
   assert.deepEqual(qr.body, qrPng);
+  sourceConfirmed = false;
+  assert.equal((await request('identity/verify', {}, a.cookie)).body.code, 'PROBE_AUTH_REQUIRED');
+  assert.doesNotThrow(secondOpening.assertQrRequest);
+  sourceConfirmed = true;
   onQrCapture = () => { throw new ProbeError('PROBE_QR_UNAVAILABLE'); };
   assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_QR_UNAVAILABLE');
   assert.equal(

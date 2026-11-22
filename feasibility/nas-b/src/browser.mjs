@@ -15,6 +15,7 @@ const home = `${origin}/user/self`;
 const selfRoute = '/aweme/v1/web/user/profile/self/';
 const detailRoute = '/aweme/v1/web/aweme/detail/';
 const passportQr = origin + '/passport/web/get_qrcode';
+const passportQrStatus = origin + '/passport/web/check_qrconnect';
 const collectionRoute = '/aweme/v1/web/aweme/listcollection/';
 const viewport = Object.freeze({ width: 1000, height: 760 });
 const requestTimeout = 12000;
@@ -24,6 +25,9 @@ const loginObservationMs = 200;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
 const maxPassportQrBytes = 256 * 1024;
+const maxPassportStatusRequestBytes = 8192;
+const passportStatusWindowMs = 45000;
+const maxPassportStatusRequests = 24;
 const maxQrBitmapSize = 512;
 const passportRequestHeaders = [
   'accept', 'accept-language', 'cookie', 'origin', 'referer', 'user-agent',
@@ -328,6 +332,13 @@ function isPassportQrRequest(request, url) {
     ['fetch', 'xhr'].includes(request.resourceType());
 }
 
+function isPassportQrStatusRequest(request, url) {
+  const endpoint = url.split('?', 1)[0];
+  return (endpoint === passportQrStatus || endpoint === passportQrStatus + '/') && !url.includes('#') &&
+    request.method() === 'POST' && !request.isNavigationRequest() && !request.redirectedFrom() &&
+    request.resourceType() === 'xhr';
+}
+
 function forwardPassportHeaders(observed) {
   const headers = new Headers();
   for (const name of passportRequestHeaders) {
@@ -349,12 +360,14 @@ function passportFulfillHeaders(source) {
   return headers;
 }
 
-async function deliverPassportQr(route, pages, slot, frame, url, observation, fetchPassportQr) {
+async function deliverPassportQr(route, pages, slot, frame, url, observation, fetchPassportQr, clock, status = false) {
   const { page, qrAuthority } = slot;
+  const statusWindow = status ? qrAuthority?.statusWindow : undefined;
   let refusalReason = 'no-authority', upstreamStatus;
   const current = (delivering = false) => {
     refusalReason = delivering ? 'stale-before-delivery' : 'view-guard';
-    if (pages.get(page) !== slot || slot.qrAuthority !== qrAuthority) return false;
+    if (pages.get(page) !== slot || slot.qrAuthority !== qrAuthority ||
+        status && (!statusWindow || clock.now() >= statusWindow.expires)) return false;
     if (slot.assetAuthority?.bootstrap === 'reloading') {
       if (!delivering) refusalReason = 'bootstrap-reloading';
       return false;
@@ -376,11 +389,21 @@ async function deliverPassportQr(route, pages, slot, frame, url, observation, fe
     const observed = await browserCall(() => route.request().allHeaders());
     const headers = forwardPassportHeaders(observed);
     if (!current()) return false;
+    let requestBody;
+    if (status) {
+      const mime = observed['content-type'];
+      if (typeof mime !== 'string' || !/^application\/x-www-form-urlencoded(?:;\s*charset=utf-8)?$/i.test(mime)) return false;
+      requestBody = route.request().postDataBuffer();
+      if (!requestBody?.length || requestBody.length > maxPassportStatusRequestBytes || statusWindow.remaining <= 0) return false;
+      headers.set('content-type', mime);
+      statusWindow.remaining--;
+    }
     observation.state = 'requested';
     refusalReason = 'fetch-failed';
     // Forward the authorized browser's exact request without using a shared HTTP cookie jar.
     const response = await fetchPassportQr(url, {
-      method: 'GET', headers, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+      method: status ? 'POST' : 'GET', headers, body: requestBody,
+      credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
     });
     refusalReason = 'response-metadata';
     const accepted = isDirectResponse(response, url, 'application/json') && !response.headers.has('refresh');
@@ -399,6 +422,7 @@ async function deliverPassportQr(route, pages, slot, frame, url, observation, fe
     if (!responseHeaders['content-type']) return false;
     refusalReason = 'fulfill-failed';
     await route.fulfill({ status: 200, headers: responseHeaders, body });
+    if (!status) qrAuthority.qrDelivered = true;
     observation.state = 'delivered';
     return true;
   } catch {
@@ -482,7 +506,7 @@ async function deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fe
   }
 }
 
-function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset) {
+function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset, clock) {
   const totals = { completedRequests: 0, sentBytes: 0, receivedBytes: 0, blockedRequests: 0, failedRequests: 0, unknownSizes: 0 };
   const blocked = new WeakSet();
   context.on('request', request => {
@@ -559,10 +583,18 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
           if (isPassportQrRequest(request, url)) {
             const qrRequest = { state: 'refused' };
             loginStage.qrRequest = qrRequest;
-            if (await deliverPassportQr(route, pages, slot, frame, url, qrRequest, fetchPassportQr)) return;
+            if (await deliverPassportQr(route, pages, slot, frame, url, qrRequest, fetchPassportQr, clock)) return;
             qrRequest.state = 'refused';
             if (loginStage.qrRequest === qrRequest) recordBlockedPassport(loginStage, url, request.method());
-          } else recordBlockedPassport(loginStage, url, request.method());
+          } else {
+            if (isPassportQrStatusRequest(request, url)) {
+              const statusRequest = { state: 'refused' };
+              loginStage.statusRequest = statusRequest;
+              if (await deliverPassportQr(route, pages, slot, frame, url, statusRequest, fetchPassportQr, clock, true)) return;
+              statusRequest.state = 'refused';
+            }
+            recordBlockedPassport(loginStage, url, request.method());
+          }
         }
         if (slot && request.isNavigationRequest() && directLoginChild(slot, frame)) {
           // A canceled navigation preserves the current blank document instead of committing a browser error page.
@@ -859,7 +891,7 @@ export async function openBrowserGateway({
       args: ['--autoplay-policy=user-gesture-required']
     });
     if (await profileIdentity(root, directory) !== captured) throw unsafeProfile();
-    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset);
+    const traffic = browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPassportQr, fetchLoginAsset, clock);
     await traffic.install();
     await context.routeWebSocket('**/*', socket => socket.close());
     observeTraffic = traffic.observe;
@@ -1222,12 +1254,13 @@ export async function openBrowserGateway({
         { assert: assertQrRequest, remaining: maxLoginAssetRequests, stats: loginStage.loginResources,
           open: true, requestSignal: signal } : undefined;
       try {
-        if (!trustedView(login)) {
+        if (!trustedView(login) || login.qrAuthority?.qrDelivered) {
           invalidate();
           if (login && !login.page.isClosed()) await browserCall(() => login.page.close(), epochController.signal);
           lastQr = 'not-requested';
           loginStage.helper = { state: 'not-requested' };
           loginStage.qrRequest = { state: 'not-requested' };
+          loginStage.statusRequest = undefined;
           loginStage.blockedPassport = { GET: 0, POST: 0 };
           loginStage.passportRoutes.clear();
           login = await makePage('login', epochController.signal, assetAuthority);
@@ -1276,6 +1309,11 @@ export async function openBrowserGateway({
         if (!isLoginQrPng(bytes) || bytes.readUInt32BE(16) !== region.pixelWidth ||
             bytes.readUInt32BE(20) !== region.pixelHeight)
           throw qrUnavailable();
+        if (slot.qrAuthority?.qrDelivered) {
+          slot.qrAuthority.statusWindow ??= {
+            expires: clock.now() + passportStatusWindowMs, remaining: maxPassportStatusRequests
+          };
+        }
         return { pageRevision: revision, bytes };
       } catch (error) {
         assertView(revision);
@@ -1580,6 +1618,7 @@ export async function openBrowserGateway({
     return {
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
       qrRequest: qrRequest.state, loginEntry: loginStage.loginEntry,
+      ...(loginStage.statusRequest ? { qrStatus: loginStage.statusRequest.state } : {}),
       ...(qrRequest.state === 'refused' && qrRequest.refusalReason ? {
         qrRefusalReason: qrRequest.refusalReason,
         ...(qrRequest.guardFailure === undefined ? {} : { qrGuardFailure: qrRequest.guardFailure }),

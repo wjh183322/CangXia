@@ -17,6 +17,7 @@ const self = 'https://www.douyin.com/user/self';
 const collection = '/aweme/v1/web/aweme/listcollection/';
 const detail = '/aweme/v1/web/aweme/detail/';
 const passportQr = 'https://www.douyin.com/passport/web/get_qrcode';
+const passportStatus = 'https://www.douyin.com/passport/web/check_qrconnect';
 const storageHelper = version => 'https://lf-zt.douyin.com/obj/uc-assets/zt/@byted/x-storage-web/' + version + '/dist/latest/index.html';
 const ownId = '9357260389275234771';
 const authorId = '8765602039312834059';
@@ -177,6 +178,7 @@ class FakeContext extends EventEmitter {
         await this.beforeRequestHeaders?.();
         return this.requestHeaders ?? {};
       },
+      postDataBuffer: () => this.requestBody ?? null,
       sizes: async () => ({ requestBodySize: 2, requestHeadersSize: 3, responseBodySize: 50, responseHeadersSize: 4 })
     };
     this.emit('request', request);
@@ -1377,6 +1379,55 @@ test('only the current owned main login view forwards the original official QR G
   ]) assert.equal(await browser.visit(frame, url, type, method, nav, redirected), false);
   await gateway.verifyIdentity();
   assert.equal(await browser.visit(browser.sourcePages()[0].mainFrame(), passportQr, 'xhr'), false);
+  assert.equal(calls.length, 2);
+});
+
+test('only an active login page can send the bounded provider status request for its issued QR', async t => {
+  const calls = [];
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async (url, options) => {
+    calls.push({ url, options });
+    return passportResponse(url);
+  } });
+  let held = true;
+  const assertQrRequest = () => { if (!held) throw new ProbeError('STALE_LEASE'); };
+  loginQrFixture(browser);
+  const view = await gateway.openLogin({ assertQrRequest });
+  const page = browser.sourcePages()[0], main = page.mainFrame();
+  browser.requestHeaders = { 'content-type': 'application/x-www-form-urlencoded', cookie: 'private-fixture-cookie' };
+  browser.requestBody = Buffer.from('fixture=private-body');
+
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  assert.equal(await browser.visit(main, passportQr, 'xhr'), true);
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].options.method, 'POST');
+  assert.equal(calls[1].options.redirect, 'error');
+  assert.equal(calls[1].options.credentials, 'omit');
+  assert.equal(calls[1].options.headers.get('content-type'), 'application/x-www-form-urlencoded');
+  assert.deepEqual(calls[1].options.body, browser.requestBody);
+  assert.deepEqual(browser.fulfillments.at(-1).headers['set-cookie'], qrFixtureCookies.join('\n'));
+
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'GET'), false);
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST', false, {}), false);
+  assert.equal(await browser.visit(page.childNavigate('about:blank'), passportStatus, 'xhr', 'POST'), false);
+  assert.equal(await browser.visit(main, passportStatus.replace('check_qrconnect', 'challenge'), 'xhr', 'POST'), false);
+  const originalBody = browser.requestBody;
+  browser.requestBody = Buffer.alloc(8193);
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  browser.requestBody = originalBody;
+  held = false;
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  held = true;
+  browser.clock.advance(45001);
+  assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  assert.equal(calls.length, 2);
+  assert.doesNotMatch(JSON.stringify(gateway.reportStage()), /private-fixture-cookie|private-body|fixture_one/);
+
+  await gateway.openLogin({ assertQrRequest });
+  assert.equal(page.isClosed(), true);
+  assert.equal(await browser.visit(browser.sourcePages()[0].mainFrame(), passportStatus, 'xhr', 'POST'), false);
   assert.equal(calls.length, 2);
 });
 
