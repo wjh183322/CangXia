@@ -83,7 +83,7 @@ const assetPaths = new Map([
 
 const unsafeProfile = () => new ProbeError('UNSAFE_BROWSER_PROFILE', 'The isolated browser directory is unavailable or unsafe.');
 const closedBrowser = () => new ProbeError('PROBE_BROWSER_CLOSED', 'The probe browser is closed.');
-const staleAuth = () => new ProbeError('STALE_AUTH_EPOCH', 'The source authorization changed. Recheck the signed-in account.');
+const staleAuth = details => new ProbeError('STALE_AUTH_EPOCH', 'The source authorization changed. Recheck the signed-in account.', details);
 const authRequired = () => new ProbeError('PROBE_AUTH_REQUIRED', 'Verify the normal browser login before reading the source.');
 const staleView = () => new ProbeError('STALE_BROWSER_VIEW', 'Refresh the verification view before sending input.');
 const panelRequired = () => new ProbeError('PROBE_VERIFICATION_PANEL_REQUIRED', 'The official page has no recognized verification panel.');
@@ -1481,24 +1481,30 @@ export async function openBrowserGateway({
     }
   }
 
-  async function assertSession(authEpoch, signal) {
+  async function assertSession(authEpoch, signal, phase) {
     assertAuthEpoch(authEpoch);
     const current = await fingerprint(signal);
     assertAuthEpoch(authEpoch);
     if (current !== binding.fingerprint) {
       invalidate();
-      throw staleAuth();
+      throw staleAuth(phase ? { authSessionChange: phase } : undefined);
     }
   }
 
-  function verifyIdentity() {
+  function verifyIdentity({ signal: callerSignal, guard } = {}) {
+    const assertRequest = () => {
+      callerSignal?.throwIfAborted();
+      guard?.();
+    };
     return withView(async () => {
+      assertRequest();
       assertVerificationAvailable();
       verifying = true;
       try {
         return await withSource(async () => {
+          assertRequest();
           assertOpen();
-          const signal = epochController.signal;
+          const signal = callerSignal ? AbortSignal.any([epochController.signal, callerSignal]) : epochController.signal;
           assertNoCooldown();
           const slot = await prepare('reader', signal);
           const expected = await fingerprint(signal);
@@ -1507,6 +1513,7 @@ export async function openBrowserGateway({
             if (target?.origin !== origin || target.pathname !== selfRoute) throw invalidRoute();
             const request = apiRequest(selfRoute, { params: Object.fromEntries(target.searchParams) });
             await beforeRead(signal);
+            assertRequest();
             const { status, text, retryAfter } = await read(slot, request, signal);
             return { status, ok: status >= 200 && status < 300, text: async () => text, headers: new Headers({ 'retry-after': String(retryAfter) }) };
           } };
@@ -1522,11 +1529,17 @@ export async function openBrowserGateway({
           if (state.uid && state.uid !== identity.uid) {
             throw new ProbeError('PROBE_ACCOUNT_MISMATCH', 'The signed-in account differs from the account bound to this library.');
           }
+          assertRequest();
           const userAgent = await browserCall(() => slot.page.evaluate(() => navigator.userAgent), signal);
           if (typeof userAgent !== 'string' || userAgent.length === 0 || userAgent.length > 512 || /[\r\n]/.test(userAgent)) throw requestFailed();
-          if (login && !login.page.isClosed()) await browserCall(() => login.page.close(), signal);
+          if (login && !login.page.isClosed()) await browserCall(() => {
+            assertRequest();
+            return login.page.close();
+          }, signal);
+          assertRequest();
           login = undefined;
           if (expected !== await fingerprint(signal)) throw staleAuth();
+          assertRequest();
           if (binding && expected !== binding.fingerprint) invalidate();
           assertOpen();
           state = store.withWrite(db => {
@@ -1538,6 +1551,7 @@ export async function openBrowserGateway({
           return { ...identity, authEpoch: state.authEpoch };
         });
       } catch (error) {
+        assertRequest();
         if (binding && !closed) invalidate();
         if (error instanceof ProbeError) throw error;
         throw authRequired();
@@ -1560,13 +1574,13 @@ export async function openBrowserGateway({
       assertNoCooldown();
       const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal);
       await beforeRead(signal);
-      await assertSession(authEpoch, signal);
+      await assertSession(authEpoch, signal, 'before-read');
       assertAuthEpoch(authEpoch);
       // The caller may hold a separate server lease. Check it at actual dispatch.
       if (beforeDispatch && beforeDispatch() !== undefined) throw invalidRoute();
       accountingInFlight = Boolean(onReceivedRows);
       const result = await read(slot, query, signal, onReceivedRows);
-      await assertSession(authEpoch, signal);
+      await assertSession(authEpoch, signal, 'after-read');
       assertAuthEpoch(authEpoch);
       const issue = inspectSourceResponse(result);
       if (issue.code === 'PROBE_SOURCE_AUTH') invalidate();

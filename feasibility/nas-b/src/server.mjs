@@ -30,6 +30,8 @@ import { normalizeCollections, pageResult } from '../../../electron/api-paginati
 const fail = (code) => {
   throw new ProbeError(code);
 };
+const sourceSessionChanged = error => error instanceof ProbeError && error.code === 'STALE_AUTH_EPOCH' &&
+  ['before-read', 'after-read'].includes(error.details?.authSessionChange);
 const digest = (value) => createHash('sha256').update(value).digest();
 const text = (value) => (typeof value === 'string' ? redact(value.slice(0, 4096)) : undefined);
 const pick = (value, keys) =>
@@ -281,7 +283,7 @@ export async function startProbe(options) {
     };
     reads = options.reads ?? createReadCoordinator({ store, leases, gateway, finalize });
     let downloadError,
-      authEpoch,
+      sourceAuth,
       coverBusy = false;
     const runDownloads = () => {
       void downloads.run().catch(() => {
@@ -289,9 +291,41 @@ export async function startProbe(options) {
       });
     };
     const authorizeSource = () => {
+      const authEpoch = sourceAuth?.authEpoch;
       gateway.assertAuthEpoch(authEpoch);
       return authEpoch;
     };
+    const rememberSource = verified => {
+      gateway.assertAuthEpoch(verified.authEpoch);
+      sourceAuth = { authEpoch: verified.authEpoch, uid: verified.uid };
+    };
+    async function listCollections(guard, signal) {
+      const original = sourceAuth;
+      const readCurrent = async () => {
+        const authEpoch = authorizeSource();
+        const response = await gateway.request('/aweme/v1/web/collects/list/', {
+          authEpoch, method: 'GET', params: { cursor: '0', count: '20' }, signal, beforeDispatch: guard
+        });
+        guard();
+        gateway.assertAuthEpoch(authEpoch);
+        return response;
+      };
+      try {
+        return await readCurrent();
+      } catch (error) {
+        if (!sourceSessionChanged(error) || !original || sourceAuth !== original) throw error;
+        const guardRecovery = () => {
+          guard();
+          if (sourceAuth !== original) throw error;
+        };
+        guardRecovery();
+        const refreshed = await gateway.verifyIdentity({ signal, guard: guardRecovery });
+        guardRecovery();
+        if (refreshed.uid !== original.uid) fail('PROBE_ACCOUNT_MISMATCH');
+        rememberSource(refreshed);
+        return readCurrent();
+      }
+    }
     unsubscribe = leases.onLost((loss) => {
       for (const c of active) if (c.generation === loss.generation) c.abort();
     });
@@ -389,7 +423,7 @@ export async function startProbe(options) {
             if (id === 'open' && method === 'POST') {
               const opening = { generation: lease.generation };
               session.view = opening;
-              authEpoch = undefined;
+              sourceAuth = undefined;
               const assertQrRequest = () => {
                 if (session.expires <= Date.now()) fail('PROBE_UNAUTHENTICATED');
                 const current = session.grant;
@@ -445,8 +479,7 @@ export async function startProbe(options) {
               guard();
               if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
               session.view = null;
-              gateway.assertAuthEpoch(verified.authEpoch);
-              authEpoch = verified.authEpoch;
+              rememberSource(verified);
               return json({
                 verified: true,
                 uid: text(String(verified.uid)).slice(0, 128),
@@ -483,16 +516,7 @@ export async function startProbe(options) {
             }
           }
           if (group === 'sources' && id === 'collections' && !action && method === 'GET') {
-            const epoch = authorizeSource();
-            const response = await gateway.request('/aweme/v1/web/collects/list/', {
-              authEpoch: epoch,
-              method: 'GET',
-              params: { cursor: '0', count: '20' },
-              signal,
-              beforeDispatch: guard
-            });
-            guard();
-            gateway.assertAuthEpoch(epoch);
+            const response = await listCollections(guard, signal);
             const parsed = parsePlatformJSON(response.text);
             if (response.status !== 200 || parsed.status_code !== 0) fail('PROBE_SOURCE_UNAVAILABLE');
             const page = pageResult(parsed, 'collects_list');
@@ -658,7 +682,7 @@ export async function startProbe(options) {
               ? error.code
               : 'PROBE_REQUEST_FAILED';
           json(
-            { code },
+            { code, ...(sourceSessionChanged(error) ? { authSessionChange: error.details.authSessionChange } : {}) },
             code === 'PROBE_UNAUTHENTICATED'
               ? 401
               : code === 'PROBE_NOT_FOUND'

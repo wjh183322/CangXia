@@ -156,6 +156,9 @@ test('HTTPS requires authentication and current ownership before library or veri
   );
   let verified = false,
     sourceConfirmed = true,
+    sourceUid = '123',
+    collectionFailures = 0,
+    verifications = 0,
     epochs = [],
     qrCaptures = 0,
     onQrCapture;
@@ -190,6 +193,8 @@ test('HTTPS requires authentication and current ownership before library or veri
     },
     async verifyIdentity() {
       if (!sourceConfirmed) throw new ProbeError('PROBE_AUTH_REQUIRED');
+      verifications++;
+      if (sourceUid !== '123') return { authEpoch: 3, uid: sourceUid };
       verified = true;
       store.db
         .prepare('INSERT OR REPLACE INTO runtime_meta VALUES (?,?)')
@@ -199,6 +204,10 @@ test('HTTPS requires authentication and current ownership before library or veri
     async request(route, options) {
       epochs.push(options.authEpoch);
       assert.equal(route, '/aweme/v1/web/collects/list/');
+      if (collectionFailures > 0) {
+        collectionFailures--;
+        throw new ProbeError('STALE_AUTH_EPOCH', 'Fixture session changed.', { authSessionChange: 'after-read' });
+      }
       return {
         status: 200,
         text: JSON.stringify({
@@ -332,10 +341,28 @@ test('HTTPS requires authentication and current ownership before library or veri
   finishCapture();
   assert.equal((await staleCapture).body.code, 'PROBE_VIEW_REQUIRED');
   assert.equal((await request('identity/qr?revision=7', null, a.cookie)).body.code, 'PROBE_VIEW_REQUIRED');
+  collectionFailures = 1;
+  const checksBeforeRecovery = verifications;
   const collections = await request('sources/collections', null, a.cookie);
+  assert.equal(collections.status, 200);
   assert.equal(collections.body.items[0].id, '123');
   assert.equal(JSON.stringify(collections.body).includes('secret.local'), false);
-  assert.deepEqual(epochs, [3]);
+  assert.deepEqual(epochs, [3, 3]);
+  assert.equal(verifications, checksBeforeRecovery + 1);
+
+  collectionFailures = 2;
+  const unstable = await request('sources/collections', null, a.cookie);
+  assert.equal(unstable.body.code, 'STALE_AUTH_EPOCH');
+  assert.equal(unstable.body.authSessionChange, 'after-read');
+  assert.equal(verifications, checksBeforeRecovery + 2);
+  assert.equal(epochs.length, 4);
+
+  collectionFailures = 1;
+  sourceUid = '456';
+  const mismatched = await request('sources/collections', null, a.cookie);
+  assert.equal(mismatched.body.code, 'PROBE_ACCOUNT_MISMATCH');
+  assert.equal(epochs.length, 5);
+  sourceUid = '123';
   assert.equal((await request('library', null, a.cookie)).body.total, 1);
   await request('downloads', { workIds: [workId], operationId: 'download' }, a.cookie);
   await downloads.run();

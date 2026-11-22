@@ -311,6 +311,29 @@ test('opening login fences a pending read and refuses to rebind the library to a
   assert.equal(restored.uid, ownId);
 });
 
+test('a queued account recheck cannot contact the provider after its ownership is lost', async t => {
+  const { browser, gateway } = await fixture(t);
+  const entered = Promise.withResolvers();
+  const standby = Promise.withResolvers();
+  browser.beforePanel = async () => {
+    entered.resolve();
+    await standby.promise;
+  };
+  const opening = gateway.openLogin();
+  await entered.promise;
+  let held = true;
+  const recovery = gateway.verifyIdentity({ guard() {
+    if (!held) throw new ProbeError('STALE_LEASE');
+  } });
+  const denied = assert.rejects(recovery, { code: 'STALE_LEASE' });
+  held = false;
+  standby.resolve();
+  await opening;
+  await denied;
+  assert.equal(browser.reads.length, 0);
+  assert.equal(browser.sourcePages().length, 1);
+});
+
 test('a rotating session stops a pending detail response before it can reach a writer', async t => {
   const { browser, gateway } = await fixture(t);
   const { authEpoch } = await gateway.verifyIdentity();
@@ -318,7 +341,9 @@ test('a rotating session stops a pending detail response before it can reach a w
     browser.session = 'rotated-session';
     return new Response(sourceText);
   };
-  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'STALE_AUTH_EPOCH' });
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), {
+    code: 'STALE_AUTH_EPOCH', details: { authSessionChange: 'after-read' }
+  });
   assert.throws(() => gateway.assertAuthEpoch(authEpoch), { code: 'STALE_AUTH_EPOCH' });
 });
 
@@ -1920,7 +1945,9 @@ test('session changes during pacing reject before dispatching a source read', as
   const { browser, gateway } = await fixture(t);
   const { authEpoch } = await gateway.verifyIdentity();
   browser.clock.onPaceWait = () => { browser.session = 'different-account-session'; };
-  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), { code: 'STALE_AUTH_EPOCH' });
+  await assert.rejects(gateway.request(detail, { authEpoch, params: { aweme_id: '1' } }), {
+    code: 'STALE_AUTH_EPOCH', details: { authSessionChange: 'before-read' }
+  });
   assert.equal(browser.reads.length, 1);
 });
 

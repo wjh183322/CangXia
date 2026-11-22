@@ -167,7 +167,7 @@ if (typeof document !== 'undefined') {
       body: body ? JSON.stringify(body) : undefined
     });
     const result = await res.json();
-    if (!res.ok) throw Object.assign(Error(result.code), { confirmed: true });
+    if (!res.ok) throw Object.assign(Error(result.code), { confirmed: true, authSessionChange: result.authSessionChange });
     return result;
   }
   const operations = createClientOperations(api, (kind, operationId) => {
@@ -315,6 +315,10 @@ if (typeof document !== 'undefined') {
           output.textContent = '暂无可用的扫码二维码。可重新打开登录页。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';
         } else if (cmd === 'verify' && err.message === 'PROBE_AUTH_REQUIRED') {
           output.textContent = '来源尚未确认登录。请在手机确认。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';
+        } else if (cmd === 'collections' && err.authSessionChange === 'before-read') {
+          output.textContent = 'STALE_AUTH_EPOCH：抖音会话在发送读取请求前有变化。';
+        } else if (cmd === 'collections' && err.authSessionChange === 'after-read') {
+          output.textContent = 'STALE_AUTH_EPOCH：抖音会话在收到读取响应后有变化。';
         } else {
           output.textContent = err.message;
         }
