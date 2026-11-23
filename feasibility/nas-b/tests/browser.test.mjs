@@ -96,6 +96,7 @@ class FakeContext extends EventEmitter {
     page.mainFrame = () => frame;
     page.frames = () => [frame, ...children];
     page.isClosed = () => closed;
+    page.waitForLoadState = (state, options) => context.onLoadState?.(state, options, page);
     page.goto = async url => {
       context.navigations.push({ page, url });
       const request = {
@@ -1646,6 +1647,64 @@ test('leased public static loading is active inside the first owned login goto',
   await gateway.verifyIdentity();
   assert.equal(await browser.visit(browser.sourcePages()[0].mainFrame(), loginAsset, 'script'), false);
   assert.equal(calls.length, 2);
+});
+
+test('a reader bootstrap loads reviewed public static assets and keeps other traffic scoped', async t => {
+  const calls = [];
+  const style = loginAsset.replace(/\.js$/, '.css');
+  const { browser, gateway } = await fixture(t, {
+    fetchLoginAsset: async (url, options) => {
+      calls.push({ url, options });
+      return guestAssetResponse(url, { type: url === style ? 'text/css' : 'application/javascript' });
+    }
+  });
+  browser.onLoadState = (state, options) => {
+    assert.equal(state, 'load');
+    assert.equal(options.timeout, 2000);
+    throw new ProbeError('PROBE_BROWSER_TIMEOUT');
+  };
+  browser.onGoto = async page => {
+    const main = page.mainFrame();
+    assert.equal(await browser.visit(main, loginAsset, 'script'), true);
+    assert.equal(await browser.visit(main, self, 'document'), true);
+    page.navigate(self);
+    assert.equal(await browser.visit(main, style, 'stylesheet'), true);
+    assert.equal(await browser.visit(main, 'https://outside.invalid/boot.js', 'script'), false);
+    assert.equal(await browser.visit(main, loginAsset, 'script', 'POST'), false);
+    assert.equal(await browser.visit(main, loginAsset, 'script', 'GET', false, {}), false);
+    assert.equal(await browser.visit(page.childNavigate('about:blank'), loginAsset, 'script'), false);
+    assert.equal(await browser.visit(main, 'https://www.douyin.com/aweme/v1/web/query/user/', 'fetch'), false);
+    assert.equal(await browser.visit(main, passportStatus, 'xhr', 'POST'), false);
+  };
+  await gateway.verifyIdentity();
+  const page = browser.sourcePages()[0];
+  assert.equal(await browser.visit(page.mainFrame(), loginAsset, 'script'), false);
+  assert.deepEqual(calls.map(call => call.url), [loginAsset, style]);
+  assert.ok(calls.every(({ options }) => options.credentials === 'omit' && options.redirect === 'error'));
+  assert.ok(browser.fulfillments.every(({ headers }) => !('set-cookie' in headers)));
+  assert.deepEqual(gateway.reportStage().readerResources, { loaded: 2, refused: 0 });
+});
+
+test('a canceled verification cannot fulfill an in-flight reader bootstrap asset', async t => {
+  const entered = Promise.withResolvers();
+  const reply = Promise.withResolvers();
+  const request = new AbortController();
+  let transfer, fetchSignal;
+  const { browser, gateway } = await fixture(t, { fetchLoginAsset: (_url, options) => {
+    fetchSignal = options.signal;
+    entered.resolve();
+    return reply.promise;
+  } });
+  browser.onGoto = page => { transfer = browser.visit(page.mainFrame(), loginAsset, 'script'); };
+  const verify = gateway.verifyIdentity({ signal: request.signal });
+  const cancelled = assert.rejects(verify, { code: 'STALE_LEASE' });
+  await entered.promise;
+  request.abort(new ProbeError('STALE_LEASE'));
+  assert.equal(fetchSignal.aborted, true);
+  reply.resolve(guestAssetResponse(loginAsset));
+  assert.equal(await transfer, false);
+  await cancelled;
+  assert.equal(browser.fulfillments.length, 0);
 });
 
 test('a linked initial login redirect loads assets but a later real reload cannot inherit that grant', async t => {

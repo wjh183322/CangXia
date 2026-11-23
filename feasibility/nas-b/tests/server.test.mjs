@@ -205,6 +205,7 @@ test('HTTPS requires authentication and current ownership before library or veri
     async request(route, options) {
       epochs.push(options.authEpoch);
       assert.equal(route, '/aweme/v1/web/collects/list/');
+      assert.deepEqual(options.params, { cursor: '0', count: '30' });
       if (collectionError) throw collectionError;
       if (collectionFailures > 0) {
         collectionFailures--;

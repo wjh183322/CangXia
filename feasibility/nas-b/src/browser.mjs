@@ -466,21 +466,24 @@ function loginResourceType(request, url) {
   return null;
 }
 
-async function deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset) {
-  const { page, assetAuthority, storageFrames } = slot;
+async function deliverPageAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset) {
+  const { page, kind, revision, assetAuthority, storageFrames } = slot;
   if (!assetAuthority || assetAuthority.bootstrap === 'initial' || assetAuthority.bootstrap === 'reloading') return false;
   let delivered = false;
   const current = () => pages.get(page) === slot && slot.assetAuthority === assetAuthority &&
     assetAuthority.bootstrap !== 'reloading' && slot.storageFrames === storageFrames &&
-    frame === page.mainFrame() && trustedLoginView(slot) &&
+    frame === page.mainFrame() && (kind === 'login' ? trustedLoginView(slot) :
+      kind === 'reader' && revision === slot.revision && !page.isClosed() && sourcePage(page.url(), kind)) &&
     assetAuthority.assert() === undefined;
   try {
     if (!assetAuthority.remaining || !current()) return false;
     assetAuthority.remaining--;
     const request = route.request();
     const method = request.method();
+    const deadline = AbortSignal.timeout(requestTimeout);
     const response = await fetchLoginAsset(url, {
-      method, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(requestTimeout)
+      method, credentials: 'omit', redirect: 'error',
+      signal: kind === 'reader' ? AbortSignal.any([deadline, assetAuthority.requestSignal]) : deadline
     });
     const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
     const accepted = mimePattern.test(type) &&
@@ -522,7 +525,7 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
       if (!authority) return;
       const url = request.url(), from = request.redirectedFrom();
       if (authority.bootstrap === 'initial' && page.url() === 'about:blank' && request.method() === 'GET' &&
-          sourcePage(url, 'login') &&
+          sourcePage(url, slot.kind) &&
           (authority.initialRequest ? from === authority.initialRequest : !from && url === home)) {
         authority.initialRequest = request;
       } else if (authority.open && !authority.requestSignal?.aborted && authority.bootstrap === 'eligible' && !from &&
@@ -564,9 +567,10 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
         const slot = pages.get(page);
         const mainFrame = frame === page.mainFrame();
         allowed = !!slot && approvedBrowserTraffic(request, slot, mainFrame);
-        if (slot?.kind === 'login' && mainFrame && request.isNavigationRequest()) {
+        if (slot && mainFrame && request.isNavigationRequest() &&
+            (slot.kind === 'login' || slot.kind === 'reader' && slot.assetAuthority)) {
           if (allowed) {
-            clearLoginDocument(slot);
+            if (slot.kind === 'login') clearLoginDocument(slot);
             const authority = slot.assetAuthority;
             if (authority?.bootstrap === 'reloading' && authority.initialRequest === request) {
               authority.reloadDocument = slot.storageFrames;
@@ -578,9 +582,14 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
           }
         }
         const url = request.url();
+        if (!allowed && slot?.kind === 'reader' && mainFrame && slot.assetAuthority &&
+            ['script', 'stylesheet'].includes(request.resourceType())) {
+          const mimePattern = loginResourceType(request, url);
+          if (mimePattern && await deliverPageAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset)) return;
+        }
         if (!allowed && slot?.kind === 'login' && mainFrame && sourcePage(page.url(), 'login')) {
           const mimePattern = loginResourceType(request, url);
-          if (mimePattern && await deliverLoginAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset)) return;
+          if (mimePattern && await deliverPageAsset(route, pages, slot, frame, url, mimePattern, fetchLoginAsset)) return;
           if (isPassportQrRequest(request, url)) {
             const qrRequest = { state: 'refused' };
             loginStage.qrRequest = qrRequest;
@@ -924,6 +933,7 @@ export async function openBrowserGateway({
   let verificationBlocked = false;
   let login;
   let reader;
+  let readerResources;
   let detail;
 
   function invalidate() {
@@ -1006,6 +1016,10 @@ export async function openBrowserGateway({
     });
     try {
       await browserCall(() => page.goto(home, { waitUntil: 'domcontentloaded', timeout: requestTimeout }), signal, requestTimeout);
+      if (kind === 'reader' && slot.assetAuthority) {
+        await browserCall(() => page.waitForLoadState('load', { timeout: 2000 }), signal)
+          .catch(() => signal.throwIfAborted());
+      }
       if (!page.isClosed() && sourcePage(page.url(), kind)) return slot;
     } catch (error) {
       // The browser driver can include source URLs or profile paths in errors.
@@ -1013,19 +1027,33 @@ export async function openBrowserGateway({
         void page.close().catch(() => {});
         throw error;
       }
+    } finally {
+      if (kind === 'reader') slot.assetAuthority = undefined;
     }
     void page.close().catch(() => {});
     assertOpen();
     throw new ProbeError('PROBE_BROWSER_PAGE', 'The official source page could not be loaded.');
   }
 
-  async function prepare(kind, signal) {
+  async function prepare(kind, signal, guard) {
     assertOpen();
     if (kind === 'detail') {
       if (!detail || detail.page.isClosed()) detail = await makePage(kind, signal);
       return detail;
     }
-    if (!reader || reader.page.isClosed()) reader = await makePage('reader', signal);
+    if (!reader || reader.page.isClosed()) {
+      readerResources = { loaded: 0, refused: 0 };
+      const preload = new AbortController();
+      const preloadSignal = AbortSignal.any([signal, preload.signal]);
+      try {
+        reader = await makePage('reader', signal, {
+          remaining: maxLoginAssetRequests, stats: readerResources, open: true, requestSignal: preloadSignal,
+          assert() { preloadSignal.throwIfAborted(); guard?.(); }
+        });
+      } finally {
+        preload.abort();
+      }
+    }
     return reader;
   }
 
@@ -1507,7 +1535,7 @@ export async function openBrowserGateway({
           assertOpen();
           const signal = callerSignal ? AbortSignal.any([epochController.signal, callerSignal]) : epochController.signal;
           assertNoCooldown();
-          const slot = await prepare('reader', signal);
+          const slot = await prepare('reader', signal, assertRequest);
           const expected = await fingerprint(signal);
           const profile = { fetch: async url => {
             const target = webTarget(url);
@@ -1573,7 +1601,7 @@ export async function openBrowserGateway({
       assertAuthEpoch(authEpoch);
       signal.throwIfAborted();
       assertNoCooldown();
-      const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal);
+      const slot = await prepare(route === detailRoute ? 'detail' : 'reader', signal, beforeDispatch);
       await beforeRead(signal);
       await assertSession(authEpoch, signal, 'before-read');
       assertAuthEpoch(authEpoch);
@@ -1646,6 +1674,7 @@ export async function openBrowserGateway({
       } : {}),
       helper: { ...loginStage.helper },
       loginResources: { ...loginStage.loginResources },
+      ...(readerResources?.loaded || readerResources?.refused ? { readerResources: { ...readerResources } } : {}),
       blockedPassport: {
         ...loginStage.blockedPassport, routes: [...loginStage.passportRoutes.values()].map(route => ({ ...route }))
       }

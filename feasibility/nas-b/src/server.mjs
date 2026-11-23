@@ -326,7 +326,7 @@ export async function startProbe(options) {
           const authEpoch = authorizeSource();
           stage = 'source-request';
           const response = await gateway.request('/aweme/v1/web/collects/list/', {
-            authEpoch, method: 'GET', params: { cursor: '0', count: '20' }, signal, beforeDispatch: guard
+            authEpoch, method: 'GET', params: { cursor: '0', count: '30' }, signal, beforeDispatch: guard
           });
           stage = 'response-check';
           guard();
@@ -499,15 +499,18 @@ export async function startProbe(options) {
             }
             if (id === 'verify' && method === 'POST') {
               const opening = session.view;
+              const guardVerification = () => {
+                guard();
+                if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              };
               let verified;
               try {
-                verified = await gateway.verifyIdentity();
+                verified = await gateway.verifyIdentity({ signal, guard: guardVerification });
               } catch (error) {
                 if (session.view === opening && error?.code !== 'PROBE_AUTH_REQUIRED') session.view = null;
                 throw error;
               }
-              guard();
-              if (session.view !== opening) fail('PROBE_VIEW_REQUIRED');
+              guardVerification();
               session.view = null;
               rememberSource(verified);
               return json({
