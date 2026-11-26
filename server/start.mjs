@@ -1,4 +1,7 @@
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import { createHttpsService } from './http.mjs';
+import { createSessionService } from './session.mjs';
 import { parseArgs } from 'node:util';
 import { openLibrary } from './library.mjs';
 import { applyUpgrade, inspectUpgrade } from './upgrade.mjs';
@@ -29,6 +32,48 @@ async function main([action = 'start', ...args]) {
   if (action !== 'start' && action !== 'init') throw Error('Choose start, inspect, init, or upgrade.');
   const library =
     action === 'init' ? openLibrary({ root, expectedId, mode: 'init' }) : startServer({ root, expectedId });
+  if (action === 'start' && library.state === 'ready') {
+    try {
+      if (!expectedId) throw Error('Set the expected CANGXIA_LIBRARY_ID before serving the volume.');
+      const {
+        CANGXIA_TLS_KEY_FILE: keyFile,
+        CANGXIA_TLS_CERT_FILE: certFile,
+        CANGXIA_DEVICES_FILE: devices
+      } = process.env;
+      if (!keyFile || !certFile || !devices)
+        throw Error('Set CANGXIA_TLS_KEY_FILE, CANGXIA_TLS_CERT_FILE and CANGXIA_DEVICES_FILE.');
+      const config = {
+        key: fs.readFileSync(keyFile),
+        cert: fs.readFileSync(certFile),
+        credentials: JSON.parse(fs.readFileSync(devices, 'utf8'))
+      };
+      const server = createHttpsService(config);
+      const port = Number(process.env.CANGXIA_PORT ?? 9443);
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, process.env.CANGXIA_HOST ?? '0.0.0.0', () => {
+          try {
+            config.sessions = createSessionService({ library });
+            resolve();
+          } catch (error) {
+            server.close();
+            reject(error);
+          }
+        });
+      });
+      const stop = () => {
+        config.sessions.close();
+        server.closeAllConnections();
+        server.close(() => library.close());
+      };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      return { state: 'serving', libraryId: library.libraryId, port: server.address().port };
+    } catch (error) {
+      library.close();
+      throw error;
+    }
+  }
   library.close?.();
   return library;
 }

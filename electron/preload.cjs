@@ -16,7 +16,9 @@ methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');
 methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
 methods.push('defectOverview');
 methods.push('validateDefectSelection','validateDownloadSelection');
-methods.push('serverIdentity');
+methods.push('serverIdentity','serverSession','serverGateReady','serverConnect','serverAcquire','serverRelease','serverCommand','serverReceipt');
+api.windowRole=typeof process==='undefined'?'':process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17);
+api.onServerSession=callback=>{const listener=(_event,state)=>callback(state);ipcRenderer.on('cangxia:server-session',listener);return()=>ipcRenderer.removeListener('cangxia:server-session',listener);};
 let statePending=null;
 for (const method of methods) api[method] = async (...args) => {
   const result = await ipcRenderer.invoke('cangxia:' + method, ...args);

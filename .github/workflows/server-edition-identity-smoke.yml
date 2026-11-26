@@ -185,14 +185,18 @@ jobs:
             do {
               $startup = @($editions | ForEach-Object { Get-EditionStartup $_ })
               $running = @($startup | Where-Object {
-                $_.processes.Count -gt 0 -and $_.hasLibrary -and $_.startupVersion -eq $_.expectedVersion -and
-                  'snapshot-ready' -in $_.startupStages -and 'library-visible' -in $_.startupStages
+                $ready = if ($_.product -eq '藏匣服务版') {
+                  !$_.hasLibrary -and 'connection-visible' -in $_.startupStages
+                } else {
+                  $_.hasLibrary -and 'snapshot-ready' -in $_.startupStages -and 'library-visible' -in $_.startupStages
+                }
+                $_.processes.Count -gt 0 -and $_.startupVersion -eq $_.expectedVersion -and $ready
               })
               if ($running.Count -eq 2) { break }
               Start-Sleep -Milliseconds 250
             } while ((Get-Date) -lt $deadline)
             $startup | ConvertTo-Json -Depth 3
-            if ($running.Count -ne 2) { throw 'Both editions must be running concurrently from their expected executables, each with its profile database, matching startup version, snapshot-ready stage, and library-visible renderer acknowledgement' }
+            if ($running.Count -ne 2) { throw 'Both editions must be running concurrently from their expected executables, with matching startup versions and the expected rendered entrance and database state for each edition' }
           } finally {
             foreach ($edition in $editions) {
               Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe } | Stop-Process

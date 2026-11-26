@@ -35,3 +35,73 @@ export function LoginPanel({data,api,onSuccess,onError,onState}){
   <div className="qr-login-footer"><ShieldCheck size={14}/>登录成功后自动连接并收起窗口</div>
  </div>;
 }
+
+export function ServerConnection({api}){
+  const [form,setForm]=useState({url:'',fingerprint:'',deviceId:'',token:''});
+  const [state,setState]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const [changedLibrary,setChangedLibrary]=useState(false),[acceptLibrary,setAcceptLibrary]=useState(false);
+  useEffect(()=>{
+    let active=true;
+    const off=api.onServerSession(value=>{if(active)setState(value);});
+    api.serverSession().then(value=>{
+      if(active){setState(value);setForm({...value.settings,token:''});}
+    }).catch(e=>{if(active)setError(e.message);});
+    return ()=>{active=false;off();};
+  },[api]);
+  const settingsLoaded=!!state;
+  useEffect(()=>{if(settingsLoaded)void api.serverGateReady().catch(()=>{});},[settingsLoaded,api]);
+  async function enter(event){
+    event.preventDefault();setBusy(true);setError('');
+    const config={url:form.url.trim(),deviceId:form.deviceId.trim(),fingerprint:form.fingerprint.trim(),token:form.token};
+    try{
+      if(acceptLibrary)config.libraryId=null;
+      await api.serverConnect(config);
+      setForm(previous=>({...previous,token:''}));
+      await api.serverAcquire();
+      setChangedLibrary(false);setAcceptLibrary(false);
+    }catch(e){setError(e.message);setChangedLibrary(e.message.includes('资料库身份已更换'));}
+    finally{setBusy(false);}
+  }
+  const fields=[
+    ['url','NAS 服务地址','url','https://nas.example:9443'],
+    ['deviceId','设备标识','text','NAS 分配给这台电脑的标识'],
+    ['fingerprint','证书 SHA256 指纹','text','从 NAS 核对指纹'],
+    ['token','服务访问凭据','password',state?.settings?.url?'留空使用已保存的凭据':'输入此设备的专用凭据']
+  ];
+  return <main className="connection-screen"><form className="connection-form" onSubmit={enter}>
+    <ShieldCheck size={30}/><h1>连接 NAS 资料库</h1>
+    {fields.map(([key,label,type,placeholder])=><label key={key}>{label}<input type={type}
+      required={key!=='token'||!state?.settings?.url} autoComplete="off" spellCheck={false} placeholder={placeholder}
+      value={form[key]} onChange={e=>setForm({...form,[key]:e.target.value})}/></label>)}
+    {changedLibrary&&<label><input type="checkbox" checked={acceptLibrary} onChange={e=>setAcceptLibrary(e.target.checked)}/>已在 NAS 核对新资料库，同意更换本机绑定</label>}
+    <p role="status">{error||state?.reason||'正在读取连接设置…'}</p>
+    <button className="button primary" disabled={busy||!state}>{busy?'正在连接…':'连接并取得使用权'}</button>
+  </form></main>;
+}
+export function SessionHandoff({api}){
+  const [busy,setBusy]=useState(false),[state,setState]=useState(null),[error,setError]=useState('');
+  useEffect(()=>{void api.serverSession().then(setState).catch(e=>setError(e.message));return api.onServerSession(setState);},[api]);
+  return <div className="session-handoff"><small role="status">{error||(state?.reconciling?'正在核对回执':state?.recent?
+    (state.recent.confirmed?'最近操作已获 NAS 确认':'上次操作未找到回执'):'')}</small>
+    <button className="button secondary" disabled={busy} title={state?.libraryId} onClick={async()=>{
+      setBusy(true);try{await api.serverRelease();}catch(e){setError(e.message);setBusy(false);}
+    }}> {busy?'正在核对并交接…':'换电脑 / 释放使用权'}</button></div>;
+}
+
+export function ServerConnectionSettings({api}){
+  const [state,setState]=useState(null),[id,setId]=useState(''),[result,setResult]=useState('');
+  async function receipt(event){
+    event.preventDefault();
+    try{
+      const record=await api.serverReceipt(id.trim());
+      setResult(record?'NAS 已确认 · '+(record.kind||'会话操作')+(record.jobId?' · 作业 '+record.jobId:''):'NAS 未找到该操作的回执。');
+    }catch(error){setResult(error.message);}
+  }
+  useEffect(()=>{let active=true;api.serverSession().then(value=>{if(active)setState(value);}).catch(()=>{});return()=>{active=false;};},[api]);
+  return <div className="modal-content settings-content">{state&&<dl>
+    <dt>服务地址</dt><dd>{state.settings.url}</dd><dt>资料库</dt><dd>{state.libraryId}</dd>
+    <dt>当前设备</dt><dd>{state.settings.deviceId}</dd><dt>证书 SHA256 指纹</dt><dd style={{overflowWrap:'anywhere'}}>{state.settings.fingerprint}</dd>
+    {state.recent&&<><dt>最近操作标识</dt><dd>{state.recent.operationId}</dd></>}</dl>}
+    <form onSubmit={receipt}><label>操作标识<input value={id} required onChange={e=>setId(e.target.value)}/></label>
+    <button className="button secondary">查询 NAS 回执</button><p role="status">{result}</p></form><p>换电脑前，藏匣会先核对已提交操作的回执，再释放使用权。</p><SessionHandoff api={api}/></div>;
+}

@@ -13,3 +13,11 @@ body{overflow:hidden}.app-shell{height:100vh;min-height:0}.sidebar{width:210px;p
 
 .backup-status-box{display:flex;flex-direction:column;gap:6px;background:#f0f7f4;border:1px solid #d6e9df;border-radius:10px;padding:12px;font-size:13px;overflow-wrap:anywhere}.backup-status-box.warning{background:#fff8e9;border-color:#f2dfb8}.backup-status-box small{color:#687585}
 .job-title{display:block;max-width:100%;width:100%;padding:0;border:0;background:transparent;text-align:left;color:inherit;cursor:pointer}.job-title:hover strong{color:var(--accent);text-decoration:underline}.job-title:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:3px}.source-status-box{padding:12px;background:#f7f9fc;border:1px solid #e4eaf3;border-radius:8px;margin-top:18px;font-size:12px}.source-status-box p,.source-status-box small{display:block;margin-top:7px;line-height:1.6;color:#8490a2}.filter-grid.source-filters{grid-template-columns:repeat(5,minmax(0,1fr))}
+
+.connection-screen{min-height:100vh;display:grid;place-items:center;overflow:auto;background:#f7f8fa;color:#253229}
+.connection-form{width:min(440px,90vw);padding:32px;background:white;border:1px solid #dce3de;border-radius:14px;display:grid;gap:14px}
+.connection-form h1{margin:0 0 4px;font-size:24px}
+.connection-form label{display:grid;gap:5px;font-weight:600}
+.connection-form input{width:100%;padding:9px 12px;border:1px solid #b8c4bb;border-radius:6px}
+.connection-form p,.session-handoff small{margin:0;color:#44534a}
+.session-handoff{display:flex;align-items:center;gap:8px}

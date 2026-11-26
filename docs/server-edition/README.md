@@ -63,3 +63,12 @@ GitHub Actions 在 `codex/server-edition` 上构建并检查 Linux amd64 试验�
 CI 的完整应用使用非 root、只读容器文件系统和独立试验挂载，以临时 HTTPS 证书自检。独立夹具挂载运行文件原子操作测试。Linux runner 上的结果和 NAS ext4 上的现场结果分别记录。
 
 在 `feasibility/nas-b` 可运行 `npm run test:delivery` 检查构建和交付边界。 `render-deployment.mjs` 从标准输入读取审核过的现场参数及发布证明。现场尚未确认或镜像尚未验证可拉取时只报告受阻项。生成的包包含一个 Compose 项目和 Chromium 沙箱的 seccomp 文件。使用 Moby 固定版本的默认拒绝配置，增加 Playwright 建议的用户命名空间调用，并允许 Chromium 沙箱发起由 Linux 按命名空间核验权限的 `chroot`。容器保持非 root 并移除外层 capabilities。需要 NAS 的运行时支持该配置与用户命名空间。 [Moby seccomp 配置](https://github.com/moby/profiles/blob/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/seccomp/default.json) [Playwright Docker 文档](https://github.com/microsoft/playwright/blob/v1.65.1/docs/src/docker.md)
+
+
+## 正式服务的 HTTPS 连接
+
+运行 `node server/start.mjs start` 前，设置独立正式卷的 `CANGXIA_LIBRARY_ROOT`、已核对的 `CANGXIA_LIBRARY_ID`、PEM 私钥及证书文件路径 `CANGXIA_TLS_KEY_FILE` 和 `CANGXIA_TLS_CERT_FILE`。服务默认监听 9443 端口；`CANGXIA_HOST` 和 `CANGXIA_PORT` 可指定监听位置。已有库若提示需要升级，先查看 `inspect` 预览并完成已有的快照确认流程。
+
+`CANGXIA_DEVICES_FILE` 指向仅供服务身份读取的独立 JSON 凭据文件。顶层键是 Windows 设备标识。每个设备条目的 `accountId` 标识服务内的使用者，`token` 是该设备独立的高熵访问凭据。两台由同一人使用的电脑可配置相同的 `accountId` 和各自生成的 `token`。设备标识及账号标识接受 1 至 128 个英文字母、数字、下划线或连字符。凭据可用 `node -p "require('node:crypto').randomBytes(32).toString('base64url')"` 在受信任设备上生成。只把相应设备的凭据交给对应 Windows 使用者。
+
+从 NAS 的证书文件执行 `openssl x509 -in server-cert.pem -noout -fingerprint -sha256` 取得指纹。Windows 连接页填写 HTTPS 地址、设备标识、指纹及专用凭据。凭据通过 Windows DPAPI 保存至服务版独立配置目录。换机时点击“换电脑 / 释放使用权”；突然断线时原租期最多持续 20 秒，重新取得使用权后按操作标识核对上次未收到的回执。

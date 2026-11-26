@@ -7,7 +7,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { openLibrary } from '../../server/library.mjs';
+import { openLibrary, CURRENT_SCHEMA } from '../../server/library.mjs';
 import { inspectUpgrade, applyUpgrade } from '../../server/upgrade.mjs';
 
 const entry = fileURLToPath(new URL('../../server/start.mjs', import.meta.url));
@@ -26,14 +26,14 @@ function command(root, expectedId) {
     root,
     expectedId,
     from: 1,
-    to: 2,
+    to: CURRENT_SCHEMA,
     imageDigest,
     approval: {
       confirmed: true,
       operationId: randomUUID(),
       libraryId: expectedId,
       from: 1,
-      to: 2,
+      to: CURRENT_SCHEMA,
       imageDigest
     }
   };
@@ -80,7 +80,8 @@ test('explicit clean init is the sole bootstrap path, normal CLI starts perform 
   assert.equal(state, 'ready');
   assert.match(libraryId, /^[0-9a-f-]{36}$/);
   const before = fs.readFileSync(dbFile(root));
-  assert.equal(cli('start', '--root', root, '--library-id', libraryId).state, 'ready');
+  assert.equal(cli('inspect', '--root', root, '--library-id', libraryId).state, 'ready');
+  assert.throws(() => cli('start', '--root', root, '--library-id', libraryId));
   assert.throws(() => cli('init', '--root', root));
   assert.throws(() => cli('start', '--root', root, '--library-id', randomUUID()));
   assert.deepEqual(fs.readFileSync(dbFile(root)), before);
@@ -131,7 +132,7 @@ test('startup and bad confirmations leave an existing old library byte-for-byte 
   const unapproved = cli('start', '--root', root, '--library-id', libraryId);
   assert.equal(unapproved.state, 'migration-required');
   assert.equal(unapproved.from, 1);
-  assert.equal(unapproved.to, 2);
+  assert.equal(unapproved.to, CURRENT_SCHEMA);
   assert.ok(unapproved.spaceRequired >= before.length);
   assert.ok(unapproved.reason && unapproved.impact && unapproved.rollback);
   assert.throws(() => openLibrary({ root, expectedId: libraryId }).write(() => {}));
@@ -142,7 +143,7 @@ test('startup and bad confirmations leave an existing old library byte-for-byte 
     {},
     { ...valid.approval, confirmed: false },
     { ...valid.approval, libraryId: randomUUID() },
-    { ...valid.approval, to: 3 },
+    { ...valid.approval, to: CURRENT_SCHEMA + 1 },
     { ...valid.approval, from: 2 },
     { ...valid.approval, imageDigest: 'other' }
   ]) {
@@ -198,7 +199,7 @@ test('online snapshot and durable retry receipt include committed WAL rows and m
       '--from',
       '1',
       '--to',
-      '2',
+      String(CURRENT_SCHEMA),
       '--image-digest',
       imageDigest,
       '--approval',
