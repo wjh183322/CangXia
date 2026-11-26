@@ -1,0 +1,126 @@
+name: Verify Windows edition coexistence
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/server-edition-full']
+    paths: ['.github/workflows/server-edition-identity-smoke.yml']
+permissions:
+  contents: read
+
+jobs:
+  windows-identity:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 08e6436522a3828211e9c32b51f90d7d830b4fa8
+          path: baseline-identity
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the service and frozen backup installers
+        shell: pwsh
+        run: |
+          foreach ($directory in @('.', 'baseline-identity')) {
+            Push-Location -LiteralPath $directory
+            try {
+              npm ci
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              ./scripts/build-cover-helper.ps1 -Python python
+              npm run dist
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            } finally {
+              Pop-Location
+            }
+          }
+          node --test tests/server-edition/product-identity.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install and start both editions from their Start menu shortcuts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $userPrograms = [Environment]::GetFolderPath('LocalApplicationData') + '\Programs'
+          $startMenuPrograms = [Environment]::GetFolderPath('Programs')
+          $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+          $appData = [Environment]::GetFolderPath('ApplicationData')
+          $editions = @(
+            @{
+              file = 'baseline-identity/release/backup/CangXia-Backup-0.3.46-Setup-x64.exe'
+              name = '藏匣备份版'
+              version = '0.3.46'
+              folder = 'cangxia-backup'
+              guid = 'eab8374a-6cc8-5910-b02a-ce05e8b98fcd'
+            },
+            @{
+              file = 'release/server/CangXia-Server-0.4.1-Setup-x64.exe'
+              name = '藏匣服务版'
+              version = '0.4.1'
+              folder = 'cangxia-server'
+              guid = '7be33a5c-bbe2-5006-b016-10aaff13bb57'
+            }
+          )
+          $shell = New-Object -ComObject WScript.Shell
+          foreach ($edition in $editions) {
+            $edition.installPath = Join-Path $userPrograms $edition.folder
+            $edition.exe = Join-Path $edition.installPath ($edition.name + '.exe')
+            $edition.installKey = 'HKCU:\Software\' + $edition.guid
+            $edition.uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\' + $edition.guid
+            $edition.shortcut = Join-Path $startMenuPrograms ($edition.name + '.lnk')
+            $edition.desktopShortcut = Join-Path $desktop ($edition.name + '.lnk')
+            $edition.data = Join-Path $appData $edition.name
+            foreach ($item in @($edition.installPath, $edition.installKey, $edition.uninstallKey, $edition.shortcut, $edition.desktopShortcut, $edition.data)) {
+              if (Test-Path -LiteralPath $item) { throw "Expected a fresh runner path: $item" }
+            }
+            $installer = (Resolve-Path -LiteralPath $edition.file).Path
+            $installed = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+            if ($installed.ExitCode -ne 0) { throw "Installer failed: $installer, exit $($installed.ExitCode)" }
+          }
+          foreach ($edition in $editions) {
+            if (!(Test-Path -LiteralPath $edition.exe)) { throw "Missing executable: $($edition.exe)" }
+            $registeredPath = Get-ItemPropertyValue -LiteralPath $edition.installKey -Name InstallLocation
+            if ($registeredPath -ne $edition.installPath) { throw "Wrong registered install location: $registeredPath" }
+            $displayVersion = Get-ItemPropertyValue -LiteralPath $edition.uninstallKey -Name DisplayVersion
+            if ($displayVersion -ne $edition.version) { throw "Wrong uninstall version: $displayVersion" }
+            $uninstall = Get-ItemPropertyValue -LiteralPath $edition.uninstallKey -Name UninstallString
+            if (!$uninstall.StartsWith('"' + $edition.installPath + '\')) { throw "Wrong uninstall executable: $uninstall" }
+            foreach ($shortcut in @($edition.shortcut, $edition.desktopShortcut)) {
+              if (!(Test-Path -LiteralPath $shortcut)) { throw "Missing shortcut: $shortcut" }
+              $link = $shell.CreateShortcut($shortcut)
+              if ($link.TargetPath -ne $edition.exe) { throw "Wrong shortcut target: $($link.TargetPath)" }
+            }
+            $info = (Get-Item -LiteralPath $edition.exe).VersionInfo
+            if ($info.ProductName -ne $edition.name) { throw "Wrong executable product: $($info.ProductName)" }
+          }
+          try {
+            foreach ($edition in $editions) {
+              Start-Process -FilePath $edition.shortcut
+            }
+            $deadline = (Get-Date).AddSeconds(75)
+            do {
+              $windows = @(Get-Process | Where-Object { $_.MainWindowTitle })
+              $running = @($editions | Where-Object {
+                $verified = $_
+                $window = $windows | Where-Object { $_.Path -eq $verified.exe -and $_.MainWindowTitle.StartsWith($verified.name + ' v' + $verified.version) }
+                $window -and (Test-Path -LiteralPath (Join-Path $verified.data 'library.sqlite'))
+              })
+              if ($running.Count -eq 2) { break }
+              Start-Sleep -Milliseconds 250
+            } while ((Get-Date) -lt $deadline)
+            if ($running.Count -ne 2) { throw 'Both shortcuts must open distinct versioned windows and profile databases concurrently' }
+            $running | ConvertTo-Json -Depth 3
+          } finally {
+            foreach ($edition in $editions) {
+              Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe } | Stop-Process
+            }
+          }

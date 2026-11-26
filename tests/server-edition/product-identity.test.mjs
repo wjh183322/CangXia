@@ -55,6 +55,10 @@ test('product-identity exposes the independent Windows and protocol identity', a
   assert.equal(manifest.build.nsis.artifactName, 'CangXia-Server-${version}-Setup-x64.exe');
   assert.equal(manifest.build.portable.artifactName, 'CangXia-Server-${version}-Windows-x64.exe');
   assert.equal(manifest.build.directories.output, 'release/server');
+  assert.equal(manifest.build.nsis.oneClick, true);
+  assert.equal(manifest.build.nsis.perMachine, false);
+  assert.equal(manifest.build.nsis.createDesktopShortcut, true);
+  assert.equal(manifest.build.nsis.createStartMenuShortcut, true);
   assert.equal(manifest.build.nsis.deleteAppDataOnUninstall, false);
   for (const spec of [lock, lock.packages['']]) {
     assert.equal(spec.name, manifest.name);
@@ -160,8 +164,25 @@ test('compatibility matrix maps baseline page calls, handlers, and preload event
   const expectedEntries = new Set([
     ...handlers, ...apiEvents, ...pageCalls,
     ...[...main.matchAll(/\bprotocol\.handle\(['"]([\w-]+)['"]/g)].map(match => match[1]),
-    'ui:workspace', 'ui:selection', 'ui:media', 'ui:settings', 'ui:close'
+    'ui:workspace', 'ui:selection', 'ui:media', 'ui:settings', 'ui:close',
+    'ui:cover-activation', 'ui:viewer-keys', 'ui:volume', 'ui:exclusive-playback', 'ui:page-jump'
   ]);
   const unmappedBaselineEntries = [...expectedEntries].filter(entry => !byEntry.has(entry)).sort();
   assert.deepEqual(unmappedBaselineEntries, []);
+  const taskOwners = {
+    setTags: ['07', '09'],
+    repairVideoCover: ['09'],
+    flatOpen: ['10'],
+    confirmScopedDeletion: ['11'],
+    exportWorkDiagnostic: ['12'],
+    importExistingLibrary: ['13'],
+    'ui:cover-activation': ['07', '10', '14'],
+    'ui:viewer-keys': ['07', '10', '14'],
+    'ui:volume': ['10', '14'],
+    'ui:exclusive-playback': ['10', '14'],
+    'ui:page-jump': ['07', '14']
+  };
+  for (const [entry, tasks] of Object.entries(taskOwners)) {
+    assert.deepEqual(byEntry.get(entry)[3].split('：', 1)[0].split('、'), tasks, entry);
+  }
 });
