@@ -1,0 +1,13 @@
+{
+  "name": "cangxia-nas-server",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.21.0"
+  },
+  "scripts": {
+    "start": "node start.mjs start",
+    "test": "node --test ../tests/server-edition/*.test.mjs"
+  }
+}
