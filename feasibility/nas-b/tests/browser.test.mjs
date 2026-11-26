@@ -1049,7 +1049,7 @@ function helperResponse(url, { status = 200, type = 'text/html; charset=utf-8', 
   return response;
 }
 
-test('only both verified direct login helpers can coexist with a main-document QR', async t => {
+test('supported direct login helpers can coexist with a main-document QR', async t => {
   const fetched = [];
   const { browser, gateway } = await fixture(t, { fetchStorageHelper: async (url, options) => {
     fetched.push(url);
@@ -1061,7 +1061,8 @@ test('only both verified direct login helpers can coexist with a main-document Q
   loginQrFixture(browser);
   const view = await gateway.openLogin();
   const page = browser.sourcePages()[0];
-  for (const version of ['4.0.5', '4.0.7']) {
+  const versions = ['4.0.5', '4.0.7', '4.0.8'];
+  for (const version of versions) {
     const child = page.childNavigate('about:blank');
     const url = storageHelper(version);
     assert.equal(await browser.visit(child, url, 'document'), true);
@@ -1070,8 +1071,8 @@ test('only both verified direct login helpers can coexist with a main-document Q
     assert.equal(await browser.visit(child, 'https://static.douyinstatic.com/helper.js', 'script'), false);
   }
   assert.equal(await browser.visit(page.mainFrame(), storageHelper('4.0.5'), 'document'), false);
-  assert.deepEqual(fetched, [storageHelper('4.0.5'), storageHelper('4.0.7')]);
-  assert.equal(browser.fulfillments.length, 2);
+  assert.deepEqual(fetched, versions.map(storageHelper));
+  assert.equal(browser.fulfillments.length, versions.length);
   assert.equal((await gateway.openLogin()).pageRevision, view.pageRevision);
   assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
   await assert.rejects(gateway.frame(view), { code: 'STALE_BROWSER_VIEW' });
@@ -1201,10 +1202,12 @@ test('login diagnostics report only bounded public stages and blocked operation 
   assert.equal(await browser.visit(next, url + '?token=never-export', 'document'), false);
   assert.deepEqual(gateway.reportStage().helper, { state: 'refused', version: '4.0.7' });
   assert.equal(await browser.visit(next, storageHelper('4.0.8') + '?token=never-export', 'document'), false);
+  assert.deepEqual(gateway.reportStage().helper, { state: 'refused', version: '4.0.8' });
+  assert.equal(await browser.visit(next, storageHelper('4.0.9'), 'document'), false);
   const stage = gateway.reportStage();
   assert.deepEqual(stage, {
     main: 'trusted', frames: 'helper-child', panelDetected: true, qr: 'available', qrRequest: 'refused', qrRefusalReason: 'no-authority', loginEntry: 'panel-present',
-    helper: { state: 'new-version', version: '4.0.8' },
+    helper: { state: 'new-version', version: '4.0.9' },
     loginResources: { loaded: 0, refused: 0 },
     blockedPassport: { GET: 2, POST: 1, routes: [
       { method: 'GET', name: 'get_qrcode' },

@@ -61,7 +61,7 @@ const maxLoginAssetRequests = 64;
 
 const storageHelperOrigin = 'https://lf-zt.douyin.com';
 const storageHelperPrefix = '/obj/uc-assets/zt/@byted/x-storage-web/';
-const storageHelperVersions = new Set(['4.0.5', '4.0.7']);
+const storageHelperVersions = new Set(['4.0.5', '4.0.7', '4.0.8']);
 const storageHelperUrls = new Set([...storageHelperVersions].map(version =>
   storageHelperOrigin + storageHelperPrefix + version + '/dist/latest/index.html'));
 const reportedPassportNames = new Set(['get_qrcode', 'check_qrconnect', 'challenge']);
