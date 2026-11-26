@@ -162,6 +162,38 @@ test('a second-page handoff preserves both folder memberships and the previously
   assert.equal(downloads.snapshot().jobs.length, 1);
 });
 
+test('a second-page handoff before dispatch resumes exactly once from the first committed cursor', async t => {
+  const queued = deferred();
+  const cursor = '9357260389275234771';
+  const sent = [];
+  const source = folder('10');
+  let firstAttempt = true;
+  const f = await fixture(t, { reply: async (call, dispatch) => {
+    if (call.cursor === cursor && firstAttempt) {
+      firstAttempt = false;
+      await queued.promise;
+    }
+    dispatch();
+    sent.push(call.cursor);
+    return call.cursor === '0' ? page(['100'], cursor) : page(['200']);
+  } });
+  const job = f.start(source, 'first-owner');
+  await until(() => !firstAttempt);
+  assert.equal(f.reads.snapshot(job.id).savedPages, 1);
+  f.leases.release(f.grant.lease, 'release-queued-second');
+  const next = f.opts(f.acquire('new-owner'));
+  assert.throws(() => f.reads.resume(job.id, 'too-early', next), { code: 'PROBE_READ_BUSY' });
+  queued.resolve();
+  assert.equal((await f.settled(job.id)).cursor, cursor);
+  assert.deepEqual(sent, ['0']);
+  assert.equal(f.reads.resume(job.id, 'resume', next).cursor, cursor);
+  const complete = await f.settled(job.id);
+  assert.equal(complete.state, 'complete');
+  assert.equal(complete.savedPages, 2);
+  assert.deepEqual(sent, ['0', cursor]);
+  assert.deepEqual(f.store.listWorks({ source }).items.map(work => work.id), ['100', '200']);
+});
+
 test('an outstanding page loses write authority when the browser account changes', async t => {
   const hold = deferred();
   const f = await fixture(t, { reply: (_call, dispatch) => { dispatch(); return hold.promise; } });
