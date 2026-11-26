@@ -133,7 +133,7 @@ jobs:
             $processes = @(Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe })
             $diagnostics = Join-Path $edition.data 'diagnostics/events.jsonl'
             $events = @(if (Test-Path -LiteralPath $diagnostics -PathType Leaf) {
-              Get-Content -LiteralPath $diagnostics -Tail 24 | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction SilentlyContinue }
+              Get-Content -LiteralPath $diagnostics | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction SilentlyContinue }
             })
             [pscustomobject]@{
               product = $edition.name
@@ -186,13 +186,13 @@ jobs:
               $startup = @($editions | ForEach-Object { Get-EditionStartup $_ })
               $running = @($startup | Where-Object {
                 $_.processes.Count -gt 0 -and $_.hasLibrary -and $_.startupVersion -eq $_.expectedVersion -and
-                  'snapshot-ready' -in $_.startupStages
+                  'library-visible' -in $_.startupStages
               })
               if ($running.Count -eq 2) { break }
               Start-Sleep -Milliseconds 250
             } while ((Get-Date) -lt $deadline)
             $startup | ConvertTo-Json -Depth 3
-            if ($running.Count -ne 2) { throw 'Both shortcuts must start the expected executable, open its profile database, and complete the renderer state request concurrently' }
+            if ($running.Count -ne 2) { throw 'Both editions must be running concurrently from their expected executables, each with its profile database, matching startup version, and library-visible renderer acknowledgement' }
           } finally {
             foreach ($edition in $editions) {
               Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe } | Stop-Process
