@@ -75,7 +75,79 @@ jobs:
               guid = '7be33a5c-bbe2-5006-b016-10aaff13bb57'
             }
           )
-          $shell = New-Object -ComObject WScript.Shell
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Runtime.InteropServices.ComTypes;
+          using System.Text;
+
+          public static class EditionShortcut
+          {
+              [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+              private class ShellLink {}
+
+              [ComImport, Guid("000214F9-0000-0000-C000-000000000046")]
+              [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+              private interface IShellLinkW
+              {
+                  [PreserveSig]
+                  int GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path,
+                      int capacity, IntPtr findData, uint flags);
+              }
+
+              public static string ReadTarget(string shortcut)
+              {
+                  const uint RawPath = 4;
+                  object link = new ShellLink();
+                  try
+                  {
+                      ((IPersistFile)link).Load(shortcut, 0);
+                      var target = new StringBuilder(32768);
+                      int result = ((IShellLinkW)link).GetPath(target, target.Capacity, IntPtr.Zero, RawPath);
+                      Marshal.ThrowExceptionForHR(result);
+                      return result == 0 ? target.ToString() : "";
+                  }
+                  finally
+                  {
+                      Marshal.ReleaseComObject(link);
+                  }
+              }
+          }
+          '@
+
+          function Assert-ShortcutTarget([string]$shortcut, [string]$expected) {
+            if (!(Test-Path -LiteralPath $shortcut -PathType Leaf)) { throw "Missing shortcut: $shortcut" }
+            try {
+              $target = [EditionShortcut]::ReadTarget($shortcut)
+            } catch {
+              $failure = $_.Exception.GetBaseException()
+              $size = (Get-Item -LiteralPath $shortcut).Length
+              throw "Unicode Shell Link reader could not load $shortcut ($size bytes, HRESULT $('0x{0:X8}' -f $failure.HResult)): $($failure.Message)"
+            }
+            if ([string]::IsNullOrWhiteSpace($target)) { throw "Shortcut has no filesystem target: $shortcut" }
+            if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw "Broken shortcut: $shortcut points to missing file $target" }
+            if ($target -ne $expected) { throw "Wrong shortcut target: $shortcut points to $target, expected $expected" }
+          }
+
+          function Get-EditionStartup([hashtable]$edition) {
+            $processes = @(Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe })
+            $diagnostics = Join-Path $edition.data 'diagnostics/events.jsonl'
+            $events = @(if (Test-Path -LiteralPath $diagnostics -PathType Leaf) {
+              Get-Content -LiteralPath $diagnostics -Tail 24 | ForEach-Object { ConvertFrom-Json -InputObject $_ -ErrorAction SilentlyContinue }
+            })
+            [pscustomobject]@{
+              product = $edition.name
+              expectedVersion = $edition.version
+              executable = $edition.exe
+              profile = $edition.data
+              processes = @($processes | Select-Object -First 8 -ExpandProperty Id)
+              windowTitles = @($processes | Where-Object MainWindowTitle | Select-Object -First 2 -ExpandProperty MainWindowTitle)
+              hasLibrary = Test-Path -LiteralPath (Join-Path $edition.data 'library.sqlite') -PathType Leaf
+              startupVersion = $events | Where-Object event -eq 'startup' | Select-Object -Last 1 -ExpandProperty version
+              startupStages = @($events | Where-Object event -eq 'startup-stage' | Select-Object -ExpandProperty name)
+            }
+          }
+
           foreach ($edition in $editions) {
             $edition.installPath = Join-Path $userPrograms $edition.folder
             $edition.exe = Join-Path $edition.installPath ($edition.name + '.exe')
@@ -100,9 +172,7 @@ jobs:
             $uninstall = Get-ItemPropertyValue -LiteralPath $edition.uninstallKey -Name UninstallString
             if (!$uninstall.StartsWith('"' + $edition.installPath + '\')) { throw "Wrong uninstall executable: $uninstall" }
             foreach ($shortcut in @($edition.shortcut, $edition.desktopShortcut)) {
-              if (!(Test-Path -LiteralPath $shortcut)) { throw "Missing shortcut: $shortcut" }
-              $link = $shell.CreateShortcut($shortcut)
-              if ($link.TargetPath -ne $edition.exe) { throw "Wrong shortcut target: $($link.TargetPath)" }
+              Assert-ShortcutTarget $shortcut $edition.exe
             }
             $info = (Get-Item -LiteralPath $edition.exe).VersionInfo
             if ($info.ProductName -ne $edition.name) { throw "Wrong executable product: $($info.ProductName)" }
@@ -113,17 +183,16 @@ jobs:
             }
             $deadline = (Get-Date).AddSeconds(75)
             do {
-              $windows = @(Get-Process | Where-Object { $_.MainWindowTitle })
-              $running = @($editions | Where-Object {
-                $verified = $_
-                $window = $windows | Where-Object { $_.Path -eq $verified.exe -and $_.MainWindowTitle.StartsWith($verified.name + ' v' + $verified.version) }
-                $window -and (Test-Path -LiteralPath (Join-Path $verified.data 'library.sqlite'))
+              $startup = @($editions | ForEach-Object { Get-EditionStartup $_ })
+              $running = @($startup | Where-Object {
+                $_.processes.Count -gt 0 -and $_.hasLibrary -and $_.startupVersion -eq $_.expectedVersion -and
+                  'snapshot-ready' -in $_.startupStages
               })
               if ($running.Count -eq 2) { break }
               Start-Sleep -Milliseconds 250
             } while ((Get-Date) -lt $deadline)
-            if ($running.Count -ne 2) { throw 'Both shortcuts must open distinct versioned windows and profile databases concurrently' }
-            $running | ConvertTo-Json -Depth 3
+            $startup | ConvertTo-Json -Depth 3
+            if ($running.Count -ne 2) { throw 'Both shortcuts must start the expected executable, open its profile database, and complete the renderer state request concurrently' }
           } finally {
             foreach ($edition in $editions) {
               Get-Process -Name $edition.name -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $edition.exe } | Stop-Process
