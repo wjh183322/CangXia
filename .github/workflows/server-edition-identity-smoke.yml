@@ -35,8 +35,13 @@ jobs:
           foreach ($directory in @('.', 'baseline-identity')) {
             Push-Location -LiteralPath $directory
             try {
-              npm ci
+              npm ci --ignore-scripts
               if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              node node_modules/electron/install.js
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              if (!(Test-Path -LiteralPath 'node_modules/electron/dist/electron.exe' -PathType Leaf)) {
+                throw "Electron runtime missing after bootstrap in $directory"
+              }
               ./scripts/build-cover-helper.ps1 -Python python
               npm run dist
               if ($LASTEXITCODE) { exit $LASTEXITCODE }
