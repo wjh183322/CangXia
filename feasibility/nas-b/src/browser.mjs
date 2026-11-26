@@ -23,6 +23,7 @@ const requestTimeout = 12000;
 const driverTimeout = 2500;
 const loginReadinessMs = 4000;
 const loginObservationMs = 200;
+const loginSessionWaitMs = 8000;
 const maxResponseBytes = 8 * 1024 * 1024;
 const maxStorageHelperBytes = 64 * 1024;
 const maxPassportQrBytes = 256 * 1024;
@@ -423,7 +424,10 @@ async function deliverPassportQr(route, pages, slot, frame, url, observation, fe
     if (!responseHeaders['content-type']) return false;
     refusalReason = 'fulfill-failed';
     await route.fulfill({ status: 200, headers: responseHeaders, body });
-    if (!status) qrAuthority.qrDelivered = true;
+    if (!status) {
+      qrAuthority.qrDelivered = true;
+      qrAuthority.timing.qrDeliveredAtMs ??= clock.now();
+    }
     observation.state = 'delivered';
     return true;
   } catch {
@@ -650,7 +654,7 @@ function browserTraffic(context, pages, fetchStorageHelper, loginStage, fetchPas
 }
 
 // Executed only in the owned main login document. No form values leave the page.
-function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
+function inspectLoginPanel(readPanel, { viewProbe, action, checkNotice, x, y }) {
   const box = element => {
     const rect = element.getBoundingClientRect();
     return { x: Math.floor(rect.left), y: Math.floor(rect.top), width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
@@ -680,6 +684,19 @@ function inspectLoginPanel(readPanel, { viewProbe, action, x, y }) {
   let qrOnly = false;
   const titlesOf = surface => [...surface.querySelectorAll('h1,h2,h3,[role="heading"],button,span,div')]
     .filter(element => element.children.length < 3 && visible(element)).map(compact);
+  if (checkNotice) {
+    const center = document.elementsFromPoint(innerWidth / 2, innerHeight / 2);
+    for (const surface of new Set([...surfaces, ...center])) {
+      if (!fits(box(surface)) || !visible(surface) || changesAccount.test(compact(surface))) continue;
+      const titles = titlesOf(surface);
+      if (!surfaces.includes(surface) && !(parseFloat(getComputedStyle(surface).borderRadius) > 0 &&
+          titles.some(title => qrLabel.test(title)))) continue;
+      if (titles.some(title => /^(?:请先完成安全验证|请完成身份验证|短信验证码已发送|请使用绑定手机号验证|身份验证|安全验证)$/.test(title)))
+        return { loginNotice: 'verification' };
+      if (titles.some(title => /^二维码(?:已)?(?:过期|失效)(?:点击刷新)?$/.test(title)))
+        return { loginNotice: 'expired' };
+    }
+  }
   for (const surface of surfaces) {
     const rect = box(surface);
     if (!fits(rect) || !visible(surface) || changesAccount.test(compact(surface))) continue;
@@ -1135,10 +1152,17 @@ export async function openBrowserGateway({
     const revision = pageRevision;
     assertView(revision);
     const { page, viewProbe } = slot;
-    const result = await browserCall(() => page.evaluate(panelScript, { viewProbe, ...action }), epochController.signal);
+    const checkNotice = action?.action === 'qr' && Boolean(slot.qrAuthority);
+    const result = await browserCall(() => page.evaluate(panelScript, { viewProbe, ...action, checkNotice }), epochController.signal);
     assertView(revision);
     await applyPanel(slot, result);
+    if (action?.action === 'qr' && slot.qrAuthority) checkLoginNotice(result);
     return result?.allowed === true;
+  }
+
+  function checkLoginNotice(result) {
+    if (result?.loginNotice === 'expired') throw new ProbeError('PROBE_QR_EXPIRED');
+    if (result?.loginNotice === 'verification') throw new ProbeError('PROBE_LOGIN_VERIFICATION_REQUIRED');
   }
 
   async function waitForLoginPanel(slot, requestSignal, assertOpening) {
@@ -1200,7 +1224,9 @@ export async function openBrowserGateway({
     };
     loginStage.loginEntry = 'not-checked';
 
-    for (; remaining() > 0; await pause()) {
+    for (;; await pause()) {
+      if (qrAuthority?.qrDelivered) startQrWait();
+      if (remaining() <= 0) break;
       if (!ready()) continue;
       const revision = pageRevision;
       let result, sampledDocument;
@@ -1208,7 +1234,7 @@ export async function openBrowserGateway({
         result = await browserCall(() => {
           if (!ready()) return null;
           if (assetAuthority?.bootstrap === 'eligible') sampledDocument = slot.storageFrames;
-          return page.evaluate(panelScript, { viewProbe, action: 'probe-open' });
+          return page.evaluate(panelScript, { viewProbe, action: 'probe-open', checkNotice: Boolean(qrAuthority) });
         }, signal, Math.min(driverTimeout, remaining()));
       } catch (error) {
         const trackedReload = sampledDocument && !dispatched && assetAuthority?.open &&
@@ -1225,11 +1251,13 @@ export async function openBrowserGateway({
       const appliedRevision = await applyPanel(slot, revision === pageRevision ? result : null);
       if (!ready()) continue;
       if (appliedRevision !== pageRevision) await applyPanel(slot, null);
+      if (qrAuthority && revision === pageRevision && appliedRevision === pageRevision) checkLoginNotice(result);
       if (revision === pageRevision && result?.loginEntry === 'not-present' && !dispatched) {
         loginStage.loginEntry = 'not-present';
       }
       waitingForQr = !!(slot.panel && result?.qrOnly && qrAuthority);
       if (slot.panel) {
+        if (qrAuthority) qrAuthority.timing.panelSeenAtMs ??= clock.now();
         if (loginStage.loginEntry !== 'clicked') loginStage.loginEntry = 'panel-present';
         if (waitingForQr) {
           startQrWait();
@@ -1279,11 +1307,14 @@ export async function openBrowserGateway({
       assertOpening();
       assertVerificationAvailable();
       loginStage.loginResources = { loaded: 0, refused: 0 };
+      loginStage.accountCheck = undefined;
       const assetAuthority = typeof assertQrRequest === 'function' ?
         { assert: assertQrRequest, remaining: maxLoginAssetRequests, stats: loginStage.loginResources,
           open: true, requestSignal: signal } : undefined;
       try {
-        if (!trustedView(login) || login.qrAuthority?.qrDelivered) {
+        const previousQrViewLost = loginStage.qrRequest.state === 'refused' &&
+          loginStage.qrRequest.guardFailure === 'PROBE_VIEW_REQUIRED';
+        if (!trustedView(login) || login.qrAuthority?.qrDelivered || previousQrViewLost) {
           invalidate();
           if (login && !login.page.isClosed()) await browserCall(() => login.page.close(), epochController.signal);
           lastQr = 'not-requested';
@@ -1296,8 +1327,8 @@ export async function openBrowserGateway({
           pageRevision++;
         } else login.assetAuthority = assetAuthority;
         if (login) {
-          login.qrAuthority = typeof assertQrRequest === 'function' ?
-            { assert: assertQrRequest } : undefined;
+          loginStage.timing = typeof assertQrRequest === 'function' ? { openedAtMs: clock.now() } : undefined;
+          login.qrAuthority = loginStage.timing ? { assert: assertQrRequest, timing: loginStage.timing } : undefined;
           await waitForLoginPanel(login, signal, assertOpening);
         }
         return viewState();
@@ -1310,15 +1341,15 @@ export async function openBrowserGateway({
     });
   }
 
-  async function inspectQr(slot, revision, signal, encode = false) {
+  async function inspectQr(slot, assertCapture, signal, encode = false) {
     await refreshPanel(slot, { action: 'qr' });
-    assertView(revision);
+    assertCapture();
     if (!slot.panel) throw qrUnavailable();
     const region = await browserCall(
       () => slot.page.evaluate(loginQrRegion, { key: slot.viewProbe, panel: slot.panel, encode, maxBitmapSize: maxQrBitmapSize }),
       signal
     );
-    assertView(revision);
+    assertCapture();
     if (!validQrRect(region, viewport) || !Number.isSafeInteger(region.id)) throw qrUnavailable();
     return region;
   }
@@ -1327,25 +1358,37 @@ export async function openBrowserGateway({
     return withView(async () => {
       lastQr = 'requested';
       const slot = assertView(revision);
+      const documentRevision = slot.revision;
+      const authority = slot.qrAuthority;
+      const panelId = slot.panel?.id;
+      const assertCapture = () => {
+        const currentSlot = assertView(pageRevision);
+        if (currentSlot !== slot || slot.revision !== documentRevision || slot.qrAuthority !== authority ||
+            slot.panel?.id !== panelId || slot.pressed) throw staleView();
+      };
       try {
         signal?.throwIfAborted();
         const captureSignal = signal ? AbortSignal.any([signal, epochController.signal]) : epochController.signal;
-        const { png, ...region } = await inspectQr(slot, revision, captureSignal, true);
-        const current = await inspectQr(slot, revision, captureSignal);
-        if (Object.keys(region).some(key => region[key] !== current[key])) throw staleView();
-        if (typeof png !== 'string') throw qrUnavailable();
-        const bytes = Buffer.from(png, 'base64');
-        if (!isLoginQrPng(bytes) || bytes.readUInt32BE(16) !== region.pixelWidth ||
-            bytes.readUInt32BE(20) !== region.pixelHeight)
-          throw qrUnavailable();
-        if (slot.qrAuthority?.qrDelivered) {
-          slot.qrAuthority.statusWindow ??= {
-            expires: clock.now() + passportStatusWindowMs, remaining: maxPassportStatusRequests
-          };
+        // Repaint can move the existing panel or replace its bitmap without navigating.
+        // Retake only this read-only crop; input continues to require the original revision.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const { png, ...region } = await inspectQr(slot, assertCapture, captureSignal, true);
+          const current = await inspectQr(slot, assertCapture, captureSignal);
+          if (Object.keys(region).some(key => region[key] !== current[key])) continue;
+          if (typeof png !== 'string') throw qrUnavailable();
+          const bytes = Buffer.from(png, 'base64');
+          if (!isLoginQrPng(bytes) || bytes.readUInt32BE(16) !== region.pixelWidth ||
+              bytes.readUInt32BE(20) !== region.pixelHeight) throw qrUnavailable();
+          if (slot.qrAuthority?.qrDelivered) {
+            slot.qrAuthority.statusWindow ??= {
+              expires: clock.now() + passportStatusWindowMs, remaining: maxPassportStatusRequests
+            };
+          }
+          return { pageRevision: revision, bytes };
         }
-        return { pageRevision: revision, bytes };
+        throw staleView();
       } catch (error) {
-        assertView(revision);
+        assertCapture();
         if (error instanceof ProbeError) throw error;
         throw qrUnavailable();
       }
@@ -1499,10 +1542,16 @@ export async function openBrowserGateway({
     }
   }
 
-  async function fingerprint(signal) {
+  async function fingerprint(signal, accountCheck) {
     signal.throwIfAborted();
     try {
-      return sessionFingerprint(await browserCall(() => context.cookies([home, `${origin}/aweme/v1/web/`]), signal));
+      const cookies = await browserCall(() => context.cookies([home, `${origin}/aweme/v1/web/`]), signal);
+      if (accountCheck) {
+        accountCheck.sessionCookiePresent = cookies.some(cookie =>
+          (cookie.name === 'sessionid' || cookie.name === 'sessionid_ss') && Boolean(cookie.value));
+        if (accountCheck.sessionCookiePresent && loginStage.timing) loginStage.timing.sessionSeenAtMs ??= clock.now();
+      }
+      return sessionFingerprint(cookies);
     } catch (error) {
       signal.throwIfAborted();
       if (error instanceof ProbeError) throw error;
@@ -1520,6 +1569,31 @@ export async function openBrowserGateway({
     }
   }
 
+  async function waitForIssuedLoginSession(signal, assertRequest, accountCheck) {
+    const slot = login;
+    const statusWindow = slot?.qrAuthority?.statusWindow;
+    if (!statusWindow || !trustedView(slot)) return;
+    const deadline = Math.min(statusWindow.expires, clock.now() + loginSessionWaitMs);
+    accountCheck.state = 'waiting-for-session';
+    for (;;) {
+      assertRequest();
+      if (login !== slot || !trustedView(slot)) throw staleView();
+      await fingerprint(signal, accountCheck);
+      if (accountCheck.sessionCookiePresent) {
+        accountCheck.state = 'checking';
+        return;
+      }
+      const wait = Math.min(loginObservationMs, deadline - clock.now());
+      if (wait <= 0) {
+        accountCheck.state = 'session-not-established';
+        throw authRequired();
+      }
+      let timer;
+      try { await abortable(new Promise(resolve => { timer = schedule(resolve, wait); }), signal); }
+      finally { unschedule(timer); }
+    }
+  }
+
   function verifyIdentity({ signal: callerSignal, guard } = {}) {
     const assertRequest = () => {
       callerSignal?.throwIfAborted();
@@ -1528,6 +1602,8 @@ export async function openBrowserGateway({
     return withView(async () => {
       assertRequest();
       assertVerificationAvailable();
+      const accountCheck = { state: 'checking' };
+      loginStage.accountCheck = accountCheck;
       verifying = true;
       try {
         return await withSource(async () => {
@@ -1535,8 +1611,9 @@ export async function openBrowserGateway({
           assertOpen();
           const signal = callerSignal ? AbortSignal.any([epochController.signal, callerSignal]) : epochController.signal;
           assertNoCooldown();
+          await waitForIssuedLoginSession(signal, assertRequest, accountCheck);
           const slot = await prepare('reader', signal, assertRequest);
-          const expected = await fingerprint(signal);
+          const expected = await fingerprint(signal, accountCheck);
           const profile = { fetch: async url => {
             const target = webTarget(url);
             if (target?.origin !== origin || target.pathname !== selfRoute) throw invalidRoute();
@@ -1544,6 +1621,7 @@ export async function openBrowserGateway({
             await beforeRead(signal);
             assertRequest();
             const { status, text, retryAfter } = await read(slot, request, signal);
+            accountCheck.httpStatus = status;
             return { status, ok: status >= 200 && status < 300, text: async () => text, headers: new Headers({ 'retry-after': String(retryAfter) }) };
           } };
           let identity;
@@ -1577,9 +1655,16 @@ export async function openBrowserGateway({
             return current.uid ? current : writeAuth(db, { ...current, uid: identity.uid });
           });
           binding = { fingerprint: expected, userAgent };
+          accountCheck.state = 'verified';
+          if (loginStage.timing) loginStage.timing.verifiedAtMs ??= clock.now();
           return { ...identity, authEpoch: state.authEpoch };
         });
       } catch (error) {
+        if (error?.code === 'PROBE_ACCOUNT_MISMATCH') accountCheck.state = 'account-mismatch';
+        else if (accountCheck.httpStatus >= 400) accountCheck.state = 'http-rejected';
+        else if (accountCheck.state !== 'session-not-established') {
+          accountCheck.state = accountCheck.httpStatus === undefined ? 'request-unavailable' : 'account-unconfirmed';
+        }
         assertRequest();
         if (binding && !closed) invalidate();
         if (error instanceof ProbeError) throw error;
@@ -1667,6 +1752,8 @@ export async function openBrowserGateway({
       main, frames, panelDetected: main === 'trusted' && !!login?.panel, qr: lastQr,
       qrRequest: qrRequest.state, loginEntry: loginStage.loginEntry,
       ...(loginStage.statusRequest ? { qrStatus: loginStage.statusRequest.state } : {}),
+      ...(loginStage.accountCheck ? { accountCheck: { ...loginStage.accountCheck } } : {}),
+      ...(loginStage.timing ? { loginTimingMs: { ...loginStage.timing } } : {}),
       ...(qrRequest.state === 'refused' && qrRequest.refusalReason ? {
         qrRefusalReason: qrRequest.refusalReason,
         ...(qrRequest.guardFailure === undefined ? {} : { qrGuardFailure: qrRequest.guardFailure }),

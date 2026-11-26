@@ -313,7 +313,11 @@ if (typeof document !== 'undefined') {
       }
     } catch (err) {
       if (current()) {
-        if (cmd === 'open' && ['PROBE_QR_UNAVAILABLE', 'STALE_BROWSER_VIEW'].includes(err.message)) {
+        if (cmd === 'open' && err.message === 'PROBE_QR_EXPIRED') {
+          output.textContent = '抖音登录页提示二维码已过期，请重新打开服务端登录页。';
+        } else if (cmd === 'open' && err.message === 'PROBE_LOGIN_VERIFICATION_REQUIRED') {
+          output.textContent = '抖音登录页要求人工验证。请在受信任的服务端浏览器完成后，再点“核验账号”。';
+        } else if (cmd === 'open' && ['PROBE_QR_UNAVAILABLE', 'STALE_BROWSER_VIEW'].includes(err.message)) {
           output.textContent = '暂无可用的扫码二维码。可重新打开登录页。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';
         } else if (cmd === 'verify' && err.message === 'PROBE_AUTH_REQUIRED') {
           output.textContent = '来源尚未确认登录。请在手机确认。如果来源要求短信或安全验证，需要在受信任的服务端浏览器手动操作。';

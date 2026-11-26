@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
 import { ProbeError } from '../src/contracts.mjs';
 import { createLeaseManager } from '../src/lease.mjs';
 import { createReadCoordinator } from '../src/read-jobs.mjs';
+import { createDownloads } from '../src/downloads.mjs';
+import { resolveResource } from '../src/files.mjs';
 import { openProbeStore } from '../src/store.mjs';
 import { fakeClock, makeSandbox } from './helpers.mjs';
 
@@ -68,7 +71,7 @@ async function fixture(t, { reply = () => page(['100']), finalize = async () => 
     });
     return { store, reads, leases, acquire, grant, opts, start, settled };
   };
-  return { ...launch(true), launch, calls, clock, rotateAuth: () => ++authEpoch };
+  return { ...launch(true), launch, calls, clock, layout, rotateAuth: () => ++authEpoch };
 }
 
 test('stores one active command before dispatch and replays its exact receipt', async t => {
@@ -105,6 +108,58 @@ test('a replacement lease waits for the dispatched page and resumes from the NAS
   assert.equal(resumed.epoch, job.epoch + 1);
   assert.equal((await f.settled(job.id)).state, 'complete');
   assert.deepEqual(f.calls.map(call => call.cursor), ['0', '9357260389275234771']);
+});
+
+test('a second-page handoff preserves both folder memberships and the previously downloaded image', async t => {
+  const pending = deferred();
+  const shared = '100';
+  const first = folder('10'), second = folder('20');
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
+  const f = await fixture(t, { reply(call, dispatch) {
+    dispatch();
+    if (call.params.collects_id === first.id) return { status: 200, text: JSON.stringify({
+      has_more: 0, aweme_list: [{ aweme_id: shared, images: [{ origin_image: {
+        uri: 'fixture-picture', url_list: ['https://p3.douyinpic.com/picture/test']
+      } }] }]
+    }) };
+    return call.cursor === '0' ? page(['200'], '9357260389275234771') : pending.promise;
+  } });
+  assert.equal((await f.settled(f.start(first, 'first-folder').id)).state, 'complete');
+  f.store.db.prepare('INSERT INTO runtime_meta VALUES (?,?)').run('browser_auth', '{"uid":"1234","authEpoch":1}');
+  let fetches = 0;
+  const downloads = createDownloads({ store: f.store, layout: f.layout,
+    gateway: { assertAuthEpoch(epoch) { assert.equal(epoch, 1); }, async mediaHeaders() { return new Headers(); } },
+    fetchAsset() { fetches++; return new Response(image, { headers: { 'Content-Type': 'image/png' } }); }
+  });
+  downloads.enqueue({ workIds: [shared], operationId: 'download-shared' });
+  await downloads.run();
+  assert.equal(downloads.snapshot().jobs[0].state, 'complete');
+  const resource = () => resolveResource({ store: f.store, layout: f.layout, workId: shared, key: 'image-0' });
+  const before = await resource();
+  const job = f.start(second, 'second-folder');
+  await until(() => f.calls.length === 3);
+  const checkpoint = f.reads.snapshot(job.id);
+  assert.equal(checkpoint.savedPages, 1);
+  assert.equal(checkpoint.cursor, '9357260389275234771');
+  f.leases.release(f.grant.lease, 'release-during-page-two');
+  const next = f.opts(f.acquire('new-owner'));
+  assert.throws(() => f.reads.resume(job.id, 'early', next), { code: 'PROBE_READ_BUSY' });
+  assert.throws(() => f.reads.resume(job.id, 'stale', f.opts()), { code: 'STALE_LEASE' });
+  pending.resolve(page([shared]));
+  const settled = await f.settled(job.id);
+  assert.equal(settled.savedPages, 2);
+  assert.equal(settled.finalizationPending, true);
+  assert.equal(f.reads.resume(job.id, 'finish', next).id, job.id);
+  assert.equal((await f.settled(job.id)).state, 'complete');
+  assert.deepEqual(f.calls.map(call => call.cursor), ['0', '0', checkpoint.cursor]);
+  for (const [source, ids] of [[first, [shared]], [second, ['200', shared]]]) {
+    assert.deepEqual(f.store.listWorks({ source }).items.map(work => work.id), ids);
+  }
+  assert.equal(f.store.listWorks().total, 2);
+  assert.equal((await resource()).file, before.file);
+  assert.deepEqual(await readFile(before.file), image);
+  assert.equal(fetches, 1);
+  assert.equal(downloads.snapshot().jobs.length, 1);
 });
 
 test('an outstanding page loses write authority when the browser account changes', async t => {

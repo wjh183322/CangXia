@@ -564,7 +564,7 @@ test('ordinary profile with no recognized auth panel produces no pixels or input
 
 function loginQrFixture(browser, {
   challenge = false, ambiguous = false, tag = 'canvas', tainted = false, overlay = false,
-  semanticDialog = true, scanHelp = true, nativeQr = false,
+  semanticDialog = true, scanHelp = true, nativeQr = false, noticeText,
   qrUrl = tainted ? 'https://p3.douyinpic.com/qr/test.png' : 'https://www.douyin.com/qr/test.png'
 } = {}) {
   const qr = fixtureNode(tag, { attrs: { 'aria-label': '登录二维码' }, rect: qrRect });
@@ -579,6 +579,7 @@ function loginQrFixture(browser, {
     }
   });
   const headings = [fixtureNode('h2', { text: '扫码登录' })];
+  if (noticeText) headings.push(fixtureNode('span', { text: noticeText }));
   if (!semanticDialog) headings.push(
     fixtureNode('div', { text: '登录后观看更多精彩内容' }),
     fixtureNode('span', { text: '验证码登录' })
@@ -639,6 +640,51 @@ test('a current official login QR produces its isolated canvas bitmap without an
   await assert.rejects(gateway.loginQr(view), { code: 'PROBE_QR_UNAVAILABLE' });
 });
 
+test('a QR repaint discards the first bitmap and captures the current region again', async t => {
+  const { browser, gateway } = await fixture(t);
+  const qr = loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const rect = qr.getBoundingClientRect();
+  let encodes = 0;
+  browser.onQrEncode = () => {
+    if (++encodes === 1) {
+      qr.getBoundingClientRect = () => ({ ...rect, left: rect.left + 1, right: rect.right + 1 });
+    }
+  };
+
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  assert.equal(encodes, 2);
+});
+
+test('a QR capture can follow its existing panel when it moves, but refuses a replacement panel', async t => {
+  const { browser, gateway } = await fixture(t);
+  loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const panel = browser.panelDocument.body.children[0];
+  const rect = panel.getBoundingClientRect();
+  panel.getBoundingClientRect = () => ({ ...rect, left: rect.left + 1, right: rect.right + 1 });
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
+
+  const refreshed = await gateway.openLogin();
+  loginQrFixture(browser);
+  await assert.rejects(gateway.loginQr(refreshed), { code: 'STALE_BROWSER_VIEW' });
+});
+
+test('a continually repainting QR never returns an obsolete bitmap', async t => {
+  const { browser, gateway } = await fixture(t);
+  const qr = loginQrFixture(browser);
+  const view = await gateway.openLogin();
+  const rect = qr.getBoundingClientRect();
+  let encodes = 0;
+  browser.onQrEncode = () => {
+    ++encodes;
+    qr.getBoundingClientRect = () => ({ ...rect, left: rect.left + encodes, right: rect.right + encodes });
+  };
+  await assert.rejects(gateway.loginQr(view), { code: 'STALE_BROWSER_VIEW' });
+  assert.equal(encodes, 3);
+});
+
 test('the confirmed official QR modal without dialog attributes can provide only its QR bitmap', async t => {
   const { browser, gateway } = await fixture(t);
   loginQrFixture(browser, { semanticDialog: false });
@@ -656,6 +702,21 @@ test('the confirmed official QR modal without dialog attributes can provide only
   loginQrFixture(browser, { semanticDialog: false, challenge: true });
   const challenge = await gateway.openLogin();
   await assert.rejects(gateway.loginQr(challenge), { code: 'PROBE_QR_UNAVAILABLE' });
+});
+
+test('operator opening distinguishes expired QR and explicit manual verification from an ordinary login tab', async t => {
+  const { browser, gateway } = await fixture(t);
+  for (const [noticeText, code] of [
+    ['二维码失效', 'PROBE_QR_EXPIRED'], ['请先完成安全验证', 'PROBE_LOGIN_VERIFICATION_REQUIRED'],
+    ['短信验证码已发送', 'PROBE_LOGIN_VERIFICATION_REQUIRED']
+  ]) {
+    loginQrFixture(browser, { semanticDialog: false, noticeText });
+    await assert.rejects(gateway.openLogin({ assertQrRequest() {} }), { code });
+    assert.equal(browser.lastShot, undefined);
+  }
+  loginQrFixture(browser, { semanticDialog: false });
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
 });
 
 test('an origin-clean IMG can produce its own PNG while tainted images and SVG are withheld', async t => {
@@ -781,6 +842,28 @@ test('a single login click keeps the same opening while a direct child and the Q
   assert.ok(browser.clock.now() >= clickedAt + 4600);
   assert.equal(gateway.reportStage().loginEntry, 'clicked');
   assert.equal(gateway.reportStage().qrRequest, 'delivered');
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+});
+
+test('an automatically delivered QR waits for its late login panel without clicking an entry', async t => {
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
+  browser.panel = null;
+  browser.entryVisible = false;
+  let requested = false;
+  browser.beforePanel = async (action, page) => {
+    if (action === 'open') assert.fail('The page opened its own login dialog.');
+    if (action !== 'probe-open' || requested) return;
+    requested = true;
+    assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), true);
+  };
+  browser.clock.onPaceWait = () => {
+    if (browser.clock.now() < 4600) return;
+    loginQrFixture(browser);
+    browser.clock.onPaceWait = undefined;
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(gateway.reportStage().qrRequest, 'delivered');
+  assert.equal(view.width, panelRect.width);
   assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
 });
 
@@ -1367,6 +1450,85 @@ test('preserves QR rejection evidence for the current page including its initial
   assert.equal(stage.blockedPassport.GET, 0);
   assert.equal(stage.qrRequest, 'not-requested');
   assert.equal(Object.hasOwn(stage, 'qrRefusalReason'), false);
+});
+
+test('explicitly reopening after losing the QR view creates a page with fresh authority', async t => {
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
+  let current = true;
+  const previous = await gateway.openLogin({ assertQrRequest() {
+    if (!current) throw new ProbeError('PROBE_VIEW_REQUIRED');
+  } });
+  const previousPage = browser.sourcePages()[0];
+  current = false;
+  assert.equal(await browser.visit(previousPage.mainFrame(), passportQr, 'xhr'), false);
+  assert.equal(gateway.reportStage().qrGuardFailure, 'PROBE_VIEW_REQUIRED');
+
+  const reopened = await gateway.openLogin({ assertQrRequest() {} });
+  const nextPage = browser.sourcePages()[0];
+  assert.equal(previousPage.isClosed(), true);
+  assert.notEqual(nextPage, previousPage);
+  assert.ok(reopened.pageRevision > previous.pageRevision);
+  assert.equal(gateway.reportStage().qrRequest, 'not-requested');
+  assert.equal(await browser.visit(nextPage.mainFrame(), passportQr, 'xhr'), true);
+  assert.equal(gateway.reportStage().qrRequest, 'delivered');
+});
+
+test('account verification reports the HTTP result and cookie presence without exposing credentials', async t => {
+  const { browser, gateway } = await fixture(t);
+  browser.session = '';
+  browser.uid = '0';
+  await assert.rejects(gateway.verifyIdentity(), { code: 'PROBE_AUTH_REQUIRED' });
+  assert.deepEqual(gateway.reportStage().accountCheck, {
+    state: 'account-unconfirmed', sessionCookiePresent: false, httpStatus: 200
+  });
+
+  browser.session = 'private-session-test';
+  browser.uid = ownId;
+  await gateway.verifyIdentity();
+  const stage = gateway.reportStage();
+  assert.deepEqual(stage.accountCheck, {
+    state: 'verified', sessionCookiePresent: true, httpStatus: 200
+  });
+  assert.doesNotMatch(JSON.stringify(stage), /private-session-test|fixture-account|9357260389275234771/);
+});
+
+test('verification keeps the issued login page open while the browser has no session', async t => {
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
+  loginQrFixture(browser);
+  browser.session = '';
+  browser.uid = '0';
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  const login = browser.sourcePages()[0];
+  assert.equal(await browser.visit(login.mainFrame(), passportQr, 'xhr'), true);
+  await gateway.loginQr(view);
+
+  await assert.rejects(gateway.verifyIdentity(), { code: 'PROBE_AUTH_REQUIRED' });
+  assert.deepEqual(browser.sourcePages(), [login]);
+  assert.equal(browser.reads.length, 0);
+  assert.equal(gateway.reportStage().accountCheck.state, 'session-not-established');
+});
+
+test('verification uses the authenticated self endpoint once the issued login session appears', async t => {
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
+  loginQrFixture(browser);
+  browser.session = '';
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  const login = browser.sourcePages()[0];
+  assert.equal(await browser.visit(login.mainFrame(), passportQr, 'xhr'), true);
+  await gateway.loginQr(view);
+  browser.clock.onPaceWait = () => { browser.session = 'established-fixture-session'; };
+  browser.onGoto = page => {
+    if (page !== login) assert.equal(browser.session, 'established-fixture-session');
+  };
+
+  assert.equal((await gateway.verifyIdentity()).uid, ownId);
+  assert.equal(browser.reads.length, 1);
+  assert.equal(login.isClosed(), true);
+  const timing = gateway.reportStage().loginTimingMs;
+  for (const field of ['openedAtMs', 'qrDeliveredAtMs', 'panelSeenAtMs', 'sessionSeenAtMs', 'verifiedAtMs'])
+    assert.ok(Number.isFinite(timing[field]), field);
+  assert.ok(timing.openedAtMs <= timing.panelSeenAtMs && timing.qrDeliveredAtMs <= timing.sessionSeenAtMs);
+  assert.ok(timing.sessionSeenAtMs <= timing.verifiedAtMs);
 });
 
 test('only the current owned main login view forwards the original official QR GET', async t => {
