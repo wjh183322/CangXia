@@ -1,0 +1,30 @@
+name: Verify formal server storage
+
+on:
+  push:
+    branches: [codex/server-edition-full]
+    paths:
+      - 'server/**'
+      - 'shared/server-identity.mjs'
+      - 'tests/server-edition/**'
+      - '.github/workflows/server-edition-storage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  storage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - run: npm test --prefix server

@@ -7,6 +7,7 @@ import {
   CURRENT_SCHEMA,
   connect,
   describe,
+  inspectExisting,
   inspectLayout,
   isUuid,
   syncDirectory,
@@ -18,12 +19,7 @@ import {
 export function inspectUpgrade(root, expectedId) {
   const layout = inspectLayout(root, expectedId);
   if (!layout) return { state: 'empty', from: null, to: CURRENT_SCHEMA, spaceRequired: 0 };
-  const db = connect(layout, { immutable: true });
-  try {
-    return describe(layout, db);
-  } finally {
-    db.close();
-  }
+  return inspectExisting(layout).status;
 }
 
 function confirm({ expectedId, from, to, imageDigest, approval }) {
@@ -200,8 +196,8 @@ export async function applyUpgrade(input) {
   const layout = inspectLayout(root, expectedId);
   if (!layout) throw Error('Library is empty.');
   // Validate the formal catalog before opening a read/write connection.
-  const preview = inspectUpgrade(root, expectedId);
-  const writer = connect(layout, { writable: true });
+  const { status: preview, recovery } = inspectExisting(layout);
+  const writer = connect(layout, { writable: true, recovery });
   try {
     writer.exec('BEGIN IMMEDIATE');
     const status = describe(layout, writer);

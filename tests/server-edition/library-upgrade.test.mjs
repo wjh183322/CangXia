@@ -273,11 +273,15 @@ test('required missing WAL fails before SQLite opens it; cleanly checkpointed WA
   db.exec('PRAGMA journal_mode=WAL');
   db.close();
   assert.equal(fs.existsSync(dbFile(root) + '-wal'), false);
+  const detached = temporary(t);
+  fs.cpSync(root, detached, { recursive: true });
   assert.equal(inspectUpgrade(root).state, 'migration-required');
-  const marker = JSON.parse(fs.readFileSync(owner(root)));
-  fs.writeFileSync(owner(root), JSON.stringify({ ...marker, requiredWal: true }));
-  assert.throws(() => inspectUpgrade(root), /WAL/);
-  assert.equal(fs.existsSync(dbFile(root) + '-wal'), false);
+  // A normal SQLite read-only transaction may create empty WAL-index sidecars
+  // on the mounted live database. The detached fixture still has none.
+  const marker = JSON.parse(fs.readFileSync(owner(detached)));
+  fs.writeFileSync(owner(detached), JSON.stringify({ ...marker, requiredWal: true }));
+  assert.throws(() => inspectUpgrade(detached), /WAL/);
+  assert.equal(fs.existsSync(dbFile(detached) + '-wal'), false);
 });
 
 test('invalid init UUID fails before claiming an empty mount, unknown control files and schema fail closed', (t) => {
@@ -370,4 +374,113 @@ test('substitution of the private snapshot directory must never delete files on 
   } finally {
     original.close();
   }
+});
+
+test('inspect honors another process exclusive rollback transaction without any on-disk journal', (t) => {
+  const { root } = oldLibrary(t);
+  const db = new DatabaseSync(dbFile(root));
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    assert.equal(fs.existsSync(dbFile(root) + '-journal'), false);
+    assert.throws(() => cli('inspect', '--root', root), /locked|busy/i);
+  } finally {
+    db.close();
+  }
+});
+
+test('a second process cannot obtain a rollback-mode write reservation during snapshot', async (t) => {
+  const { root, libraryId } = oldLibrary(t);
+  const pending = applyUpgrade(command(root, libraryId));
+  const result = execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import {DatabaseSync} from 'node:sqlite';
+    const db=new DatabaseSync(process.argv[1]);
+    try { db.exec('BEGIN IMMEDIATE'); console.log('acquired'); }
+    catch (error) { console.log(error.errcode); }
+    finally { db.close(); }
+  `,
+      dbFile(root)
+    ],
+    { encoding: 'utf8' }
+  ).trim();
+  await pending;
+  assert.equal(result, '5', 'SQLITE_BUSY expected from the competing OS process');
+});
+
+test('a compatible read-only data file cannot report writable service readiness', (t) => {
+  const root = temporary(t);
+  const { libraryId } = cli('init', '--root', root);
+  const file = dbFile(root);
+  const before = fs.readFileSync(file);
+  fs.chmodSync(file, 0o444);
+  try {
+    assert.throws(() => cli('start', '--root', root, '--library-id', libraryId));
+    assert.deepEqual(fs.readFileSync(file), before);
+  } finally {
+    fs.chmodSync(file, 0o600);
+  }
+});
+
+function crashWriter(root) {
+  const file = dbFile(root);
+  const db = new DatabaseSync(file);
+  db.exec(`PRAGMA journal_mode=DELETE; WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<120)
+    INSERT INTO works SELECT 'spill-'||i,'committed',json_quote(hex(zeroblob(2200))) FROM n;`);
+  db.close();
+  assert.throws(() =>
+    execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+    import {DatabaseSync} from 'node:sqlite';
+    const db=new DatabaseSync(process.argv[1]);
+    db.exec("PRAGMA cache_size=3; BEGIN IMMEDIATE; UPDATE works SET title='UNCOMMITTED',body=json_quote(hex(zeroblob(3400)))");
+    process.kill(process.pid,'SIGKILL');
+  `,
+        file
+      ],
+      { stdio: 'pipe' }
+    )
+  );
+  assert.equal(
+    fs
+      .readFileSync(file + '-journal')
+      .subarray(0, 8)
+      .toString('hex'),
+    'd9d505f920a163d7'
+  );
+}
+
+test('an approved retry safely recovers a real crashed writer; preview and wrong identity leave both files intact', async (t) => {
+  const { root, libraryId } = oldLibrary(t);
+  crashWriter(root);
+  const file = dbFile(root);
+  const hashes = () => [file, file + '-journal'].map((p) => digest(fs.readFileSync(p)));
+  const before = hashes();
+  const validMarker = fs.readFileSync(owner(root));
+  const foreignId = randomUUID();
+  fs.writeFileSync(owner(root), JSON.stringify({ appId: 'local.cangxia.server', libraryId: foreignId }));
+  await assert.rejects(applyUpgrade(command(root, foreignId)));
+  assert.deepEqual(hashes(), before);
+  fs.writeFileSync(owner(root), validMarker);
+  const preview = inspectUpgrade(root);
+  assert.equal(preview.state, 'migration-required');
+  assert.deepEqual(hashes(), before);
+  await applyUpgrade(command(root, libraryId));
+  const current = openLibrary({ root, expectedId: libraryId });
+  assert.equal(
+    current.read((db) => db.prepare("SELECT count(*) n FROM works WHERE title='committed'").get().n),
+    120
+  );
+  assert.equal(
+    current.read((db) => db.prepare("SELECT count(*) n FROM works WHERE title='UNCOMMITTED'").get().n),
+    0
+  );
+  current.close();
 });

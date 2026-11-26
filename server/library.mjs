@@ -1,8 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
@@ -147,27 +148,13 @@ export function inspectLayout(root, expectedId) {
     throw Error('Detached WAL-dependent copy requires verified restoration to a separate volume.');
   }
   const stat = regular(file);
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-  try {
-    const header = Buffer.alloc(100);
-    if (
-      !sameFile(fs.fstatSync(fd, { bigint: true }), stat) ||
-      fs.readSync(fd, header, 0, header.length, 0) !== header.length ||
-      header.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0' ||
-      header.readUInt32BE(68) !== APPLICATION_ID
-    )
-      throw foreign();
-  } finally {
-    fs.closeSync(fd);
-  }
   return {
     root,
     dir,
     file,
     stat,
     libraryId: marker.libraryId,
-    hasWal,
-    hasJournal: contents.includes('library.sqlite-journal')
+    journal: contents.includes('library.sqlite-journal') ? regular(file + '-journal') : null
   };
 }
 
@@ -185,12 +172,30 @@ export function verifyIdentity(db, id) {
   return version;
 }
 
-export function connect(layout, { writable = false, immutable = false } = {}) {
+function fingerprint(stat) {
+  return stat && [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+}
+export function recoveryFingerprint(layout) {
+  return [fingerprint(layout.stat), fingerprint(layout.journal)].join('/');
+}
+export function connect(layout, { writable = false, recovery = null } = {}) {
   const checked = inspectLayout(layout.root, layout.libraryId);
   if (!checked || !sameFile(checked.stat, layout.stat)) throw unsafe();
   const uri = pathToFileURL(layout.file).href;
-  const cold = immutable && !checked.hasWal && !checked.hasJournal;
-  const db = new DatabaseSync(uri + (writable ? '?mode=rw' : '?mode=ro' + (cold ? '&immutable=1' : '')), {
+  if (writable && recovery && recoveryFingerprint(checked) !== recovery) {
+    throw Error('Rollback journal changed after isolated recovery verification.');
+  }
+  if (writable && checked.journal && !recovery) {
+    // A journal appeared after preview. A hot one must pass the independent rehearsal.
+    const guard = new DatabaseSync(uri + '?mode=ro', { readOnly: true, timeout: 0 });
+    try {
+      guard.exec('BEGIN');
+      verifyIdentity(guard, layout.libraryId);
+    } finally {
+      guard.close();
+    }
+  }
+  const db = new DatabaseSync(uri + (writable ? '?mode=rw' : '?mode=ro'), {
     readOnly: !writable,
     timeout: 0
   });
@@ -221,6 +226,28 @@ export function describe(layout, db) {
     impact: '只修改数据库结构，归档媒体保持原位。',
     rollback: '先保全快照之后的新增资料，再用匹配的旧程序在独立目录验证快照与媒体清单，确认后切换。'
   };
+}
+
+export function inspectExisting(layout) {
+  let db;
+  try {
+    db = connect(layout);
+    db.exec('BEGIN');
+    return { status: describe(layout, db), recovery: null };
+  } catch (error) {
+    // SQLITE_READONLY_ROLLBACK means SQLite identified a hot journal. Only an
+    // isolated copy is allowed to roll back before the stored identity is proven.
+    if (error.errcode !== 776 || !layout.journal) throw error;
+  } finally {
+    db?.close();
+  }
+  const recovery = recoveryFingerprint(layout);
+  const helper = fileURLToPath(new URL('./rehearse-rollback.mjs', import.meta.url));
+  const result = execFileSync(process.execPath, [helper, layout.root, layout.libraryId, recovery], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  return { status: JSON.parse(result), recovery };
 }
 
 function initialize(root, id) {
@@ -258,14 +285,25 @@ export function openLibrary({ root, expectedId, mode = 'open' }) {
   if (mode === 'init') initialize(root, expectedId === undefined ? randomUUID() : expectedId);
   const layout = inspectLayout(root, expectedId);
   if (!layout) throw Error('Library is empty. Explicit initialization is required.');
-  const inspection = connect(layout, { immutable: true });
-  let status;
-  try {
-    status = describe(layout, inspection);
-  } finally {
-    inspection.close();
-  }
+  const { status, recovery } = inspectExisting(layout);
   if (status.state !== 'ready') return Object.freeze(status);
+  for (const target of [
+    layout.file,
+    layout.dir,
+    path.join(layout.dir, 'media'),
+    path.join(layout.dir, 'snapshots')
+  ]) {
+    fs.accessSync(target, fs.constants.W_OK);
+  }
+  const check = connect(layout, { writable: true, recovery });
+  try {
+    check.exec('BEGIN IMMEDIATE');
+    if (verifyIdentity(check, layout.libraryId) !== CURRENT_SCHEMA) throw foreign();
+    // SQLite distinguishes writable and read-only handles even with zero matched rows.
+    check.exec('UPDATE library_identity SET app_id=app_id WHERE 0; ROLLBACK');
+  } finally {
+    check.close();
+  }
   let closed = false;
   function access(writable, callback) {
     if (closed) throw Error('Library is closed.');
