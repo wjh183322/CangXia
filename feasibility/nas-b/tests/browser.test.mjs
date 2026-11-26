@@ -845,6 +845,28 @@ test('a single login click keeps the same opening while a direct child and the Q
   assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
 });
 
+test('a slow QR delivery after a login click leaves time for the panel to render in the same opening', async t => {
+  const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
+  browser.panel = null;
+  let clicks = 0, deliveredAt;
+  browser.beforePanel = async (action, page) => {
+    if (action === 'open') clicks++;
+    if (action !== 'probe-open' || !clicks) return;
+    if (deliveredAt === undefined && browser.clock.now() >= 21350) {
+      assert.equal(await browser.visit(page.mainFrame(), passportQr, 'xhr'), true);
+      deliveredAt = browser.clock.now();
+    }
+    if (!browser.panelDocument && browser.clock.now() >= deliveredAt + 4200) loginQrFixture(browser);
+  };
+  const view = await gateway.openLogin({ assertQrRequest() {} });
+  assert.equal(view.width, panelRect.width);
+  assert.equal(clicks, 1);
+  assert.deepEqual(await gateway.loginQr(view), { pageRevision: view.pageRevision, bytes: qrPng });
+  const { qrDeliveredAtMs, panelSeenAtMs, panelWaitEndedAtMs } = gateway.reportStage().loginTimingMs;
+  assert.equal(qrDeliveredAtMs, deliveredAt);
+  assert.ok(qrDeliveredAtMs < panelSeenAtMs && panelSeenAtMs <= panelWaitEndedAtMs);
+});
+
 test('an automatically delivered QR waits for its late login panel without clicking an entry', async t => {
   const { browser, gateway } = await fixture(t, { fetchPassportQr: async url => passportResponse(url) });
   browser.panel = null;

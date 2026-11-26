@@ -1225,7 +1225,8 @@ export async function openBrowserGateway({
     loginStage.loginEntry = 'not-checked';
 
     for (;; await pause()) {
-      if (qrAuthority?.qrDelivered) startQrWait();
+      const deliveredAt = qrAuthority?.timing.qrDeliveredAtMs;
+      if (deliveredAt !== undefined) deadline = Math.max(deadline, deliveredAt + requestTimeout);
       if (remaining() <= 0) break;
       if (!ready()) continue;
       const revision = pageRevision;
@@ -1290,7 +1291,8 @@ export async function openBrowserGateway({
         ready();
         if (action?.loginEntry === 'clicked') {
           loginStage.loginEntry = 'clicked';
-          startQrWait();
+          // Helper bootstrap and the QR fetch can each consume a request interval.
+          if (qrAuthority) deadline = clock.now() + 2 * requestTimeout;
         } else if (action?.loginEntry === 'not-present') loginStage.loginEntry = 'not-present';
       }
     }
@@ -1329,7 +1331,11 @@ export async function openBrowserGateway({
         if (login) {
           loginStage.timing = typeof assertQrRequest === 'function' ? { openedAtMs: clock.now() } : undefined;
           login.qrAuthority = loginStage.timing ? { assert: assertQrRequest, timing: loginStage.timing } : undefined;
-          await waitForLoginPanel(login, signal, assertOpening);
+          try {
+            await waitForLoginPanel(login, signal, assertOpening);
+          } finally {
+            if (loginStage.timing) loginStage.timing.panelWaitEndedAtMs = clock.now();
+          }
         }
         return viewState();
       } catch (error) {
