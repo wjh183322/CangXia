@@ -37,18 +37,23 @@ import { DownloadQueue } from './downloads.mjs';
 import {planDownloads} from './download-selection.mjs';
 import { FlatDownloadQueue } from './flat-downloads.mjs';
 import { isDouyinURL, requireInside } from './model.mjs';
+import { serverIdentity, serverProfilePath } from '../shared/server-identity.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const appVersion=JSON.parse(fs.readFileSync(path.join(here,'..','package.json'),'utf8')).version;
+const { version: appVersion, productName, appId } = serverIdentity;
 const smoke = process.argv.includes('--smoke');
 const packageSmoke=process.argv.includes('--package-smoke')&&!!process.env.CANGXIA_BACKUP_TEST_PROFILE;
 const sampleProbe = process.argv.includes('--probe-sample');
 const qrProbe = process.argv.includes('--probe-qr');
-if (smoke || sampleProbe || qrProbe) app.setPath('userData', path.resolve('.test-output', qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : 'native-smoke-profile'));
-app.setName('藏匣备份版');
-if(process.env.CANGXIA_BACKUP_TEST_PROFILE)app.setPath('userData',process.env.CANGXIA_BACKUP_TEST_PROFILE);
-else if(!smoke&&!sampleProbe&&!qrProbe)app.setPath('userData',path.join(app.getPath('appData'),'藏匣备份版'));
-fs.mkdirSync(app.getPath('userData'),{recursive:true});app.setPath('sessionData',app.getPath('userData'));
+const probeProfile = qrProbe ? 'qr-probe-profile' : sampleProbe ? 'native-probe-profile' : smoke ? 'native-smoke-profile' : null;
+const userData = process.env.CANGXIA_BACKUP_TEST_PROFILE || (probeProfile
+  ? path.resolve('.test-output', probeProfile)
+  : serverProfilePath(app.getPath('appData')));
+app.setName(productName);
+if (process.platform === 'win32') app.setAppUserModelId(appId);
+fs.mkdirSync(userData, { recursive: true });
+app.setPath('userData', userData);
+app.setPath('sessionData', userData);
 if(!app.requestSingleInstanceLock())app.exit(0);
 protocol.registerSchemesAsPrivileged([{ scheme: 'app-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let retentionTimer,nasCatalogue,scopedDeletion,scopedTask,scopedPreparing,scopedExit=false,scopedFileIds=new Set();
@@ -80,6 +85,7 @@ function handler(name, action) {
     const guarded=!['nasCataloguePage','nasCatalogueGroups','nasCatalogueWork','nasCataloguePreview','stopNASCatalogue','deletionPendingPage','validateDeletionSelection','stopScopedDeletion','stopDeletionResolution','cancelPreparedDeletion','audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','downloadPage','defectPage','workDetail','validateDefectSelection','validateDownloadSelection','defectOverview','exportWorkDiagnostic','cancelFileCheck','cancelStorageSize','filterWorks','startupReady','reportCoverStatus'].includes(name);let entered=false;
     try {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效调用来源');
+      if (name === 'serverIdentity') return { ok: true, data: await action() };
       if(backup?.applying&&!['nasCataloguePage','nasCatalogueGroups','nasCatalogueWork','nasCataloguePreview','stopNASCatalogue','deletionPendingPage','validateDeletionSelection','stopScopedDeletion','stopDeletionResolution','cancelPreparedDeletion','readHistoryRuns','readHistoryItems','repairPage','cancelRepairs','state','stateChunk','startupReady','cancelBackup','cancelFileCheck','cancelStorageSize'].includes(name))throw Error('正在应用 NAS 记录，请等待当前批次完成');
       if(repairChecks?.running&&!['nasCataloguePage','nasCatalogueGroups','nasCatalogueWork','nasCataloguePreview','stopNASCatalogue','deletionPendingPage','validateDeletionSelection','stopScopedDeletion','stopDeletionResolution','cancelPreparedDeletion','audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','startupReady','cancelRepairs','repairPage','cancelFileCheck','cancelStorageSize','downloadPage','defectPage','workDetail','validateDefectSelection','validateDownloadSelection','defectOverview','exportWorkDiagnostic','filterWorks','reportCoverStatus'].includes(name))throw Error('正在检查本地文件，请先停止检查');
       if(localRemoval?.running&&!['nasCataloguePage','nasCatalogueGroups','nasCatalogueWork','nasCataloguePreview','stopNASCatalogue','deletionPendingPage','validateDeletionSelection','stopScopedDeletion','stopDeletionResolution','cancelPreparedDeletion','audioPage','audioStatus','audioRelease','audioRenew','cacheStop','readHistoryRuns','readHistoryItems','state','stateChunk','downloadPage','defectPage','workDetail','validateDefectSelection','validateDownloadSelection','defectOverview','exportWorkDiagnostic','cancelFileCheck','cancelStorageSize','filterWorks','startupReady','cancelLocalRemoval','reportCoverStatus'].includes(name))throw new Error('正在删除本地文件，请先取消删除并等待当前作品处理完成');
@@ -114,15 +120,16 @@ try {
   process.on('uncaughtExceptionMonitor',error=>diagnostics.record({event:'uncaught',name:error.name,code:error.code}));
   app.on('child-process-gone',(_event,details)=>diagnostics.record({event:'child-process-gone',reason:details.reason,exitCode:details.exitCode}));
   const area=screen.getPrimaryDisplay().workAreaSize;
-  window = new BrowserWindow({ title: '藏匣', icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !packageSmoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
+  window = new BrowserWindow({ title: productName, icon:path.join(here,'..','assets','icon.ico'), useContentSize:true, width:Math.min(1400,Math.floor(area.width*.94)), height:Math.min(area.height-40,Math.max(640,Math.floor(area.height*.92))), minWidth:Math.min(1000,Math.floor(area.width*.94)), minHeight:Math.min(640,area.height-40), show: !smoke && !packageSmoke && !sampleProbe && !qrProbe, backgroundColor: '#f7f8fa', autoHideMenuBar: true, webPreferences: { preload: path.join(here, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, spellcheck: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   window.on('close',event=>{if(scopedActive()){event.preventDefault();stopScopedForExit();return;}if(nasRemoval?.running){event.preventDefault();stopNASForExit();return;}if(localRemoval?.running){event.preventDefault();stopRemovalForExit();return;}if(startupLoading)startupClosing=true;});
   window.on('closed',()=>{if(!quitting)app.quit();});
+  handler('serverIdentity', () => serverIdentity);
   await window.loadFile(path.join(here,'startup.html'));startupStage('window-visible');
   if(quitting||window.isDestroyed())return;
-  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), '藏匣备份版'));
+  store = await Store.open(path.join(profile, 'library.sqlite'), path.join(app.getPath('downloads'), productName));
   repairChecks=new RepairChecks(store,notify);window.on('close',()=>repairChecks.close());
   backup=new BackupClient(store,profile,{vault:{seal:value=>{if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 凭据加密不可用');return safeStorage.encryptString(value).toString('base64');},open:value=>safeStorage.decryptString(Buffer.from(value,'base64'))},onChange:notify,onDiagnostic:diagnostics.record,onUnavailable:()=>{if(!backup?.localReadDepth)collector?.stop();queue?.pause();flatQueue?.pauseAll();},isIdle:()=>!scopedActive()&&!repairChecks?.running&&!collector?.busy&&!collector?.authenticating&&!collector?.verifyingIdentity&&!queue?.running&&!flatQueue?.running&&!readStarting&&!loggingOut&&!backupBusy&&!localRemoval?.running&&!nasRemoval?.running&&(!audio?.running||audio?.waitingBackup)&&!audio?.pending.size});
   directorySize=new DirectorySize({getRoot:()=>store.root,getSaved:()=>store.getSetting('directorySizeScan'),save:value=>store.setSetting('directorySizeScan',value),onChange:notify});

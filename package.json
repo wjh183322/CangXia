@@ -1,7 +1,7 @@
 {
-  "name": "cangxia-backup",
-  "version": "0.3.46",
-  "description": "藏匣备份版 · 本地优先与 NAS 后台同步",
+  "name": "cangxia-server",
+  "version": "0.4.1",
+  "description": "藏匣服务版 Windows 客户端",
   "author": "CangXia",
   "private": true,
   "type": "module",
@@ -33,10 +33,10 @@
     "vite": "8.3.0"
   },
   "build": {
-    "appId": "local.cangxia.backup",
-    "productName": "藏匣备份版",
+    "appId": "local.cangxia.server",
+    "productName": "藏匣服务版",
     "directories": {
-      "output": "release/backup"
+      "output": "release/server"
     },
     "files": [
       "dist/**/*",
@@ -61,7 +61,7 @@
       "icon": "assets/icon.ico"
     },
     "portable": {
-      "artifactName": "CangXia-Backup-${version}-Windows-x64.exe"
+      "artifactName": "CangXia-Server-${version}-Windows-x64.exe"
     },
     "electronLanguages": [
       "zh-CN",
@@ -73,9 +73,9 @@
       "allowElevation": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "藏匣备份版",
+      "shortcutName": "藏匣服务版",
       "deleteAppDataOnUninstall": false,
-      "artifactName": "CangXia-Backup-${version}-Setup-x64.exe"
+      "artifactName": "CangXia-Server-${version}-Setup-x64.exe"
     }
   }
 }

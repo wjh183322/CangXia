@@ -11,7 +11,7 @@ app.on('browser-window-created',(_e,win)=>{if(started)return;started=true;win.we
  const call=(method,...args)=>win.webContents.executeJavaScript(`window.cangxia[${JSON.stringify(method)}](...${JSON.stringify(args)})`);const check=(name,value)=>{assert.ok(value,name);checks.push(name);fs.writeFileSync('.test-output/backup-desktop-progress.json',JSON.stringify({checks},null,2));};
  try{
   let data=await call('state');check('backup starts isolated and read-only',data.storage.mode==='backup'&&!data.storage.writable&&data.works.length===0);
-  const title=await win.webContents.executeJavaScript('document.title');check('backup title and settings identify the correct edition',title.includes('藏匣备份版 v'+data.version)&&win.getTitle()===title);
+  const title=await win.webContents.executeJavaScript('document.title');const {productName}=await call('serverIdentity');check('window title and settings identify the correct edition',title.includes(productName+' v'+data.version)&&win.getTitle()===title);
   await call('setDownloadConcurrency',6);check('native concurrency setting works without NAS and rejects invalid limits',(await call('state')).queue.concurrency===6);await assert.rejects(call('setDownloadConcurrency',7));await call('setDownloadConcurrency',3);
   await assert.rejects(call('setTags','123',['blocked']));check('mutations rejected before NAS comparison',true);
   await checkStorageSizeDesktop({win,call,check});
