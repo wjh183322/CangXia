@@ -1,19 +1,19 @@
 import { updateRepairJobs } from './maintenance-queue.mjs';
+import { saveInventoryState } from './maintenance-inventory.mjs';
 
 export function getJob(db, id) {
   const row = db.prepare('SELECT body FROM download_manifests WHERE id=?').get(id);
   return row ? JSON.parse(row.body) : null;
 }
-export function putJob(db, job) {
+export function putJob(db, job, inventory) {
   db.prepare(
     'INSERT INTO download_jobs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state WHERE state<>excluded.state'
   ).run(job.id, job.workId, job.state);
   db.prepare(
     'INSERT INTO download_manifests(id,work_id,body) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,hidden=0'
   ).run(job.id, job.workId, JSON.stringify(job));
-  if (job.state === 'complete' && job.id === job.workId)
-    db.prepare('DELETE FROM maintenance_file_state WHERE work_id=?').run(job.workId);
-  updateRepairJobs(db, job);
+  if (inventory) saveInventoryState(db, job.workId, inventory.issues);
+  updateRepairJobs(db, job, inventory);
   db.exec('UPDATE download_options SET revision=revision+1');
 }
 export function fenceUnavailable(db, workId) {

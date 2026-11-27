@@ -1528,3 +1528,75 @@ test('repairing an HD-only failure retries its original cover job without touchi
   assert.deepEqual(repair.items[0].jobs, [{ id: 'hd:41', scope: 'cover-hd', state: 'queued' }]);
   assert.equal((await jobs()).jobs.find((j) => j.id === '41').downloadState, 'complete');
 });
+
+test('audio restoration recomputes only its work status, retaining independent missing media', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const cmd = (kind, payload) =>
+    f.client.command({ operationId: randomUUID(), kind, payload, entityVersion: 0 });
+  const page = () => f.client.query('list-works', { source: 'media' });
+  async function settle(id) {
+    for (let n = 0; n < 200; n++) {
+      const p = await f.client.query('check-page', { id });
+      if (p.state === 'complete') return p;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.fail('scan did not finish');
+  }
+  await cmd('enqueue-download', { workIds: ['42'], selection: 'audio' });
+  await f.downloads.run();
+  const audio = path.join(
+    f.downloads.layout.media,
+    f.downloads.store.resources('42').find((r) => r.key === 'audio').relative_path
+  );
+  for (const extraMissing of [false, true]) {
+    fs.renameSync(audio, audio + '.saved-' + extraMissing);
+    const p = await page(),
+      scan = await settle(
+        (
+          await cmd('start-check', {
+            kind: 'files',
+            selection: {
+              source: 'media',
+              scope: p.scope,
+              revision: p.revision,
+              ids: ['42'],
+              all: false,
+              confirmedCount: 1
+            }
+          })
+        ).id
+      );
+    assert.equal((await page()).items.find((w) => w.id === '42').localStatus, 'partial');
+    await cmd('control-download', { action: 'pause', ids: null });
+    const repair = await settle(
+      (
+        await cmd('retry-repair', {
+          selection: { id: scan.id, revision: scan.revision, version: scan.version, ids: ['42'], all: false }
+        })
+      ).id
+    );
+    if (extraMissing)
+      f.library.write((db) =>
+        db
+          .prepare("UPDATE works SET body=json_insert(body,'$.images[#]',json(?)) WHERE id='42'")
+          .run(JSON.stringify({ index: 2, urls: [base + 'new-picture'] }))
+      );
+    await cmd('control-download', { action: 'resume', ids: null });
+    await f.downloads.run();
+    assert.equal(
+      (await page()).items.find((w) => w.id === '42').localStatus,
+      extraMissing ? 'partial' : 'complete'
+    );
+    assert.equal(
+      f.library.read(
+        (db) => db.prepare("SELECT status FROM maintenance_file_state WHERE work_id='42'").get()?.status
+      ),
+      extraMissing ? 'partial' : undefined
+    );
+    const report = (await settle(repair.id)).items[0];
+    assert.equal(report.jobs[0].state, 'complete');
+    assert.equal(report.fileStatus, extraMissing ? 'pending' : 'complete');
+    assert.deepEqual(fs.readFileSync(audio), fs.readFileSync(audio + '.saved-' + extraMissing));
+  }
+});

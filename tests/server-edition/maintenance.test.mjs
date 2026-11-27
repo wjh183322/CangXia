@@ -331,6 +331,12 @@ test('selected repair uses the NAS queue, replaces only missing bytes and retain
       path.join(f.downloads.layout.media, stored.find((a) => a.key === 'image-' + n).relative_path);
   const keep = fs.statSync(asset(0), { bigint: true }).ino;
   fs.renameSync(asset(1), asset(1) + '.outside');
+  const metadata = path.join(
+    f.downloads.layout.media,
+    stored.find((a) => a.key === 'metadata').relative_path
+  );
+  fs.renameSync(metadata, metadata + '.outside');
+  await f.command('control-download', { action: 'pause', ids: null });
   const scan = await f.result((await f.start('files', ['77'])).id),
     selection = { id: scan.id, revision: scan.revision, version: scan.version, ids: ['77'], all: false };
   assert.equal(
@@ -339,11 +345,17 @@ test('selected repair uses the NAS queue, replaces only missing bytes and retain
   );
   assert.equal((await f.query('preview-download', { workIds: ['77'] })).partial, 1);
   const receipt = await f.command('retry-repair', { selection });
-  assert.equal((await f.result(receipt.id)).items[0].queued, true);
+  const queued = (await f.result(receipt.id)).items[0];
+  assert.equal(queued.queued, true);
+  assert.equal(queued.registration, 'pending');
+  assert.equal(fs.existsSync(metadata), false);
+  await f.command('control-download', { action: 'resume', ids: null });
   await f.downloads.run();
   const complete = await f.result(receipt.id);
   assert.equal(complete.items[0].downloadState, 'complete');
   assert.equal(complete.items[0].fileStatus, 'complete');
+  assert.equal(complete.items[0].registration, 'complete');
+  assert.equal(JSON.parse(fs.readFileSync(metadata)).workId, '77');
   assert.equal(
     (await f.query('list-works', { source: 'media' })).items.find((w) => w.id === '77').downloaded,
     true
@@ -620,6 +632,20 @@ test('confirmed unavailability fences active I/O and paused work; later verified
   assert.equal((await f.command('control-download', { action: 'retry', ids: ['77', '79'] })).queued, 0);
   f.observed.set('77', 'available');
   await f.result((await f.start('source', ['77'])).id);
+  const failedRows = (await f.query('download-page', { tab: 'failed' })).jobs;
+  assert.deepEqual(
+    failedRows.map((j) => j.id),
+    ['78']
+  );
+  assert.equal(
+    (await f.command('control-download', { action: 'retry', ids: null })).queued,
+    failedRows.length
+  );
+  await f.downloads.run();
+  assert.equal(
+    (await f.query('download-page', { tab: 'unavailable' })).jobs.some((j) => j.id === '77'),
+    true
+  );
   assert.equal((await f.command('control-download', { action: 'retry', ids: ['77', '79'] })).queued, 1);
 });
 
@@ -756,4 +782,38 @@ test('a newly forbidden response chunk cannot extend the retained transfer prefi
   await f.downloads.run();
   assert.equal(fs.statSync(partial).size, 32);
   assert.equal(f.downloads.store.resources('77').length, 0);
+});
+
+test('a foreign metadata file appearing after repair admission is retained and registration stays unresolved', async (t) => {
+  const f = await fixture(t);
+  addAlbum(f);
+  await f.command('enqueue-download', { workIds: ['77'], selection: 'missing' });
+  await f.downloads.run();
+  const resource = (key) =>
+    path.join(
+      f.downloads.layout.media,
+      f.downloads.store.resources('77').find((r) => r.key === key).relative_path
+    );
+  const picture = resource('image-0'),
+    metadata = resource('metadata');
+  fs.renameSync(picture, picture + '.saved');
+  fs.renameSync(metadata, metadata + '.saved');
+  await f.command('control-download', { action: 'pause', ids: null });
+  const plan = await repairWork(f, '77'),
+    queued = await f.result(plan.id);
+  assert.equal(queued.items[0].registration, 'pending');
+  const foreign = Buffer.from('independent metadata');
+  fs.writeFileSync(metadata, foreign);
+  const inode = fs.statSync(metadata, { bigint: true }).ino;
+  await f.command('control-download', { action: 'resume', ids: null });
+  await f.downloads.run();
+  const item = (await f.result(plan.id)).items[0];
+  assert.equal(item.registration, 'failed');
+  assert.notEqual(item.fileStatus, 'complete');
+  assert.equal(
+    (await f.query('list-works', { source: 'media' })).items.find((w) => w.id === '77').localStatus,
+    'checking'
+  );
+  assert.deepEqual(fs.readFileSync(metadata), foreign);
+  assert.equal(fs.statSync(metadata, { bigint: true }).ino, inode);
 });

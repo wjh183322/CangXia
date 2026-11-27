@@ -379,7 +379,14 @@ export function ServerMaintenancePanel({ api, initialId, initialState, onDetail,
                     ))}
                     {item.registration && (
                       <p>
-                        归档登记 · {item.registration === 'complete' ? '已完成' : '失败，请核对文件后重试'}
+                        归档登记 ·{' '}
+                        {
+                          {
+                            pending: '等待所选媒体完成后登记',
+                            complete: '已完成',
+                            failed: '失败，请核对文件后重试'
+                          }[item.registration]
+                        }
                       </p>
                     )}
                     {item.issues.map((i, n) => (

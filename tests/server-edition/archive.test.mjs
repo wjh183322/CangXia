@@ -657,6 +657,25 @@ test(
         assert.equal(hd.key, mode === 'original' ? 'cover' : 'cover-hd');
       }
       assert.equal(hd.sha256, digest(fs.readFileSync(f.file(hd.key))));
+      if(mode==='platform'){
+        const target=f.file(hd.key);
+        fs.renameSync(target,target+'.held');
+        fs.writeFileSync(target,'foreign');
+        const again=()=>f.ipc.repairVideoCover(['72'],f.query('list-works',{source:'all'}).revision);
+        again();await f.d.run();assert.equal(f.state('hd:72').state,'failed');assert.equal(fs.readFileSync(target,'utf8'),'foreign');
+        fs.renameSync(target,target+'.foreign');
+        const page=f.query('list-works',{source:'media'}),selection={source:'media',scope:page.scope,revision:page.revision,ids:['72'],all:false,confirmedCount:1};
+        const scan=f.command('start-check',{kind:'files',selection});
+        let checked;for(let i=0;i<100;i++){checked=f.query('check-page',{id:scan.id});if(checked.state==='complete')break;await delay(20);}
+        assert.equal(checked.items[0].fileStatus,'pending');
+        const receipt=f.command('retry-repair',{selection:{id:scan.id,version:checked.version,revision:checked.revision,ids:['72'],all:false}});
+        for(let i=0;i<100;i++){if(f.query('check-page',{id:receipt.id}).state==='complete')break;await delay(20);}
+        await f.d.run();
+        assert.equal(f.state('hd:72').state,'complete',JSON.stringify(f.state('hd:72').reason));
+        assert.equal(digest(fs.readFileSync(f.file('cover-hd'))),hd.sha256);
+        assert.equal(f.query('list-works',{source:'media'}).items[0].localStatus,'complete');
+        assert.equal(fs.readFileSync(target+'.foreign','utf8'),'foreign');
+      }
     }
   }
 );

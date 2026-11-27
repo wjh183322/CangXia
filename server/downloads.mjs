@@ -1,4 +1,5 @@
 import {getJob,putJob as put,fenceUnavailable} from './download-records.mjs';
+import {inspectInventory} from './maintenance-inventory.mjs';
 import {removalOwnsFiles} from './removal.mjs';
 import { planDownloads } from '../electron/download-selection.mjs';
 import { createArchive } from './archive.mjs';
@@ -749,7 +750,9 @@ export function createDownloads({
       conn
         .prepare('UPDATE download_options SET paused=?,revision=revision+1')
         .run(Number(action === 'pause'));
-    const keys = all
+    const keys = all && action==='retry'
+      ? conn.prepare('SELECT j.id'+join+filterSql('failed')).all().map(row=>row.id)
+      : all
       ? conn
           .prepare('SELECT id FROM download_manifests WHERE hidden=0')
           .all()
@@ -779,7 +782,7 @@ export function createDownloads({
         job.state = job.state === 'running' ? 'pausing' : 'paused';
       else if (
         (action === 'resume' && job.state === 'paused') ||
-        (action==='retry'&&job.state==='unavailable'&&sourceState(conn,job.workId)==='available') ||
+        (action==='retry'&&!all&&job.state==='unavailable'&&sourceState(conn,job.workId)==='available') ||
         (['resume', 'retry'].includes(action) && retryStates.has(job.state) && (!all || action === 'retry'))
       ) {
         const auth = binding(conn);
@@ -1062,7 +1065,7 @@ export function createDownloads({
 
   async function repairCover(job, home, signal) {
     const { workId } = job;
-    const resolve = (key) => resolveResource({ store, layout, workId, key, verify: true, signal });
+    const resolve = (key,allowMissing=false) => resolveResource({ store, layout, workId, key, verify: true, allowMissing, signal });
     const video = await resolve('video'),
       cover = await resolve('cover');
     if (!video) throw failure('NAS_FILE_MISSING', '请先补齐视频。');
@@ -1080,7 +1083,10 @@ export function createDownloads({
     };
     guard();
     const old = currentHDCover(db, workId);
-    if (old && (await resolve(old.key))?.sha256 === old.sha256) return;
+    if(old){
+      const registered=await resolve(old.key,true);
+      if(registered&&!registered.missing&&registered.sha256===old.sha256)return;
+    }
     const target = job.expected.find((item) => item.key === 'cover');
     const identity = contentHash(job.hdInputs);
     const publish = async ({ stage, result, mime, ext, dimensions }, source) => {
@@ -1247,7 +1253,7 @@ export function createDownloads({
     if (store.fileCommits(workId).some((commit) => commit.stage === 'review')) {
       throw failure('NAS_FILE_REVIEW', 'A file commit for this work needs review.');
     }
-    const home = await ensureHome({ store, layout, workId,guard:()=>requireWriter(job,signal) });
+    const home = await ensureHome({ store, layout, workId, guard: () => requireWriter(job, signal) });
 
     let refreshed = false;
     if (job.hdInputs && !job.finalizationPending) {
@@ -1271,6 +1277,12 @@ export function createDownloads({
       saveProgress(job.id, target);
     }
     requireWriter(job, signal);
+    const deferred = db
+      .prepare(
+        "SELECT 1 FROM maintenance_queue_links l JOIN maintenance_items i ON i.run=l.run AND i.work_id=l.work_id WHERE l.job=? AND json_extract(i.result,'$.registration')='pending' LIMIT 1"
+      )
+      .get(job.id);
+    if (deferred) return job;
     const result = await finalizeWorkFiles({
       store,
       layout,
@@ -1279,9 +1291,24 @@ export function createDownloads({
       signal,
       guard: () => requireWriter(job, signal)
     });
-    requireWriter(job,signal);
+    await finishJob(job, signal, result);
+  }
+  async function finishJob(job, signal, result) {
+    const { workId } = job;
+    requireWriter(job, signal);
     const cleanupPending = await cleanFileStages({ store, layout, workId, jobId: job.id });
-    change(job.id, (current) => {
+    const checkNeeded = db
+      .prepare(
+        'SELECT 1 FROM maintenance_file_state WHERE work_id=? UNION ALL SELECT 1 FROM maintenance_queue_links WHERE job=? LIMIT 1'
+      )
+      .get(workId, job.id);
+    const inventory = checkNeeded
+      ? await inspectInventory({ store, layout, work: store.work(workId), signal, wantedResources })
+      : null;
+    if (inventory) inventory.registrationConfirmed = !!result.ok && inventory.metadataVerified;
+    requireWriter(job, signal);
+    store.withWrite((conn) => {
+      const current = getJob(conn, job.id);
       if (current.state !== 'running' || closing) return;
       current.cleanupPending = cleanupPending;
       current.state = result.ok && !current.cleanupPending ? 'complete' : 'finalization-pending';
@@ -1291,6 +1318,7 @@ export function createDownloads({
         : current.cleanupPending
           ? { code: 'CLEANUP_PENDING', message: '下载已登记，临时文件仍待清理。' }
           : null;
+      put(conn, current, inventory);
     });
   }
 
@@ -1310,7 +1338,7 @@ export function createDownloads({
         jobId: id,
         guard: guardRecovery
       });
-      await withWorkFiles(layout, workId, async () => {
+      const deferred=await withWorkFiles(layout, workId, async () => {
         const current = getJob(db, id);
         if (!['queued', 'running'].includes(current.state) || closing) return;
         const error = recovered.find((r) => r.error)?.error;
@@ -1321,8 +1349,13 @@ export function createDownloads({
           j.phase = 'preparing';
         });
         requireWriter(job, controller.signal);
-        await saveJob(job, controller.signal);
+        return saveJob(job, controller.signal);
       });
+      if(deferred){
+        const signal=controller.signal;
+        const result=await archive.reconcileArchive({workId,signal,guard:()=>requireWriter(deferred,signal)});
+        await withWorkFiles(layout,workId,()=>finishJob(deferred,signal,result));
+      }
     } catch (e) {
       if (!closing)
         change(id, (job) => {

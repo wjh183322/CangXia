@@ -2,7 +2,13 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { catalogueRevision, confirmedSelection } from './catalogue.mjs';
-import { resolveResource, withWorkFiles } from './files.mjs';
+import { withWorkFiles } from './files.mjs';
+import {
+  inventoryReasons,
+  inspectInventory,
+  saveInventoryState,
+  knownKey
+} from './maintenance-inventory.mjs';
 import { recordedWork } from './download-store.mjs';
 import { displayCover, mediaList } from './media.mjs';
 import { wantedResources } from './downloads.mjs';
@@ -12,11 +18,7 @@ import { failure } from './service-error.mjs';
 const invalid = () => failure(400, 'INVALID_CHECK', '检查范围或参数无效。');
 const stale = () => failure(409, 'CHECK_CHANGED', '检查结果或资料库已变化，请刷新并重新选择。');
 const reasons = {
-  NAS_FILE_MISSING: '已登记文件缺失，可重新核对并补齐。',
-  NAS_FILE_REVIEW: '文件身份、大小或内容与登记不同，请先核对原文件。',
-  NAS_FILE_PATH: '资料卷或归档目录不可用，请核对挂载。',
-  NAS_FILE_OPERATION: '暂时无法读取文件，请检查磁盘及权限。',
-  NAS_MEDIA_SET_REVIEW: '媒体清单不完整，请核对来源及归档登记。',
+  ...inventoryReasons,
   NAS_DOWNLOAD_FAILED: '下载未完成，请在下载管理查看原因并重试。',
   NAS_CLEANUP_PENDING: '下载暂存尚待清理，请在下载管理核对。',
   NAS_REGISTRATION_PENDING: '归档登记未完成，请在下载管理重试。',
@@ -33,8 +35,6 @@ const reasons = {
 };
 const message = (code) => reasons[code] ?? reasons.NAS_FILE_OPERATION;
 const issue = (code, stage, key) => ({ code, stage, ...(key && { key }), reason: message(code) });
-const knownKey = (key) =>
-  /^(?:video|cover(?:-hd)?|metadata|audio|image-\d{1,6})$/.test(key) ? key : undefined;
 const sourceState = (w) =>
   ['available', 'unavailable', 'unknown'].includes(w?.remoteState) ? w.remoteState : 'unchecked';
 const pageSize = 50;
@@ -154,51 +154,9 @@ async function files(downloads, id, signal) {
   const { store, layout } = downloads,
     work = recordedWork(store.db, id);
   if (!work) throw stale();
-  const rows = store.resources(id),
-    issues = jobIssues(store.db, id);
-  let bytes = 0,
-    verified = 0;
-  const attached = store.db.prepare('SELECT count(*) n FROM media_files WHERE work_id=?').get(id).n;
-  if (attached !== rows.length) issues.push(issue('NAS_MEDIA_SET_REVIEW', 'registration'));
-  for (const row of rows) {
-    signal.throwIfAborted();
-    try {
-      const value = await resolveResource({
-        store,
-        layout,
-        workId: id,
-        key: row.key,
-        verify: true,
-        allowMissing: true,
-        signal
-      });
-      if (!value) throw stale();
-      if (value.missing) {
-        issues.push(issue('NAS_FILE_MISSING', 'files', knownKey(row.key)));
-        continue;
-      }
-      bytes += value.size;
-      verified++;
-    } catch (e) {
-      signal.throwIfAborted();
-      const code =
-        e.code === 'NAS_FILE_MISSING'
-          ? 'NAS_FILE_PATH'
-          : ['NAS_FILE_REVIEW', 'NAS_FILE_PATH'].includes(e.code)
-            ? e.code
-            : 'NAS_FILE_OPERATION';
-      issues.push(issue(code, 'files', knownKey(row.key)));
-    }
-  }
-  if (rows.some((r) => !['audio', 'metadata'].includes(r.key))) {
-    try {
-      for (const target of wantedResources(work, false))
-        if (target.candidates.length && !rows.some((r) => r.key === target.key))
-          issues.push(issue('NAS_FILE_MISSING', 'files', knownKey(target.key)));
-    } catch {
-      issues.push(issue('NAS_MEDIA_SET_REVIEW', 'registration'));
-    }
-  }
+  const inventory = await inspectInventory({ store, layout, work, signal, wantedResources });
+  const { verified, bytes } = inventory,
+    issues = [...jobIssues(store.db, id), ...inventory.issues];
   const state = sourceState(work);
   if (state === 'unavailable') issues.push(issue('SOURCE_UNAVAILABLE', 'source'));
   const blocked = issues.some(
@@ -384,7 +342,9 @@ function diagnostic(db, { workId }, owner) {
         time: row.created,
         issues,
         ...(jobs.length && { jobs }),
-        ...(['complete', 'failed'].includes(value.registration) && { registration: value.registration }),
+        ...(['pending', 'complete', 'failed'].includes(value.registration) && {
+          registration: value.registration
+        }),
         fileStatus: ['complete', 'pending', 'blocked', 'failed', 'queued'].includes(value.fileStatus)
           ? value.fileStatus
           : 'unknown',
@@ -605,20 +565,23 @@ export function createMaintenance({ library, downloads }) {
               (i) => i.scope === 'archive' || (i.code === 'NAS_FILE_MISSING' && i.key === 'metadata')
             )
           ) {
-            const outcome = await downloads.archive.reconcileArchive({
-              workId,
-              signal,
-              guard: () =>
-                session.read((db) => {
-                  guard(db);
-                  if (sourceState(recordedWork(db, workId)) === 'unavailable') throw stale();
-                })
-            });
-            result.registration = outcome.pending ? 'failed' : 'complete';
-            if (!outcome.pending)
-              result.issues = result.issues.filter(
-                (i) => i.scope !== 'archive' && !(i.code === 'NAS_FILE_MISSING' && i.key === 'metadata')
-              );
+            if (operations.length) result.registration = 'pending';
+            else {
+              const outcome = await downloads.archive.reconcileArchive({
+                workId,
+                signal,
+                guard: () =>
+                  session.read((db) => {
+                    guard(db);
+                    if (sourceState(recordedWork(db, workId)) === 'unavailable') throw stale();
+                  })
+              });
+              result.registration = outcome.pending ? 'failed' : 'complete';
+              if (!outcome.pending)
+                result.issues = result.issues.filter(
+                  (i) => i.scope !== 'archive' && !(i.code === 'NAS_FILE_MISSING' && i.key === 'metadata')
+                );
+            }
           }
         }
         commit((db) => {
@@ -626,12 +589,7 @@ export function createMaintenance({ library, downloads }) {
             const mediaIssues = result.issues.filter(
               (i) => i.stage === 'files' || i.code === 'NAS_MEDIA_SET_REVIEW'
             );
-            if (mediaIssues.length) {
-              const state = mediaIssues.every((i) => i.code === 'NAS_FILE_MISSING') ? 'partial' : 'checking';
-              db.prepare(
-                'INSERT INTO maintenance_file_state VALUES(?,?) ON CONFLICT(work_id) DO UPDATE SET status=excluded.status WHERE status<>excluded.status'
-              ).run(workId, state);
-            } else db.prepare('DELETE FROM maintenance_file_state WHERE work_id=?').run(workId);
+            saveInventoryState(db, workId, mediaIssues);
           }
           if (sourceUpdate && sourceStamp(db, workId) !== priorSource) {
             sourceUpdate = null;
