@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 export function registerReadHandlers({ ipc, client, notify, openExternal }) {
   let activeSource;
   async function sourceOperation(action, body = {}) {
-    const slot = { id: randomUUID(), epoch: client.epoch, stopped: false };
+    const slot = { id: randomUUID(), epoch: client.epoch, stopped: false,action,workId:body.id };
     if (activeSource?.epoch === slot.epoch) throw Error('已有来源读取正在进行。');
     activeSource = slot;
     try {
@@ -144,6 +144,8 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     await state();
     return result;
   });
+  handle('archiveAuthor',(id,entityVersion,operationId=randomUUID())=>
+    client.command({kind:'archive-author',payload:{id},entityVersion,operationId}));
   handle('readAuthor', async ({ id, limit = 20, readAll = false, resume = false, checkpoint }) => {
     let receipt;
     if (resume) {
@@ -170,29 +172,16 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     if (result.readSummary.outcome !== 'imported') throw Error(result.collector.message);
     return source.id;
   });
-  let creatorRefresh;
   handle('refreshWorkCreators',async id=>{
-    if(creatorRefresh)throw Error('已有作者信息更新正在进行。');
-    if(!await client.query('work-detail',{id}))throw Error('找不到作品。');
-    const task={id,epoch:client.epoch,stopped:false};creatorRefresh=task;
-    try{
-      const receipt=await startRead({source:{kind:'link',id},mode:'full'});
-      task.jobId=receipt.jobId;
-      if(task.stopped)await controlRead({action:'stop',jobId:task.jobId});
-      const result=await waitRead(receipt);
-      if(result.readSummary.outcome!=='imported')throw Error(result.collector.message||'未取得作者信息。');
-      if(task.stopped)throw Error('作者信息更新已停止。');
-      task.profiles=true;
-      const refreshed=await sourceOperation('creator-profiles',{id});
-      await state();
-      return refreshed;
-    }finally{if(creatorRefresh===task)creatorRefresh=null;}
+    const result=await sourceOperation('creator-profiles',{id});
+    await state();return result;
   });
   handle('stopWorkCreators',async id=>{
-    const task=creatorRefresh;if(!task||task.id!==id||task.epoch!==client.epoch)return false;
-    task.stopped=true;
-    if(task.profiles&&activeSource){activeSource.stopped=true;await client.call('source/stop',{operationId:activeSource.id});}
-    else if(task.jobId)await controlRead({action:'stop',jobId:task.jobId});return true;
+    const slot=activeSource;
+    if(slot?.action!=='creator-profiles'||slot.workId!==id||slot.epoch!==client.epoch)return false;
+    slot.stopped=true;
+    await client.call('source/stop',{operationId:slot.id});
+    return true;
   });
   handle('workDetail', (id) => client.query('work-detail', { id }));
   handle('openOriginal', async (id) => {

@@ -195,6 +195,7 @@ test(
       for(let i=0;i<43;i++){
         const id=String(9007199254740993123n+BigInt(i));
         conn.prepare('INSERT INTO works VALUES(?,?,?)').run(id,'目录 '+i,JSON.stringify({type:'images',author:{uid:'77',nickname:'春'},tags:['春游'],images:[{width:20,height:10}]}));
+        if(i<4)conn.prepare('INSERT INTO media_files VALUES(?,?,?,?,?)').run('f'+i,id,i+'/image.jpg',20,'a'.repeat(64));
         if(i<42)conn.prepare("INSERT INTO source_members VALUES('total',?,?,0)").run(id,i);
       }
     });

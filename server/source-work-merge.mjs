@@ -116,6 +116,25 @@ function mergeMedia(merged, previous, observed, fields) {
   merged.mediaQuality = quality;
 }
 
+export function mergeCreatorFields(merged, previous, observed, fields) {
+  if (fields.has('author')) {
+    if (!stable(previous.author)) merged.author = observed.author;
+    else if (sameCreator(previous.author, observed.author))
+      merged.author = mergeCreator(previous.author, observed.author);
+  }
+  if (fields.has('coAuthors')) {
+    merged.coAuthors = observed.coAuthors
+      .filter((person) => !sameCreator(merged.author, person))
+      .map((person) => {
+        const known = previous.coAuthors?.find((creator) => sameCreator(creator, person));
+        return known ? mergeCreator(known, person) : person;
+      });
+    merged.coAuthorsState = observed.coAuthorsState;
+    merged.creatorInfoVersion = observed.creatorInfoVersion;
+    merged.creatorsCheckedAt = observed.creatorsCheckedAt;
+  }
+}
+
 export function mergeObservedWork(previous, observed) {
   if (!previous) return observed;
   if (previous.id !== observed.id) throw new Error('Cannot merge different work identities.');
@@ -142,22 +161,7 @@ export function mergeObservedWork(previous, observed) {
     };
   }
 
-  if (fields.has('author')) {
-    if (!stable(previous.author)) merged.author = observed.author;
-    else if (sameCreator(previous.author, observed.author))
-      merged.author = mergeCreator(previous.author, observed.author);
-  }
-  if (fields.has('coAuthors')) {
-    merged.coAuthors = observed.coAuthors
-      .filter((person) => !sameCreator(merged.author, person))
-      .map((person) => {
-        const known = previous.coAuthors?.find((creator) => sameCreator(creator, person));
-        return known ? mergeCreator(known, person) : person;
-      });
-    merged.coAuthorsState = observed.coAuthorsState;
-    merged.creatorInfoVersion = observed.creatorInfoVersion;
-    merged.creatorsCheckedAt = observed.creatorsCheckedAt;
-  }
+  mergeCreatorFields(merged, previous, observed, fields);
 
   mergeMedia(merged, previous, observed, fields);
   if (fields.has('music')) merged.music = mergeMusic(previous.music, observed.music, fields);

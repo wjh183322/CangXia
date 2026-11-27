@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { ChoiceList, TagChoices } from './library-ui.jsx';
 
-export function useCatalogue(api, enabled, options, page, revision, onError) {
-  const key = JSON.stringify([options, page, revision]);
+export function useCatalogue(api, enabled, options, page, revision, onError, reload) {
+  const selectionKey = JSON.stringify([enabled, options, revision]);
+  const key = JSON.stringify([selectionKey, page, reload]);
   const [result, setResult] = useState(null),
     [choice, setChoice] = useState(null);
+  useEffect(() => setChoice(null), [selectionKey]);
   useEffect(() => {
     if (!enabled) return;
     let current = true;

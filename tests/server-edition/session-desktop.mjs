@@ -1,5 +1,5 @@
 // Launched only by the Windows integration test, using its private temporary profile.
-import { app, BrowserWindow, powerMonitor, shell } from 'electron';
+import { app, BrowserWindow, powerMonitor, shell, ipcMain } from 'electron';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,17 @@ const root = process.env.CANGXIA_SESSION_FIXTURE;
 const config = JSON.parse(fs.readFileSync(path.join(root, 'connection.json'), 'utf8'));
 app.setPath('appData', root);
 app.commandLine.appendSwitch('disable-gpu');
+// Hold only the specified fixture request after the normal HTTPS operation has completed.
+const handle=ipcMain.handle.bind(ipcMain);
+let hold;
+ipcMain.handle=(name,fn)=>handle(name,async(event,...args)=>{
+  const result=await fn(event,...args);
+  if(name==='cangxia:workDetail'&&hold?.id===args[0]&&!hold.release){
+    const pending=hold;
+    await new Promise(resolve=>{pending.release=resolve;});
+  }
+  return result;
+});
 await import('../../electron/main.mjs');
 async function waitFor(fn) {
   const deadline = Date.now() + 20000;
@@ -72,6 +83,7 @@ app.whenReady().then(async () => {
     await waitFor(() => js(win, 'document.body.innerText.includes("释放使用权")'));
     assert.equal((await js(win, 'window.cangxia.state()')).storage.mode, 'server');
     assert.equal(await js(win, 'window.cangxia.windowRole'), 'library');
+    ipcMain.handle=handle;
     await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
     const clickText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.includes(${JSON.stringify(label)})).click()`);
     await clickText('全部结果全选');
@@ -93,6 +105,45 @@ app.whenReady().then(async () => {
     assert.equal(await js(win,"document.querySelector('[aria-label=顶部跳转页码]').value"),'2');
     await clickText('全部作品');
     await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('44')"));
+    await clickText('账号收藏');
+    await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('42')"));
+    assert.equal(await js(win,"!!document.querySelector('.selection-dock')"),false,'returning to the previous source must clear its old select-all and exceptions');
+    await clickText('全部结果全选');
+    const setSearch=text=>js(win,`var e=document.querySelector('[aria-label="搜索作品、作者或标签"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(text)});e.dispatchEvent(new Event('input',{bubbles:true}));`);
+    await setSearch('目录 40');
+    await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===1"));
+    await setSearch('');
+    await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
+    assert.equal(await js(win,"!!document.querySelector('.selection-dock')"),false,'clearing search must not revive the old selection');
+    await clickText('NAS 媒体库');
+    const clickWork=index=>js(win,`document.querySelectorAll('.cover-button')[${index}].click()`);
+    await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===4"));
+    await clickWork(1);
+    await waitFor(()=>js(win,"document.querySelector('.viewer header strong')?.textContent==='目录 1'"));
+    const down=()=>js(win,"document.querySelector('[aria-label=下一个作品]').click()");
+    const up=()=>js(win,"document.querySelector('[aria-label=上一个作品]').click()");
+    hold={id:'9007199254740993125'};await down();await waitFor(()=>hold.release);
+    await js(win,"document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await waitFor(()=>js(win,"!document.querySelector('.viewer')"));hold.release();await delay(120);
+    assert.equal(await js(win,"!!document.querySelector('.viewer')"),false,'late arrow response reopened a closed viewer');
+    hold=undefined;await clickWork(1);
+    await waitFor(()=>js(win,"document.querySelector('.viewer header strong')?.textContent==='目录 1'"));
+    hold={id:'9007199254740993125'};await down();await waitFor(()=>hold.release);
+    await up();
+    await waitFor(()=>js(win,"document.querySelector('.viewer header strong')?.textContent==='目录 0'"));
+    hold.release();await delay(120);
+    assert.equal(await js(win,"document.querySelector('.viewer header strong').textContent"),'目录 0','an older arrow response replaced the latest destination');
+    await js(win,"document.querySelector('[aria-label=关闭浏览模式]').click()");
+    await clickText('全部作品');
+    await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('44')"));
+    const {openLibrary}=await import('../../server/library.mjs');
+    const external=openLibrary({root:path.join(root,'volume')});
+    external.write(db=>db.prepare('INSERT INTO works VALUES(?,?,?)').run('9812345678912345678','新资料','{"type":"video"}'));
+    external.close();
+    const heading=await js(win,"document.querySelector('.heading-actions').textContent");
+    assert(!heading.includes('打开保存目录'));
+    await clickText('刷新资料库');
+    await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('45')"));
     const receipt = await js(win, "window.cangxia.setTags('99',['fixture-tag'],0)");
     assert.equal(receipt.entityVersion, 1);
     await js(win, `document.querySelector('button[aria-label="设置"]').click()`);

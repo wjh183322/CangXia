@@ -4,7 +4,7 @@ import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
 import { createReadJobs, readState } from './read-jobs.mjs';
 import { historyRuns, historyItems, jobSummary } from './read-history.mjs';
-import { boundIdentity, createSourceOperations } from './read-sources.mjs';
+import { archiveAuthor, boundIdentity, createSourceOperations } from './read-sources.mjs';
 import { createReadStore } from './read-store.mjs';
 import { failure } from './service-error.mjs';
 import { removeMembership } from './memberships.mjs';
@@ -112,6 +112,7 @@ export function createSessionService({
         return { added: true };
       },
       'set-tags': setTags,
+      'archive-author':archiveAuthor,
       'catalogue-action': (db,command,owner)=>{
         const {action,selection}=command.payload;
         const ids=confirmedSelection(db,selection,owner,{collect:true});
@@ -354,7 +355,7 @@ export function createSessionService({
         const run = mutations.get(kind);
         if (!run) throw failure(404, 'UNKNOWN_COMMAND', '服务不支持此操作。');
         if (
-          (kind === 'start-read' || (kind === 'control-read' && payload.action !== 'stop')) &&
+          (kind === 'archive-author' || kind === 'start-read' || (kind === 'control-read' && payload.action !== 'stop')) &&
           discovery.busy(localGrant.controller.signal)
         )
           throw failure(409, 'READ_CONFLICT', '已有来源读取正在进行。');

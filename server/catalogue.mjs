@@ -237,24 +237,51 @@ export function cataloguePosition(db, input, owner) {
   return { position: row?.position ?? -1, revision };
 }
 export function catalogueChoices(db, input, owner) {
-  const { from, args } = context(db, { source: input.source }, owner),
-    kind = option(input.kind, ['authors', 'tags', 'myTags']);
+  const { from, args, order } = context(db, { source: input.source }, owner);
+  const kind = option(input.kind, ['authors', 'tags', 'myTags']);
   const q = value(input.query ?? '')
       .trim()
       .toLocaleLowerCase(),
-    page = pageNumber(input.page ?? 1);
-  let choices;
-  if (kind === 'authors')
-    choices = `SELECT DISTINCT cx_key(person) AS id,json_extract(person,'$.nickname') AS label,concat_ws(' ',json_extract(person,'$.uniqueId'),json_extract(person,'$.secUid'),json_extract(person,'$.uid')) AS handles FROM (SELECT ${resolvedPerson} AS person FROM catalogue_people p WHERE p.work_id IN (SELECT w.id${from})) WHERE cx_key(person)<>''`;
-  else if (kind === 'myTags') choices = 'SELECT DISTINCT tag AS id,tag AS label FROM work_tags';
-  else
-    choices = `SELECT DISTINCT tag.value AS id,tag.value AS label FROM works x,json_each(x.body,'$.tags') tag WHERE x.id IN (SELECT w.id${from})`;
+    page = pageNumber(input.page ?? 1),
+    offset = (page - 1) * 50;
+  const ordered = `SELECT w.id,w.body,row_number() OVER(ORDER BY ${order}) AS rank${from}`;
+  if (kind === 'authors') {
+    // Keep the Map insertion order used by the original dropdown. Its latest
+    // label wins if two observations of the same creator have different names.
+    const rows = db
+      .prepare(
+        `WITH ordered AS (${ordered}), participants AS (
+      SELECT rank,0 AS ordinal,coalesce(json_extract(body,'$.author'),'{}') AS person FROM ordered
+      UNION ALL SELECT rank,t.key+1,t.value FROM ordered,json_each(ordered.body,'$.coAuthors') t
+    ), resolved AS MATERIALIZED (SELECT rank,ordinal,${resolvedPerson} AS person FROM participants p),
+    ranked AS (SELECT cx_key(person) AS id,person,
+      first_value(rank) OVER source_order AS first_rank,first_value(ordinal) OVER source_order AS first_ordinal,
+      row_number() OVER(PARTITION BY cx_key(person) ORDER BY rank DESC,ordinal DESC) AS last
+      FROM resolved WINDOW source_order AS (PARTITION BY cx_key(person) ORDER BY rank,ordinal))
+    SELECT id,json_extract(person,'$.nickname') AS label FROM ranked WHERE last=1 AND id<>'' AND
+      instr(cx_lower(concat_ws(' ',json_extract(person,'$.nickname'),json_extract(person,'$.uniqueId'),json_extract(person,'$.secUid'),json_extract(person,'$.uid'),id)),?)>0
+    ORDER BY first_rank,first_ordinal,id LIMIT 51 OFFSET ?`
+      )
+      .all(...args, q, offset);
+    return { items: rows.slice(0, 50).map((r) => [r.id, r.label]), hasMore: rows.length > 50, page };
+  }
+  // Node SQLite has no custom collation hook. Sort distinct matching labels on
+  // the NAS with the renderer's locale, retaining first occurrence for equal labels.
+  const sourceTags = `WITH ordered AS (${ordered}), seen AS (SELECT t.value AS tag,rank,t.key AS ordinal,
+      row_number() OVER(PARTITION BY t.value ORDER BY rank,t.key) AS occurrence FROM ordered,json_each(ordered.body,'$.tags') t)
+      SELECT tag FROM seen WHERE occurrence=1 AND instr(cx_lower(tag),?)>0 ORDER BY rank,ordinal`;
+  const localTags = `SELECT t.tag FROM work_tags t JOIN works w ON w.id=t.work_id WHERE instr(cx_lower(t.tag),?)>0
+      GROUP BY t.tag ORDER BY min(w.rowid),min(t.rowid)`;
   const rows = db
-    .prepare(
-      `SELECT id,label FROM (${choices}) WHERE instr(cx_lower(label||' '||id${kind === 'authors' ? "||' '||handles" : ''}),?)>0 ORDER BY label,id LIMIT 51 OFFSET ?`
-    )
-    .all(...(kind === 'myTags' ? [] : args), q, (page - 1) * 50);
-  return { items: rows.slice(0, 50).map((r) => [r.id, r.label]), hasMore: rows.length > 50, page };
+    .prepare(kind === 'myTags' ? localTags : sourceTags)
+    .all(...(kind === 'myTags' ? [] : args), q);
+  const collator = new Intl.Collator('zh-CN');
+  rows.sort((a, b) => collator.compare(a.tag, b.tag));
+  return {
+    items: rows.slice(offset, offset + 50).map((r) => [r.tag, r.tag]),
+    hasMore: rows.length > offset + 50,
+    page
+  };
 }
 // Called inside the downstream command's write transaction. Materialize NAS-side only,
 // before mutating anything, because the command may change its own filter or revision.

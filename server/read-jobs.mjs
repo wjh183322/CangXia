@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createReadStore, saveWorks, validatePage } from './read-store.mjs';
 import { sourceKey } from './memberships.mjs';
-import { boundIdentity, sourceFromKey } from './read-sources.mjs';
+import { authorEntryVersion, boundIdentity, sourceFromKey } from './read-sources.mjs';
 import { stepSummary, jobSummary } from './read-history.mjs';
 import { collectProfiles } from './source-parser.mjs';
 import { sameCreator, workCreators } from '../shared/creators.mjs';
@@ -745,6 +745,7 @@ export function readState(db, state) {
       .all(key);
   const uid = db.prepare('SELECT uid FROM source_account WHERE singleton=1').get()?.uid;
   for (const row of db.prepare('SELECT * FROM read_sources WHERE uid=? ORDER BY rowid').all(uid ?? '')) {
+    if(row.source_id.startsWith('author:')&&!row.added)continue;
     const item = { ...JSON.parse(row.body), added: !!row.added, remoteMissing: !!row.missing };
     item.savedCount=db.prepare('SELECT count(*) AS n FROM source_members WHERE source_id=?').get(row.source_id).n;
     item.mediaCount=db.prepare("SELECT count(*) AS n FROM source_members m WHERE source_id=? AND EXISTS (SELECT 1 FROM media_files f WHERE f.work_id=m.work_id AND lower(f.relative_path) NOT LIKE '%.json')").get(row.source_id).n;
@@ -753,6 +754,7 @@ export function readState(db, state) {
       const last = summaryByKey(row.source_id)[0];
       if (last) item.run = stepSummary(db, last, last.started);
       item.count=item.savedCount;
+      item.entityVersion=authorEntryVersion(db,row.source_id);
       state.authors.push(item);
     }
   }

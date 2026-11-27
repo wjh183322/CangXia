@@ -212,8 +212,13 @@ test('manual creator lookup verifies each stored work participant before updatin
     id = String(first),
     sec = 'MS4wLjABsynthetic001',
     other = 'MS4wLjABsynthetic002';
+  let detailCalls = 0;
   const source = {
     account: () => ({ uid: '101', authEpoch: epoch }),
+    readDetail: async () => {
+      detailCalls++;
+      throw Error('temporary detail failure');
+    },
     lookupAuthor: async (_input, text) =>
       text.includes(other)
         ? { id: other, uid: '888', name: '冒名' }
@@ -226,9 +231,139 @@ test('manual creator lookup verifies each stored work participant before updatin
       "UPDATE works SET body=json_set(body,'$.author.secUid',?,'$.coAuthors[0].secUid',?) WHERE id=?"
     ).run(sec, other, id);
   });
-  const result = await sessions.sourceOperation(who, grant, 'creator-profiles', { id });
+  const { registerReadHandlers } = await import('../../electron/server-reads.mjs');
+  const handlers = new Map(),
+    client = {
+      epoch: 1,
+      query,
+      call: (route, payload) => sessions.sourceOperation(who, grant, route.split('/').pop(), payload),
+      command: (input) => sessions.command(who, grant, input),
+      signal: () => new AbortController().signal
+    };
+  registerReadHandlers({ ipc: (name, role, fn) => handlers.set(name, fn), client, notify: () => {} });
+  const result = await handlers.get('refreshWorkCreators')(id);
+  assert.equal(detailCalls, 1);
+  assert.equal(
+    library.read((db) => db.prepare('SELECT count(*) AS n FROM read_batches').get().n),
+    0
+  );
+  assert.equal(
+    library.read((db) => db.prepare('SELECT count(*) AS n FROM read_finalizers').get().n),
+    0
+  );
   assert.equal(result.updated, 1);
   assert.equal(query('work-detail', { id }).author.uniqueId, 'new');
   assert(!JSON.stringify(query('work-detail', { id })).includes('冒名'));
   assert.equal(query('state', {}).authors.length, 0);
+  source.readDetail = async () => ({
+    id,
+    observedFields: ['coAuthors', 'name', 'videoUrls'],
+    name: '不应替换',
+    videoUrls: ['https://example.invalid/should-not-be-stored'],
+    coAuthors: [{ uid: '823', nickname: '新共创' }],
+    coAuthorsState: 'verified',
+    creatorInfoVersion: 2,
+    creatorsCheckedAt: '2026-11-26'
+  });
+  await handlers.get('refreshWorkCreators')(id);
+  const after = query('work-detail', { id });
+  assert.equal(after.coAuthors[0].nickname, '新共创');
+  assert.equal(after.coAuthorsState, 'verified');
+  assert.equal(after.name, '春日 0');
+  assert.equal(
+    library.read((db) => db.prepare('SELECT count(*) AS n FROM read_batches').get().n),
+    0
+  );
+});
+
+test('facet pages follow Chinese tag collation and first creator occurrence in each original source', (t) => {
+  const { query, library, works } = fixture(t, 66);
+  const labels = ['重庆', '阿坝', '武汉', '北京', '舟山', '成都'];
+  const tags = works.map((_, i) => labels[i % labels.length] + i);
+  const people = works.map((_, i) => ({
+    uid: String(1000 + i),
+    nickname: labels[(65 - i) % labels.length] + i
+  }));
+  const common = { uid: '999', nickname: '共创' };
+  library.write((db) => {
+    const update = db.prepare('UPDATE works SET body=? WHERE id=?'),
+      mine = db.prepare('INSERT INTO work_tags VALUES(?,?)');
+    for (const [i, w] of works.entries()) {
+      update.run(JSON.stringify({ ...w, author: people[i], coAuthors: [common], tags: [tags[i]] }), w.id);
+      mine.run(w.id, tags[i]);
+    }
+  });
+  const pages = (kind, source) =>
+    [1, 2].flatMap((page) => query('catalogue-choices', { kind, source, page }).items);
+  const chinese = (a, b) => a.localeCompare(b, 'zh-CN');
+  assert.deepEqual(
+    pages('tags', 'total').map((row) => row[0]),
+    tags.slice(0, -1).sort(chinese)
+  );
+  assert.deepEqual(
+    pages('myTags', 'all').map((row) => row[0]),
+    [...tags].sort(chinese)
+  );
+  for (const [source, list] of [
+    ['total', people.slice(0, -1)],
+    ['folder:77', people.slice(0, -1).reverse()]
+  ]) {
+    const expected = [list[0], common, ...list.slice(1)].map((p) => ['uid:' + p.uid, p.nickname]);
+    assert.deepEqual(pages('authors', source), expected);
+  }
+});
+
+test('archiving an author fences live reads and old confirmations, and re-add restores the same ordered catalogue', async (t) => {
+  const sec = 'MS4wLjABtest0001',
+    uid = '101',
+    source = {
+      account: () => ({ uid, authEpoch: 'fixture' }),
+      lookupAuthor: async () => ({ id: sec, uid: '71', name: '树' })
+    };
+  const { library, works, query, sessions, who, grant } = fixture(t, 55, {}, source);
+  library.write((db) => {
+    db.prepare('INSERT INTO source_account VALUES(1,?,?,?)').run(uid, 'fixture', randomUUID());
+    db.prepare('UPDATE source_members SET source_id=? WHERE source_id=?').run(
+      'author:' + sec,
+      'author:sec42'
+    );
+    db.prepare('INSERT INTO media_files VALUES(?,?,?,?,?)').run(
+      'file',
+      works[0].id,
+      'video.mp4',
+      20,
+      'a'.repeat(64)
+    );
+  });
+  const add = () =>
+    sessions.sourceOperation(who, grant, 'author', { text: 'https://www.douyin.com/user/' + sec });
+  const archive = (version, operationId = randomUUID()) =>
+    sessions.command(who, grant, {
+      kind: 'archive-author',
+      entityVersion: version,
+      payload: { id: sec },
+      operationId
+    });
+  await add();
+  const v = query('state', {}).authors[0].entityVersion;
+  assert(Number.isSafeInteger(v));
+  const before = query('list-works', { source: 'author:' + sec }).ids;
+  library.write((db) =>
+    db
+      .prepare(
+        "INSERT INTO read_batches(id,uid,auth_epoch,owner_boot,owner_generation,status,started) VALUES('job','101','epoch','boot',1,'running','date')"
+      )
+      .run()
+  );
+  assert.throws(() => archive(v), /读取/);
+  library.write((db) => db.prepare("UPDATE read_batches SET status='stopped' WHERE id='job'").run());
+  const op = randomUUID(),
+    saved = archive(v, op);
+  assert.deepEqual(archive(v, op), saved);
+  assert.equal(query('state', {}).authors.length, 0);
+  assert.equal(query('list-works', { source: 'total' }).total, 54);
+  assert.equal(query('list-works', { source: 'media' }).total, 1);
+  await add();
+  assert.deepEqual(query('list-works', { source: 'author:' + sec }).ids, before);
+  assert.throws(() => archive(v), /重新/);
 });

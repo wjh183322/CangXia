@@ -1,3 +1,4 @@
+import {mergeCreatorFields} from './source-work-merge.mjs';
 import {workCreators,sameCreator} from '../shared/creators.mjs';
 import {saveWorks} from './read-store.mjs';
 import { randomUUID } from 'node:crypto';
@@ -62,6 +63,24 @@ export function readWorkDetail(db, { id }) {
     metadata.music = { id, title, author, duration, state, mixPending, ...(clip?{clip:{begin:clip.begin,end:clip.end,volume:clip.volume,unit:clip.unit}}:{}) };
   }
   return metadata;
+}
+export function authorEntryVersion(db,key){
+  return db.prepare('SELECT version FROM entity_versions WHERE entity=?').get(key)?.version??0;
+}
+function advanceAuthorEntry(db,key){
+  db.prepare('INSERT INTO entity_versions VALUES(?,1) ON CONFLICT(entity) DO UPDATE SET version=version+1').run(key);
+  db.prepare('UPDATE catalogue_version SET revision=revision+1 WHERE id=1').run();
+}
+export function archiveAuthor(db,{payload:{id},entityVersion}){
+  if(typeof id!=='string'||!/^MS4wLjAB[A-Za-z0-9_-]{8,240}$/.test(id))throw failure(400,'INVALID_REQUEST','作者标识无效。');
+  const key='author:'+id;
+  if(db.prepare("SELECT 1 FROM read_batches WHERE status='running'").get()||db.prepare("SELECT 1 FROM download_jobs WHERE state='running'").get())
+    throw failure(409,'READ_CONFLICT','请先暂停下载并等待当前读取结束。');
+  if(authorEntryVersion(db,key)!==entityVersion)throw failure(409,'STALE_ENTITY','作者入口已更新，请重新核对。');
+  if(!db.prepare('UPDATE read_sources SET added=0 WHERE source_id=? AND added=1 AND uid=(SELECT uid FROM source_account WHERE singleton=1)').run(key).changes)
+    throw failure(404,'AUTHOR_UNKNOWN','找不到作者入口。');
+  advanceAuthorEntry(db,key);
+  return {id,entityVersion:entityVersion+1};
 }
 export const totalSource = { kind: 'total', id: '__all__' };
 export const sourceFromKey = (key) =>
@@ -258,22 +277,46 @@ async function sourceAction(source, session, kind, payload) {
   if(kind==='creator-profiles'){
     const work=session.read(db=>readWorkDetail(db,{id:payload.id}));
     if(!work)throw failure(404,'WORK_UNKNOWN','找不到作品。');
-    const profiles=[],people=workCreators(work);
-    let attempted=0,unmatched=0;
+    function mayContinue(error){
+      session.signal.throwIfAborted();
+      if(['SOURCE_AUTH','SOURCE_RATE_LIMITED','LOGIN_REQUIRED','STALE_SOURCE_READ','SESSION_LOST'].includes(error.code))throw error;
+      session.read(db=>{if(boundIdentity(db,source).authEpoch!==account.authEpoch)throw failure(409,'STALE_SOURCE_READ','账号状态已变化。');});
+    }
+    let observation,detailMissing=false;
+    try{
+      const detail=await source.readDetail({...input,workId:work.id});
+      if(detail?.id===work.id&&!detail.statusOnly)observation=detail;
+      else detailMissing=true;
+    }catch(error){mayContinue(error);detailMissing=true;}
+    const fields=new Set(observation?.observedFields?.filter(key=>['author','coAuthors'].includes(key)));
+    const updated={...work};
+    if(observation)mergeCreatorFields(updated,work,observation,fields);
+    const profiles=[],people=workCreators(updated);
+    let attempted=0,unconfirmed=0;
     for(const person of people){
       if(!/^MS4wLjAB[A-Za-z0-9_-]{8,240}$/.test(person.secUid))continue;
       if(attempted++)await delay(1100,undefined,{signal:session.signal});
-      const row=await source.lookupAuthor(input,'https://www.douyin.com/user/'+person.secUid);
-      const profile={uid:row.uid,secUid:row.id,nickname:row.name,uniqueId:row.uniqueId};
-      if(row.id!==person.secUid||!sameCreator(person,profile)){unmatched++;continue;}
-      profiles.push(profile);
+      try{
+        const row=await source.lookupAuthor(input,'https://www.douyin.com/user/'+person.secUid);
+        const profile={uid:row.uid,secUid:row.id,nickname:row.name,uniqueId:row.uniqueId};
+        if(row.id!==person.secUid||!sameCreator(person,profile)){unconfirmed++;continue;}
+        profiles.push(profile);
+      }catch(error){mayContinue(error);unconfirmed++;}
     }
     return commit(db=>{
-      const current=readWorkDetail(db,{id:work.id});
-      if(!current)throw failure(404,'WORK_UNKNOWN','找不到作品。');
-      const accepted=profiles.filter(p=>workCreators(current).some(a=>sameCreator(a,p)));
+      const row=db.prepare('SELECT body FROM works WHERE id=?').get(work.id);
+      if(!row)throw failure(404,'WORK_UNKNOWN','找不到作品。');
+      const current=JSON.parse(row.body),next={...current};
+      if(JSON.stringify([current.author,current.coAuthors])!==JSON.stringify([work.author,work.coAuthors]))
+        throw failure(409,'STALE_ENTITY','作品作者已更新，请重新核对。');
+      if(fields.size){
+        mergeCreatorFields(next,current,observation,fields);
+        next.observedFields=[...new Set([...(current.observedFields??[]),...fields])];
+        db.prepare('UPDATE works SET body=? WHERE id=?').run(JSON.stringify(next),work.id);
+      }
+      const accepted=profiles.filter(p=>workCreators(next).some(a=>sameCreator(a,p)));
       saveWorks(db,{works:[],aux:{audioSourceHints:[],creatorProfiles:accepted}});
-      return {updated:accepted.length,message:'已核对 '+accepted.length+' 位作者'+(unmatched?'，身份不符的资料已跳过':'')};
+      return {updated:accepted.length,message:'已核对 '+accepted.length+' 位作者'+(detailMissing?'；详情暂不可用，已沿用现有作者记录':'')+(unconfirmed?'；未核实的主页资料已保留原值':'')};
     });
   }
   if (kind === 'folders') {
@@ -292,13 +335,14 @@ async function sourceAction(source, session, kind, payload) {
     const row = await source.lookupAuthor(input, payload.text);
     return commit((db) => {
       const key = 'author:' + row.id,
-        old = db.prepare('SELECT body FROM read_sources WHERE source_id=?').get(key);
+        old = db.prepare('SELECT body,added FROM read_sources WHERE source_id=?').get(key);
       if (old && JSON.parse(old.body).uid !== row.uid)
         throw failure(409, 'AUTHOR_MISMATCH', '作者身份已变化。');
       db.prepare(
         `INSERT INTO read_sources VALUES(?,?,?,?,1,0) ON CONFLICT(source_id)
         DO UPDATE SET body=excluded.body,name=excluded.name,added=1`
       ).run(key, account.uid, row.name, JSON.stringify(row));
+      if(!old?.added)advanceAuthorEntry(db,key);
       return { id: row.id };
     });
   }

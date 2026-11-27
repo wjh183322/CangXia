@@ -225,6 +225,14 @@ app.whenReady().then(async () => {
     );
     assert.equal(await js(win, "document.querySelector('.read-result h3').textContent"), '本轮读取完成');
     assert.equal(hits('stop-folders', 'collects/list/').length, 1);
+    await click('移除作者');
+    await js(win,"document.querySelector('.modal-footer .primary').click()");
+    await waitFor(()=>js(win,"!document.querySelector('.author-nav-list .collection-nav')"));
+    await click('添加作者');
+    await fill('#author-link','https://www.douyin.com/user/MS4wLjABsynthetic001');
+    await click('核对并添加作者');
+    await waitFor(()=>js(win,"!!document.querySelector('.author-nav-list .collection-nav')"));
+    assert.equal(await js(win,"window.cangxia.listWorks({source:'author:MS4wLjABsynthetic001'}).then(r=>r.ids.includes('9200'))"),true);
     powerMonitor.emit('resume');
     await waitFor(() => win.isDestroyed() && gate.isVisible());
     assert.equal(await js(gate, '!!document.querySelector(".qr-image-box img")'), false);
