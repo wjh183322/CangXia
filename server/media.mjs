@@ -221,7 +221,7 @@ function detectPrefix(bytes, kind) {
       brands.some((b) => /^(isom|iso[2-9]|mp4[12]|avc1|M4V )$/.test(b)) &&
       !brands.some((b) => ['avif', 'avis', 'M4A ', 'M4B ', 'F4A '].includes(b))
     )
-      return 'video/mp4';
+      return 'generic-mp4';
   }
   return null;
 }
@@ -351,7 +351,7 @@ async function boundedBytes(body, limit) {
 }
 // ISO generic brands are shared by audio and video. Inspect mdia/hdlr from the
 // actual movie index. Jump over mdat using its box length, even if moov is at EOF.
-async function genericAudio(result, span, fetchRange) {
+async function matchingTracks(result, span, fetchRange, kind) {
   let total = span.total,
     window = result.isoPrefix,
     offset = 0,
@@ -393,7 +393,11 @@ async function genericAudio(result, span, fetchRange) {
       if (!Number.isSafeInteger(length) || length < header || length > end - pos) return false;
       const type = h.toString('latin1', 4, 8),
         child = { root: 'moov', moov: 'trak', trak: 'mdia' }[parent];
-      if (type === child && !(await scan(pos + header, pos + length, type))) return false;
+      if (type === child) {
+        if (!(await scan(pos + header, pos + length, type))) return false;
+        // moov is the complete track catalogue; later moof/mdat boxes carry samples.
+        if (parent === 'root') return true;
+      }
       if (parent === 'mdia' && type === 'hdlr') {
         if (length < header + 12) return false;
         const name = (await at(pos + header + 8, 4))?.toString('latin1');
@@ -402,22 +406,174 @@ async function genericAudio(result, span, fetchRange) {
       }
       pos += length;
     }
-    return true;
+    return parent !== 'root';
   }
+  const matches = () => (kind === 'video' ? hasVideo : hasAudio && !hasVideo);
   if (total == null && window) {
     for (let pos = 0; pos + 8 <= window.length; ) {
       const size = window.readUInt32BE(pos);
       if (size < 8 || pos + size > window.length) break;
       if (window.toString('latin1', pos + 4, pos + 8) === 'moov')
-        return (await scan(pos + 8, pos + size, 'moov')) && hasAudio && !hasVideo;
+        return (await scan(pos + 8, pos + size, 'moov')) && matches();
       pos += size;
     }
     window = null;
   }
   if (!(await at(0, 8)) || !Number.isSafeInteger(total)) return false;
-  return (await scan(0, total, 'root')) && hasAudio && !hasVideo;
+  return (await scan(0, total, 'root')) && matches();
 }
-async function sourceMime({ result, item, range, head, fetchRange, sourceIdentity, proofs }) {
+// Anonymous CDN responses have no cross-request byte identity. When available, a
+// multipart reply carries the metadata and distant span together. Near the start
+// a single contiguous reply is cheaper; only the bounded leading bytes are skipped.
+const anonymousSkipLimit = 64 * 1024,
+  anonymousMetadata = 8192;
+const unsupportedMulti = Symbol('origin does not serve multipart ranges');
+function rangeReader(body) {
+  const reader = body.getReader();
+  let buffered = Buffer.alloc(0),
+    pushback = Buffer.alloc(0),
+    closed = false;
+  async function next(limit) {
+    if (pushback.length) {
+      const part = pushback.subarray(0, limit);
+      pushback = pushback.subarray(part.length);
+      return part;
+    }
+    while (!buffered.length) {
+      const { done, value } = await reader.read();
+      if (done) throw unavailable();
+      buffered = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    const part = buffered.subarray(0, limit);
+    buffered = buffered.subarray(part.length);
+    return part;
+  }
+  async function exact(size) {
+    const value = Buffer.alloc(size);
+    for (let at = 0; at < size; ) {
+      const chunk = await next(size - at);
+      chunk.copy(value, at);
+      at += chunk.length;
+    }
+    return value;
+  }
+  async function close() {
+    if (closed) return;
+    closed = true;
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  async function partHeader(boundary, start, end, total, first) {
+    const header = Buffer.alloc(4096);
+    let length = 0;
+    while (length < 4096) {
+      const previous = length,
+        chunk = await next(header.length - length);
+      chunk.copy(header, length);
+      length += chunk.length;
+      const bytes = header.subarray(0, length),
+        split = bytes.indexOf('\r\n\r\n', Math.max(0, previous - 3));
+      if (split < 0) continue;
+      pushback = Buffer.concat([bytes.subarray(split + 4), pushback]);
+      const lines = bytes.toString('latin1', 0, split).split('\r\n');
+      if (!first && lines.shift() !== '') return false;
+      if (lines.shift() !== '--' + boundary) return false;
+      for (const line of lines) {
+        if (/^content-length:/i.test(line) && line.slice(15).trim() !== String(end - start + 1)) return false;
+        if (
+          /^content-(transfer-)?encoding:/i.test(line) &&
+          !/^(identity|binary)$/i.test(line.split(':')[1]?.trim())
+        )
+          return false;
+      }
+      const ranges = lines.filter((line) => /^content-range:/i.test(line));
+      return ranges.length === 1 && ranges[0].slice(14).trim() === `bytes ${start}-${end}/${total}`;
+    }
+    return false;
+  }
+  function stream(count, leading, boundary) {
+    return new ReadableStream(
+      {
+        async pull(controller) {
+          try {
+            let chunk;
+            if (leading.length) {
+              chunk = leading.subarray(0, count);
+              leading = leading.subarray(chunk.length);
+            } else chunk = await next(count);
+            count -= chunk.length;
+            if (!count) {
+              if (boundary) {
+                const marker = '\r\n--' + boundary + '--';
+                if ((await exact(marker.length)).toString('latin1') !== marker) throw unavailable();
+              }
+              await close();
+            }
+            controller.enqueue(chunk);
+            if (!count) controller.close();
+          } catch (error) {
+            await close();
+            controller.error(error);
+          }
+        },
+        cancel: close
+      },
+      { highWaterMark: 0 }
+    );
+  }
+  return { exact, close, partHeader, stream };
+}
+async function anonymousBody(result, item, span, fetchRange) {
+  const far = span.start > anonymousSkipLimit;
+  const prefixSize = Math.min(span.total, anonymousMetadata);
+  const end = Math.max(span.end, prefixSize - 1);
+  const request = far ? `bytes=0-${prefixSize - 1},${span.start}-${span.end}` : `bytes=0-${end}`;
+  const probe = await fetchRange(request);
+  let r,
+    handed = false;
+  try {
+    if (probe.url !== result.url) return null;
+    let boundary;
+    if (far) {
+      const match =
+        /^multipart\/byteranges\s*;\s*boundary=(?:"([A-Za-z0-9'()+_,.\/:=? -]{1,70})"|([A-Za-z0-9._+-]{1,70}))\s*$/i.exec(
+          probe.headers.get('content-type') || ''
+        );
+      if (!match && [200, 206, 400, 405, 416].includes(probe.status)) return unsupportedMulti;
+      if (probe.status !== 206 || !match) return null;
+      boundary = match[1] || match[2];
+    } else {
+      const part = matchingObject(result, probe, span, request);
+      if (!part || part.start !== 0) return null;
+    }
+    if (!probe.body) return null;
+    r = rangeReader(probe.body);
+    if (far && !(await r.partHeader(boundary, 0, prefixSize - 1, span.total, true))) return null;
+    const prefix = await r.exact(prefixSize),
+      mime = detectPrefix(prefix, item.kind);
+    if (!mime) return null;
+    let leading = Buffer.alloc(0);
+    if (far) {
+      if (!(await r.partHeader(boundary, span.start, span.end, span.total, false))) return null;
+    } else if (span.start < prefixSize) {
+      leading = prefix.subarray(span.start);
+    } else await r.exact(span.start - prefixSize);
+    result.isoPrefix = prefix;
+    await result.body.cancel();
+    result.body = r.stream(span.length, leading, boundary);
+    handed = true;
+    return mime;
+  } catch (error) {
+    if (error.code === 'MEDIA_UNAVAILABLE') return null;
+    throw error;
+  } finally {
+    if (!handed) {
+      if (r) await r.close();
+      else await probe.body?.cancel().catch(() => {});
+    }
+  }
+}
+async function sourceMime({ result, item, range, head, fetchRange, sourceIdentity, verifyOrigin, proofs }) {
   const declared = (result.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (declared && declared !== 'application/octet-stream' && !mimeTypes[item.kind].test(declared))
     return null;
@@ -441,29 +597,29 @@ async function sourceMime({ result, item, range, head, fetchRange, sourceIdentit
       result.headers.get('repr-digest') ||
       result.headers.get('last-modified');
     const anonymous = (!declared || declared === 'application/octet-stream') && !evidence && !head;
-    if (anonymous && span.end >= 64 * 1024) return null;
-    const count = anonymous ? Math.min(span.total, Math.max(prefixLimit, span.end + 1)) : prefixLimit;
-    const request = `bytes=0-${count - 1}`,
-      probe = await fetchRange(request);
-    try {
-      const prefix = matchingObject(result, probe, span, request);
-      if (!prefix || prefix.start !== 0 || !probe.body) return null;
-      if (anonymous) {
-        // Without an object identity or validator, take BOTH the format and the bytes
-        // from one bounded HTTP representation. Never splice two anonymous replies.
-        const bytes = await boundedBytes(probe.body, count);
-        if (bytes.length !== count) return null;
-        mime = detectPrefix(bytes, item.kind);
-        if (!mime) return null;
-        result.isoPrefix = bytes;
-        await result.body?.cancel();
-        result.body = new Response(bytes.subarray(span.start, span.end + 1)).body;
-      } else mime = await sniff(probe, item.kind);
-    } finally {
-      await probe.body?.cancel().catch(() => {});
+    let prefixNeeded = !anonymous;
+    if (anonymous) {
+      mime = await anonymousBody(result, item, span, fetchRange);
+      if (mime === unsupportedMulti) {
+        if (!(await verifyOrigin())) return null;
+        prefixNeeded = true;
+      }
+    }
+    if (prefixNeeded) {
+      const request = `bytes=0-${prefixLimit - 1}`,
+        probe = await fetchRange(request);
+      try {
+        const prefix = matchingObject(result, probe, span, request);
+        if (!prefix || prefix.start !== 0 || !probe.body) return null;
+        mime = await sniff(probe, item.kind);
+        if (probe.isoPrefix) result.isoPrefix = probe.isoPrefix;
+      } finally {
+        await probe.body?.cancel().catch(() => {});
+      }
     }
   }
-  if (mime === 'generic-mp4') mime = (await genericAudio(result, span, fetchRange)) ? 'audio/mp4' : null;
+  if (mime === 'generic-mp4')
+    mime = (await matchingTracks(result, span, fetchRange, item.kind)) ? item.kind + '/mp4' : null;
   if (mime && key) {
     if (proofs.size >= 256) proofs.delete(proofs.keys().next().value);
     proofs.set(key, mime);
@@ -620,24 +776,50 @@ export async function serveMedia(req, res, { downloads, session, body }) {
             guard
           );
           if (result.status === 416) return result;
-          if (result.ok) {
-            const mime = await sourceMime({
-              result,
-              item,
-              range,
-              head,
-              proofs: proofCache(store),
-              sourceIdentity: candidate.sourceIdentity,
-              fetchRange: (range) =>
-                downloads.fetchSourceMedia(url, { signal, headers: { Range: range } }, guard)
-            });
-            if (mime) {
-              result.mime = mime;
-              return result;
+          let selected = false;
+          try {
+            if (result.ok) {
+              const mime = await sourceMime({
+                result,
+                item,
+                range,
+                head,
+                proofs: proofCache(store),
+                sourceIdentity: candidate.sourceIdentity,
+                verifyOrigin: async () => {
+                  let detail;
+                  try {
+                    detail = await downloads.readMediaDetail(workId, binding, signal);
+                  } catch (e) {
+                    if (signal.aborted || e.code === 'SOURCE_RATE_LIMITED') throw e;
+                    return false;
+                  }
+
+                  guard();
+                  if (detail?.id !== workId || detail.statusOnly || detail.remoteState === 'unavailable')
+                    return false;
+                  const attested = sources(detail).find((t) => t.key === key);
+                  return (
+                    typeof attested?.sourceIdentity === 'string' &&
+                    !!attested.sourceIdentity &&
+                    attested.candidates.some(
+                      (address) => candidateDigest([address]) === candidateDigest([url])
+                    )
+                  );
+                },
+                fetchRange: (range) =>
+                  downloads.fetchSourceMedia(url, { signal, headers: { Range: range } }, guard)
+              });
+              if (mime) {
+                selected = true;
+                result.mime = mime;
+                return result;
+              }
             }
+            lastStatus = result.status;
+          } finally {
+            if (!selected) await result.body?.cancel().catch(() => {});
           }
-          lastStatus = result.status;
-          await result.body?.cancel();
         }
       }
       upstream = await fetchCandidates(target);

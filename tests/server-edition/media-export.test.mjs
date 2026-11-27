@@ -48,7 +48,7 @@ const keypair = selfsigned.generate([{ name: 'commonName', value: 'localhost' }]
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t, { audioBytes = music } = {}) {
+async function fixture(t, { audioBytes = music, readDetail } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-media-'));
   const volume = path.join(root, 'volume'),
     profile = path.join(root, 'profile'),
@@ -58,11 +58,17 @@ async function fixture(t, { audioBytes = music } = {}) {
     source = {
       account: () => ({ uid: '42' }),
       recover: async () => null,
-      readDownloadDetail: async ({ workId }) => ({
-        id: workId,
-        music: { id: '98', title: '新版合成配乐' },
-        audioSourceHints: { workId, music: { id: '98' }, sources: [{ kind: 'work', urls: [base + 'audio'] }] }
-      })
+      readDownloadDetail:
+        readDetail ??
+        (async ({ workId }) => ({
+          id: workId,
+          music: { id: '98', title: '新版合成配乐' },
+          audioSourceHints: {
+            workId,
+            music: { id: '98' },
+            sources: [{ kind: 'work', urls: [base + 'audio'] }]
+          }
+        }))
     };
   library.write((db) => {
     db.exec(
@@ -998,7 +1004,7 @@ test('large cached, streamed and unknown-length playback bounds authorization ch
   const prepared = await f.manager.prepareAudio('42', randomUUID());
   await measure(prepared.url, 'NAS archive', true);
   await measure(prepared.url, 'Windows cache', true);
-  assert.equal(sockets.size,1,'archive and cache playback reuse the same pinned check socket');
+  assert.equal(sockets.size, 1, 'archive and cache playback reuse the same pinned check socket');
   const paused = (await f.manager.protocol(new Request(prepared.url), f.client.epoch)).body.getReader();
   await paused.read();
   await new Promise((r) => setTimeout(r, 850));
@@ -1068,5 +1074,236 @@ test('an anonymous untagged octet-stream short seek derives the type and returne
   assert.equal(res.statusCode, 206);
   assert.equal(res.headers['content-type'], 'video/mp4');
   assert.deepEqual(await contents(res), mp4.subarray(400, 465));
-  assert.deepEqual(ranges, ['bytes=400-464', 'bytes=0-464']);
+  assert.deepEqual(ranges, ['bytes=400-464', 'bytes=0-' + (mp4.length - 1)]);
+});
+function fragmentedMovie() {
+  const seed = fs.readFileSync(new URL('./fixtures/synthetic-fragment.mp4', import.meta.url));
+  const start = seed.indexOf('moof') - 4,
+    end = seed.indexOf('mfra') - 4;
+  const fragment = seed.subarray(start, end),
+    sequence = fragment.indexOf('mfhd') + 8,
+    time = fragment.indexOf('tfdt') + 8;
+  const pieces = [seed.subarray(0, start)];
+  for (let i = 0; i < 600; i++) {
+    const copy = Buffer.from(fragment);
+    copy.writeUInt32BE(i + 1, sequence);
+    copy.writeBigUInt64BE(BigInt(125 * i), time);
+    pieces.push(copy);
+  }
+  return Buffer.concat(pieces);
+}
+function originRange(bytes, range, type = 'application/octet-stream') {
+  const part = parseRange(range, bytes.length);
+  return new Response(bytes.subarray(part.start, part.end + 1), {
+    status: part.status,
+    headers: {
+      'content-type': type,
+      'content-length': String(part.length),
+      ...(part.status === 206 ? { 'content-range': `bytes ${part.start}-${part.end}/${bytes.length}` } : {})
+    }
+  });
+}
+async function unarchivedVideo(f, paths) {
+  f.library.write((db) =>
+    db.prepare("UPDATE works SET body=? WHERE id='43'").run(
+      JSON.stringify({
+        type: 'video',
+        author: { uid: '42' },
+        videoUrls: paths.map((p) => base + p)
+      })
+    )
+  );
+  return (await f.client.query('work-detail', { id: '43' })).media.find((m) => m.key === 'video');
+}
+test('a fully checked moov identifies fragmented generic audio and skips an audio-only video candidate', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const audio = fs.readFileSync(new URL('./fixtures/fragmented-generic-audio.m4a', import.meta.url));
+  assert.ok(audio.toString('latin1').split('moof').length > 128);
+  f.library.write((db) =>
+    db.prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?').run(
+      JSON.stringify({
+        music: { id: '77' },
+        sources: [{ kind: 'music', urls: [base + 'remote-fragment-audio'] }]
+      }),
+      '42'
+    )
+  );
+  const calls = [];
+  f.setRemote(({ headers }, url) => {
+    const range = new Headers(headers).get('range');
+    calls.push([url, range]);
+    return originRange(url.endsWith('-audio') ? audio : mp4, range);
+  });
+  const music = (await f.client.query('work-detail', { id: '42' })).media.find((m) => m.key === 'audio');
+  const get = (item, range) =>
+    pinnedMedia(f.client.config, f.client.grant, item, { range, signal: f.client.signal() });
+  let r = await get(music);
+  assert.equal(r.headers['content-type'], 'audio/mp4');
+  assert.deepEqual(await contents(r), audio);
+  assert.deepEqual(
+    calls,
+    [[base + 'remote-fragment-audio', null]],
+    'sample fragments are not worth fetching to classify the track'
+  );
+  calls.length = 0;
+  const video = await unarchivedVideo(f, ['remote-fragment-audio', 'remote-real-video']);
+  r = await get(video);
+  assert.equal(r.headers['content-type'], 'video/mp4');
+  assert.deepEqual(await contents(r), mp4);
+  assert.deepEqual(
+    calls.map((c) => c[0]),
+    [base + 'remote-fragment-audio', base + 'remote-real-video']
+  );
+  r = await get(await unarchivedVideo(f, ['remote-fragment-audio']));
+  assert.equal(r.statusCode, 404);
+  r.resume();
+});
+test('an open-ended anonymous seek streams an authoritative multi-megabyte suffix before the origin finishes', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const bytes = fragmentedMovie();
+  assert.ok(bytes.length > 2 * 1048576);
+  const item = await unarchivedVideo(f, ['remote-normal-seek']),
+    ranges = [];
+  let release,
+    used = 0;
+  const pause = new Promise((r) => (release = r));
+  t.after(release);
+  f.setRemote(({ headers, signal }) => {
+    const range = new Headers(headers).get('range'),
+      part = parseRange(range, bytes.length);
+    ranges.push(range);
+    let at = part.start;
+    return new Response(
+      new ReadableStream({
+        async pull(controller) {
+          if (!part.start && at >= 16384) await pause;
+          if (signal.aborted) return controller.error(Error('aborted'));
+          if (at > part.end) return controller.close();
+          const end = Math.min(part.end + 1, at + 8192);
+          controller.enqueue(part.start ? Buffer.alloc(end - at) : bytes.subarray(at, end));
+          if (!part.start) used += end - at;
+          at = end;
+        }
+      }),
+      {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(part.length),
+          'content-range': `bytes ${part.start}-${part.end}/${bytes.length}`
+        }
+      }
+    );
+  });
+  const signal = AbortSignal.any([f.client.signal(), AbortSignal.timeout(8000)]);
+  try {
+    const res = await pinnedMedia(f.client.config, f.client.grant, item, { range: 'bytes=1024-', signal });
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.headers['content-range'], `bytes 1024-${bytes.length - 1}/${bytes.length}`);
+    assert.equal(Number(res.headers['content-length']), bytes.length - 1024);
+    assert.equal(res.headers['content-type'], 'video/mp4');
+    const read = res[Symbol.asyncIterator](),
+      first = await read.next();
+    assert.equal(first.done, false);
+    assert.ok(used <= 16384, 'the first output must not wait for or accumulate the entire suffix');
+    release();
+    const chunks = [first.value];
+    for await (const chunk of read) chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks), bytes.subarray(1024));
+    assert.deepEqual(ranges, ['bytes=1024-', 'bytes=0-' + (bytes.length - 1)]);
+  } finally {
+    release();
+  }
+});
+test('a distant anonymous 206 uses one sparse multipart reply or verified source metadata, and never reads the skipped megabytes', async (t) => {
+  const bytes = fragmentedMovie(),
+    start = bytes.length - 90000,
+    total = bytes.length;
+  let mode = 'multipart',
+    refreshes = 0;
+  const f = await fixture(t, {
+    readDetail: async ({ workId }) => {
+      refreshes++;
+      return {
+        id: workId,
+        type: 'video',
+        videoUrls: [base + (mode === 'foreign' ? 'unrelated' : 'remote-distant')],
+        mediaQuality: { identities: { video: 'origin-object-id' } }
+      };
+    }
+  });
+  await f.connect();
+  const item = await unarchivedVideo(f, ['remote-distant']),
+    ranges = [];
+  f.setRemote(({ headers }) => {
+    const range = new Headers(headers).get('range');
+    ranges.push(range);
+    if (range.includes(',')) {
+      if (mode !== 'multipart' && mode !== 'bad-header') return new Response(null, { status: 416 });
+      const boundary = 'controlled-boundary',
+        firstEnd = 8191;
+      const body = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Range: bytes 0-${firstEnd}/${total}\r\n\r\n`),
+        bytes.subarray(0, firstEnd + 1),
+        Buffer.from(
+          `\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes ${mode === 'bad-header' ? start + 1 : start}-${total - 1}/${total}\r\n\r\n`
+        ),
+        bytes.subarray(start),
+        Buffer.from(`\r\n--${boundary}--\r\n`)
+      ]);
+      let pos = 0;
+      return new Response(
+        new ReadableStream({
+          pull(c) {
+            if (pos === body.length) return c.close();
+            const end = Math.min(body.length, pos + 103);
+            c.enqueue(body.subarray(pos, end));
+            pos = end;
+          }
+        }),
+        {
+          status: 206,
+          headers: {
+            'content-type': 'multipart/byteranges; boundary="' + boundary + '"',
+            'content-length': String(body.length)
+          }
+        }
+      );
+    }
+    const payload = mode === 'multipart' && range.startsWith('bytes=' + start) ? Buffer.alloc(total) : bytes;
+    return originRange(payload, range);
+  });
+  const get = () =>
+    pinnedMedia(f.client.config, f.client.grant, item, {
+      range: 'bytes=' + start + '-',
+      signal: f.client.signal()
+    });
+  let res = await get();
+  assert.equal(res.statusCode, 206);
+  assert.deepEqual(await contents(res), bytes.subarray(start));
+  assert.equal(refreshes, 0);
+  assert.deepEqual(ranges, ['bytes=' + start + '-', `bytes=0-8191,${start}-${total - 1}`]);
+  mode = 'bad-header';
+  res = await get();
+  assert.equal(res.statusCode, 404);
+  res.resume();
+  assert.equal(refreshes, 0);
+  mode = 'single-range';
+  ranges.length = 0;
+  res = await get();
+  assert.equal(res.statusCode, 206);
+  assert.deepEqual(await contents(res), bytes.subarray(start));
+  assert.equal(refreshes, 1);
+  assert.ok(
+    ranges.every(
+      (r) => r.includes(',') || r.startsWith('bytes=' + start + '-') || parseRange(r, total).length <= 8192
+    )
+  );
+  mode = 'foreign';
+  res = await get();
+  assert.equal(res.statusCode, 404);
+  res.resume();
+  assert.equal(refreshes, 2);
 });
