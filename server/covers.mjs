@@ -23,8 +23,19 @@ const errors = {
 };
 const changed = () => new SourceError('NAS_FILE_REVIEW', '文件与登记不符，请重新核对。');
 
-export async function assessCover({
-  store,
+export function assessCover(options){
+  const {store,video,cover,guard}=options;
+  return assessSealedCover({...options,guard:()=>{
+    guard?.();
+    store.layout.assertCurrent();
+    for(const asset of [video,cover].filter(Boolean))
+      assertResourceCurrent({store,resource:asset,stat:lstatSync(asset.file,{bigint:true})});
+  }});
+}
+
+// The helper pins and verifies each exact size and SHA-256 before decoding. Formal
+// callers also validate their registration above; sealed legacy inputs have no such row yet.
+export async function assessSealedCover({
   video,
   cover,
   signal,
@@ -37,9 +48,6 @@ export async function assessCover({
   function check() {
     signal?.throwIfAborted();
     guard?.();
-    store.layout.assertCurrent();
-    for (const asset of [video, cover].filter(Boolean))
-      assertResourceCurrent({ store, resource: asset, stat: lstatSync(asset.file, { bigint: true }) });
   }
   const descriptor = ({ file, size, sha256 }) => ({ file, size, sha256 });
   async function call(name, request) {

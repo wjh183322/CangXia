@@ -154,7 +154,7 @@ async function headAt(file, size, position) {
 
 async function isoBoxes(file, size, signal, start = 0) {
   const boxes = new Map(),
-    mediaData = [];
+    mediaData = [], tracks=[];
   let at = start;
   let count = 0;
   while (at < size) {
@@ -174,9 +174,32 @@ async function isoBoxes(file, size, signal, start = 0) {
     const extent = { at: at + headerBytes, length: length - headerBytes };
     if (!boxes.has(type)) boxes.set(type, extent);
     if (type === 'mdat') mediaData.push(extent);
+    if(type==='trak')tracks.push(extent);
     at += length;
   }
-  return { boxes, mediaData };
+  return { boxes, mediaData, tracks };
+}
+
+async function videoResolution(file,tracks,signal){
+  let resolution;
+  for(const track of tracks){
+    const children=(await isoBoxes(file,track.at+track.length,signal,track.at)).boxes;
+    const media=children.get('mdia'),header=children.get('tkhd');
+    if(!media||!header)continue;
+    const handler=(await isoBoxes(file,media.at+media.length,signal,media.at)).boxes.get('hdlr');
+    if(!handler||handler.length<12||(await headAt(file,4,handler.at+8)).toString('ascii')!=='vide')continue;
+    const version=(await headAt(file,1,header.at))[0],offset=version===1?12:0;
+    if(version>1||header.length<84+offset)throw formatError();
+    const values=await headAt(file,44,header.at+40+offset);
+    let width=values.readUInt32BE(36)/65536,height=values.readUInt32BE(40)/65536;
+    if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<=0||height<=0)throw formatError();
+    if(values.readInt32BE(0)===0&&Math.abs(values.readInt32BE(4))===65536&&Math.abs(values.readInt32BE(12))===65536&&values.readInt32BE(16)===0)
+      [width,height]=[height,width];
+    if(resolution&&(width!==resolution.width||height!==resolution.height))throw formatError();
+    resolution={width,height};
+  }
+  if(!resolution)throw formatError();
+  return resolution;
 }
 
 async function verifyPng(file, size, signal) {
@@ -212,7 +235,7 @@ async function verifyPng(file, size, signal) {
   throw formatError();
 }
 
-export async function verifyFormat(asset, mime, signal) {
+export async function verifyFormat(asset, mime, signal, {measureVideo=false}={}) {
   signal.throwIfAborted();
   const { file, size } = asset;
   if (size < 16) throw formatError();
@@ -232,10 +255,12 @@ export async function verifyFormat(asset, mime, signal) {
         mime === 'video/mp4' &&
         movie?.length &&
         boxes.get('mdat')?.length > 0 &&
-        brands.some((value) => /^(?:iso[m2-9]|mp4[12]|avc1|M4V |dash)$/.test(value)) &&
-        (await isoBoxes(handle, movie.at + movie.length, signal, movie.at)).boxes.get('trak')?.length > 0
-      )
-        return {};
+        brands.some((value) => /^(?:iso[m2-9]|mp4[12]|avc1|M4V |dash)$/.test(value))
+      ){
+        const {tracks}=await isoBoxes(handle,movie.at+movie.length,signal,movie.at);
+        if(!tracks.some(t=>t.length>0))throw formatError();
+        return measureVideo?await videoResolution(handle,tracks,signal):{};
+      }
       if (
         mime === 'image/avif' &&
         brands.some((value) => /^avi[fs]$/.test(value)) &&
@@ -364,6 +389,7 @@ function downloadPage(db, { tab = 'active', page = 1 } = {}, audioOnly=false) {
 }
 function queueState(db,audioOnly=false) {
   const opts = db.prepare('SELECT * FROM download_options').get();
+  const batches=batchList(db,audioOnly);
   const family = audioOnly?"j.id LIKE 'audio:%' AND ":"";
   const rows = db
     .prepare(
@@ -385,8 +411,8 @@ function queueState(db,audioOnly=false) {
   }
   return {
     summary: true,
-    batches:batchList(db,audioOnly),
-    paused: audioOnly?rows.some(r=>['paused','pausing'].includes(r.state)):!!opts.paused,
+    batches,
+    paused: audioOnly?(batches.some(b=>b.state==='paused')||rows.some(r=>['paused','pausing'].includes(r.state))):!!opts.paused,
     revision: opts.revision,
     concurrency: opts.concurrency,
     counts,

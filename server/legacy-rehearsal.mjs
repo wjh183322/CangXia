@@ -13,6 +13,8 @@ import { normalizeScope, validateScopeCommand } from '../shared/backup-scopes.mj
 import { memberScopeKey, pastMemberDeletes, earlierMemberDelete } from './legacy-deletion-evidence.mjs';
 import { child, readCopy, segment, digest } from './rehearsal-files.mjs';
 import {verifyFormat} from './downloads.mjs';
+import {comparableResolution} from '../electron/hd-cover.mjs';
+import {assessSealedCover} from './covers.mjs';
 
 const pick = (value, fields) =>
   Object.fromEntries(
@@ -963,7 +965,8 @@ export async function reconcile(sources, uid) {
       const attested=await verifiedLegacyCover(group,claims,sources);
       const asset=group.get(attested.nativeKey);
       asset.key=attested.nativeKey==='cover'?'cover':'cover-hd';
-      asset.hdCover={accepted:true,key:asset.key,source:attested.source,width:attested.width,height:attested.height,sha256:asset.sha256};
+      asset.hdCover={accepted:true,status:'ready',key:asset.key,source:attested.source,width:attested.width,height:attested.height,
+        videoWidth:attested.videoWidth,videoHeight:attested.videoHeight,sha256:asset.sha256};
     }catch{
       issue('合并','hdCover',id,'旧端高清选择与同次归档的原视频、参考图、输出字节或作品信息不一致，保留原件供核对');
     }
@@ -1003,8 +1006,8 @@ async function verifiedLegacyCover(assets,claims,sources){
   check(chosen && (hd.key==='cover'||chosen.legacyCoverKey===hd.key));
   const signal=new AbortController().signal;
   const mime={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.avif':'image/avif','.webp':'image/webp'};
-  const verify=(a,type)=>verifyFormat({file:pathOf(a),size:a.size},type,signal);
-  await verify(video,'video/mp4');
+  const verify=(a,type,options)=>verifyFormat({file:pathOf(a),size:a.size},type,signal,options);
+  const resolution=await verify(video,'video/mp4',{measureVideo:true});
   const dims=await verify(chosen,mime[path.extname(chosen.relative).toLowerCase()]);
   if(reference&&chosen!==reference)await verify(reference,mime[path.extname(reference.relative).toLowerCase()]);
   check(dims.width===hd.width&&dims.height===hd.height && contentHash(json.hdCover)===contentHash(hd));
@@ -1020,7 +1023,16 @@ async function verifiedLegacyCover(assets,claims,sources){
         contentHash(record.match??null)===contentHash(hd.match??null) && contentHash(item.match??null)===contentHash(hd.match??null));
     }
   }
-  if(hd.source==='video_frame')check(reference && Number.isSafeInteger(hd.match?.frame)&&hd.match.frame>=0 &&
-    Number.isFinite(hd.match.seconds) && Number.isFinite(hd.match.correlation));
-  return {nativeKey:hd.key,source:hd.source,width:dims.width,height:dims.height};
+  if(hd.source==='video_frame'){
+    check(reference && hd.match?.videoWidth===resolution.width && hd.match.videoHeight===resolution.height);
+    const descriptor=a=>({file:pathOf(a),size:a.size,sha256:a.sha256});
+    const reproduced=await assessSealedCover({video:descriptor(video),cover:descriptor(reference),signal,
+      python:process.env.CANGXIA_TEST_COVER_PYTHON||undefined,publish:bytes=>({sha256:digest(bytes)})});
+    check(reproduced.accepted && reproduced.source==='video_frame' && reproduced.sha256===chosen.sha256 &&
+      reproduced.frame===hd.match.frame && contentHash(reproduced.crop)===contentHash(hd.match.crop));
+  }else{
+    check(comparableResolution(dims,resolution));
+    if(hd.videoWidth||hd.videoHeight)check(hd.videoWidth===resolution.width&&hd.videoHeight===resolution.height);
+  }
+  return {nativeKey:hd.key,source:hd.source,width:dims.width,height:dims.height,videoWidth:resolution.width,videoHeight:resolution.height};
 }

@@ -190,4 +190,3 @@ export function installDownloadStatus(db) {
   });
   installed.add(db);
 }
-

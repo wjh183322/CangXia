@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import { createHash, X509Certificate, randomUUID } from 'node:crypto';
 import { ScopeState } from '../../backup-server/scope-state.mjs';
 import { checkLinuxMountTrees } from '../../server/rehearsal-files.mjs';
@@ -42,6 +44,46 @@ const work = (id) => ({
   coAuthors: []
 });
 const imageDigest = 'sha256:' + 'a'.repeat(64);
+test('native matched-frame migration reproduces the selected pixels from the actual video and reference',
+  {skip:!process.env.CANGXIA_TEST_COVER_PYTHON&&'requires pinned OpenCV runtime'}, async t=>{
+    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'cx-native-frames-'));
+    t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
+    const golden=path.join(temp,'golden'),win=path.join(temp,'windows');
+    fs.mkdirSync(golden);fs.mkdirSync(win);
+    execFileSync(process.env.CANGXIA_TEST_COVER_PYTHON,['-I',fileURLToPath(new URL('./fixtures/archive-cover.py',import.meta.url)),golden],{windowsHide:true});
+    const {frame,seconds,correlation,crop,width,height,videoWidth,videoHeight}=JSON.parse(fs.readFileSync(path.join(golden,'golden.json')));
+    const match={frame,seconds,correlation,crop,videoWidth,videoHeight};
+    const store=await Store.open(path.join(win,'library.sqlite'),path.join(win,'archive'));
+    const target=path.join(temp,'imported'),uid='42';
+    try{
+      const queue=new DownloadQueue(store,{},undefined,()=>{}),publisher=new HDCover({store});
+      store.setSetting('account',{uid});
+      for(const id of ['71','72']){
+        const w=work(id),home={kind:'collection',id:'__all__',folder:'收藏',workFolder:id};
+        const dir=path.join(win,'archive','收藏',id);
+        fs.mkdirSync(dir,{recursive:true});
+        const d={id,collectionId:'__all__',home,path:dir,state:'complete',assets:[]};
+        for(const [key,file,kind] of [['video','video.mp4','video'],['cover','reference.png','image']]){
+          const bytes=fs.readFileSync(path.join(golden,file));fs.writeFileSync(path.join(dir,file),bytes);
+          d.assets.push({key,file,kind,sha256:hash(bytes),size:bytes.length});
+        }
+        const candidate=path.join(golden,id==='71'?'desktop.png':'wrong.png');
+        const size=imageDimensions(fs.readFileSync(candidate));
+        publisher.publish(d,{kind:'image',source:'video_frame',...size,match},candidate,new AbortController().signal);
+        queue.saveMetadata(w,d);store.put('works',id,w);store.put('downloads',id,d);
+      }
+      const args={uid,target,imageDigest,sources:[await sealSource({kind:'windows',directory:win,database:'library.sqlite'})]};
+      const pre=await previewImport(args);
+      assert.ok(pre.conflicts.some(c=>c.type==='hdCover'&&c.key==='72'));
+      const imported=await importApproved({...args,previewId:pre.previewId,approval:{uid,target,previewId:pre.previewId,confirmed:true}});
+      const lib=openLibrary({root:target,expectedId:imported.libraryId});
+      try{
+        const selected=lib.read(db=>catalogueDetail(db,{id:'71'}).hdCover);
+        assert.deepEqual([selected?.source,selected?.width,selected?.height,selected?.sha256],['video_frame',width,height,hash(fs.readFileSync(path.join(golden,'desktop.png')))]);
+        assert.equal(lib.read(db=>catalogueDetail(db,{id:'72'}).hdCover),null);
+      }finally{lib.close();}
+    }finally{store.close();}
+});
 test('Linux mount extents include bind-mounted reports and nested sources before any report can be written', () => {
   const normal = '1 0 8:1 / / rw - ext4 /dev/test rw';
   const bind = (backing, at) => '2 1 8:1 ' + backing + ' ' + at + ' rw - ext4 /dev/test rw';
@@ -1187,6 +1229,7 @@ test('native cover-only failure retains archived video and projects safe diagnos
       assert.equal(detail.mediaCover.resourceId,'17:cover-hd');
       assert.equal(detail.hdCover.sha256,hash(fs.readFileSync(new URL('../../assets/icon.png',import.meta.url))));
       assert.equal(lib.read(db=>catalogueDetail(db,{id:'18'})).hdCover,null);
+      assert.equal(lib.read(db=>catalogueDetail(db,{id:'14'})).hdCover,null);
       assert.equal(JSON.parse(info('17')).hdCover.key,originalHD);
       assert.equal(info('17'),fs.readFileSync(path.join(media,'收藏','旧作品17','作品信息.json'),'utf8'));
       assert.ok(pre.conflicts.some(c=>c.type==='hdCover'&&c.key==='18'));
