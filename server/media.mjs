@@ -322,6 +322,15 @@ function responseSpan(result, range) {
     return null;
   return { ...expected, total };
 }
+// Only a strong entity tag or a whole-representation digest can bind bytes
+// from two requests. A platform media ID can cover multiple encodings.
+function representationValidator(headers) {
+  const etag = headers.get('etag');
+  if (/^"[\x21\x23-\x7e\x80-\xff]+"$/.test(etag || '')) return etag;
+  const digest = headers.get('repr-digest');
+  if (/^(?:sha-256=:[A-Za-z0-9+/]{43}=:|sha-512=:[A-Za-z0-9+/]{86}==:)$/.test(digest || '')) return digest;
+  return null;
+}
 function matchingObject(result, probe, span, requested) {
   const part = responseSpan(probe, requested);
   if (
@@ -433,7 +442,6 @@ async function matchingTracks(result, span, fetchRange, kind) {
 // multipart reply carries the metadata and distant span together. Near the start
 // a single contiguous reply is cheaper; only the bounded leading bytes are skipped.
 const anonymousSkipLimit = 64 * 1024;
-const unsupportedMulti = Symbol('origin does not serve multipart ranges');
 function rangeReader(body) {
   const reader = body.getReader();
   let buffered = Buffer.alloc(0),
@@ -545,7 +553,6 @@ async function anonymousBody(result, item, span, fetchRange) {
         /^multipart\/byteranges\s*;\s*boundary=(?:"([A-Za-z0-9'()+_,.\/:=? -]{1,70})"|([A-Za-z0-9._+-]{1,70}))\s*$/i.exec(
           probe.headers.get('content-type') || ''
         );
-      if (!match && [200, 206, 400, 405, 416].includes(probe.status)) return unsupportedMulti;
       if (probe.status !== 206 || !match) return null;
       boundary = match[1] || match[2];
     } else {
@@ -565,6 +572,11 @@ async function anonymousBody(result, item, span, fetchRange) {
       leading = prefix.subarray(span.start);
     } else await r.exact(span.start - prefixSize);
     result.isoPrefix = prefix;
+    // The replacement carries the selected payload, including its own entity tag.
+    const headers = new Headers(result.headers);
+    headers.delete('etag');
+    if (probe.headers.has('etag')) headers.set('etag', probe.headers.get('etag'));
+    result.headers = headers;
     await result.body.cancel();
     result.body = r.stream(span.length, leading, boundary);
     handed = true;
@@ -579,66 +591,43 @@ async function anonymousBody(result, item, span, fetchRange) {
     }
   }
 }
-async function sourceMime({ result, item, range, head, fetchRange, sourceIdentity, verifyOrigin, proofs }) {
+async function sourceMime({ result, item, range, head, fetchRange, proofs }) {
   const declared = (result.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (declared && declared !== 'application/octet-stream' && !mimeTypes[item.kind].test(declared))
     return null;
   const span = responseSpan(result, range);
   if (!span) return null;
-  const etag = result.headers.get('etag'),
-    strong = /^"[^"]+"$/.test(etag || '');
-  const key = strong && JSON.stringify([item.resourceId, item.version, result.url, etag, span.total]);
+  const validator = representationValidator(result.headers);
+  const key =
+    validator &&
+    JSON.stringify([item.resourceId, item.version, result.url, span.total, validator, result.headers.get('repr-digest')]);
   if (key && proofs.has(key) && (head || span.start > 0 || span.end < prefixLimit - 1))
     return proofs.get(key);
-  let mime,
-    corroborated = strong || !!sourceIdentity;
-  if (!head && span.start === 0 && (span.end >= prefixLimit - 1 || span.end === span.total - 1)) {
+  let mime;
+  if (span.start === 0 && (span.end >= prefixLimit - 1 || span.end === span.total - 1)) {
     mime = await sniff(result, item.kind);
-  } else {
-    // A corroborating source/version is sufficient to inspect the format for playback.
-    // A resumable export still needs a strong byte-level validator.
-    const evidence =
-      strong ||
-      sourceIdentity ||
-      /^W\/"[^"]+"$/.test(etag || '') ||
-      result.headers.get('repr-digest') ||
-      result.headers.get('last-modified');
-    const anonymous = (!declared || declared === 'application/octet-stream') && !evidence && !head;
-    let prefixNeeded = !anonymous;
-    if (anonymous) {
+    if (mime === 'generic-mp4' && !validator && span.end + 1 < Math.min(span.total, anonymousMetadata)) {
+      if (await matchingTracks(result, span, null, item.kind)) return item.kind + '/mp4';
+      // A short request at offset zero may stop before hdlr. Select its bytes
+      // from the same bounded reply that supplies the rest of the index.
       mime = await anonymousBody(result, item, span, fetchRange);
-      if (mime === unsupportedMulti) {
-        corroborated = await verifyOrigin();
-        if (!corroborated) return null;
-        prefixNeeded = true;
-      }
     }
-    if (prefixNeeded) {
-      const request = `bytes=0-${prefixLimit - 1}`,
-        probe = await fetchRange(request);
-      try {
-        const prefix = matchingObject(result, probe, span, request);
-        if (!prefix || prefix.start !== 0 || !probe.body) return null;
-        mime = await sniff(probe, item.kind);
-        if (probe.isoPrefix) result.isoPrefix = probe.isoPrefix;
-      } finally {
-        await probe.body?.cancel().catch(() => {});
-      }
-      if (mime === 'generic-mp4' && !corroborated) {
-        // Neither a declared MIME type nor a weak validator binds a separate
-        // movie index to the bytes selected for playback.
-        if (head) return null;
-        mime = await anonymousBody(result, item, span, fetchRange);
-        if (mime === unsupportedMulti) {
-          corroborated = await verifyOrigin();
-          if (!corroborated) return null;
-          mime = 'generic-mp4';
-        }
-      }
+  } else if (validator) {
+    const request = `bytes=0-${prefixLimit - 1}`,
+      probe = await fetchRange(request);
+    try {
+      const prefix = matchingObject(result, probe, span, request);
+      if (!prefix || prefix.start !== 0 || !probe.body) return null;
+      mime = await sniff(probe, item.kind);
+      if (probe.isoPrefix) result.isoPrefix = probe.isoPrefix;
+    } finally {
+      await probe.body?.cancel().catch(() => {});
     }
+  } else {
+    mime = await anonymousBody(result, item, span, fetchRange);
   }
   if (mime === 'generic-mp4')
-    mime = (await matchingTracks(result, span, corroborated ? fetchRange : null, item.kind))
+    mime = (await matchingTracks(result, span, validator ? fetchRange : null, item.kind))
       ? item.kind + '/mp4'
       : null;
   if (mime && key) {
@@ -791,9 +780,11 @@ export async function serveMedia(req, res, { downloads, session, body }) {
       let lastStatus;
       async function fetchCandidates(candidate) {
         for (const url of candidate.candidates.slice(0, 5)) {
+          // HEAD also uses this GET's headers and bounded signature inspection.
+          // The control-only session check above requires no origin request.
           const result = await downloads.fetchSourceMedia(
             url,
-            { signal, method: head ? 'HEAD' : 'GET', headers: range ? { Range: range } : {} },
+            { signal, headers: range ? { Range: range } : {} },
             guard
           );
           if (result.status === 416) return result;
@@ -806,28 +797,6 @@ export async function serveMedia(req, res, { downloads, session, body }) {
                 range,
                 head,
                 proofs: proofCache(store),
-                sourceIdentity: candidate.sourceIdentity,
-                verifyOrigin: async () => {
-                  let detail;
-                  try {
-                    detail = await downloads.readMediaDetail(workId, binding, signal);
-                  } catch (e) {
-                    if (signal.aborted || e.code === 'SOURCE_RATE_LIMITED') throw e;
-                    return false;
-                  }
-
-                  guard();
-                  if (detail?.id !== workId || detail.statusOnly || detail.remoteState === 'unavailable')
-                    return false;
-                  const attested = sources(detail).find((t) => t.key === key);
-                  return (
-                    typeof attested?.sourceIdentity === 'string' &&
-                    !!attested.sourceIdentity &&
-                    attested.candidates.some(
-                      (address) => candidateDigest([address]) === candidateDigest([url])
-                    )
-                  );
-                },
                 fetchRange: (range) =>
                   downloads.fetchSourceMedia(url, { signal, headers: { Range: range } }, guard)
               });

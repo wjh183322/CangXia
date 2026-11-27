@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { randomUUID, X509Certificate } from 'node:crypto';
+import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import selfsigned from 'selfsigned';
 import { openLibrary } from '../../server/library.mjs';
@@ -851,6 +851,11 @@ test('generic ISO audio and untagged or weakly tagged byte seeks retain the real
     assert.equal(res.headers['content-type'], 'audio/mp4');
     assert.deepEqual(await contents(res), bytes.subarray(400, 465));
   }
+  tag = null;
+  res = await get('bytes=0-127');
+  assert.equal(res.statusCode, 206);
+  assert.equal(res.headers['content-type'], 'audio/mp4');
+  assert.deepEqual(await contents(res), bytes.subarray(0, 128));
   tag = 'W/"track"';
   conflict = true;
   res = await get('bytes=400-464');
@@ -1229,7 +1234,7 @@ test('an open-ended anonymous seek streams an authoritative multi-megabyte suffi
     release();
   }
 });
-test('a distant anonymous 206 uses one sparse multipart reply or verified source metadata, and never reads the skipped megabytes', async (t) => {
+test('a distant anonymous 206 needs one sparse multipart reply even when the source attests the URL and logical ID', async (t) => {
   const bytes = fragmentedMovie(),
     start = bytes.length - 90000,
     total = bytes.length;
@@ -1241,7 +1246,7 @@ test('a distant anonymous 206 uses one sparse multipart reply or verified source
       return {
         id: workId,
         type: 'video',
-        videoUrls: [base + (mode === 'foreign' ? 'unrelated' : 'remote-distant')],
+        videoUrls: [base + 'remote-distant'],
         mediaQuality: { identities: { video: 'origin-object-id' } }
       };
     }
@@ -1296,44 +1301,34 @@ test('a distant anonymous 206 uses one sparse multipart reply or verified source
   mode = 'single-range';
   ranges.length = 0;
   res = await get();
-  assert.equal(res.statusCode, 206);
-  assert.deepEqual(await contents(res), bytes.subarray(start));
-  assert.equal(refreshes, 1);
-  assert.ok(
-    ranges.every(
-      (r) => r.includes(',') || r.startsWith('bytes=' + start + '-') || parseRange(r, total).length <= 8192
-    )
-  );
-  mode = 'foreign';
-  res = await get();
   assert.equal(res.statusCode, 404);
   res.resume();
-  assert.equal(refreshes, 2);
+  assert.deepEqual(ranges, ['bytes=' + start + '-', `bytes=0-8191,${start}-${total - 1}`]);
 });
-test('generic MP4 track reads beyond the selected response prefix require corroborated identity', async (t) => {
+function delayedIndex(name, indexOffset, total) {
+  const seed = fs.readFileSync(new URL('./fixtures/' + name, import.meta.url));
+  const head = seed.readUInt32BE(0),
+    padding = free(indexOffset - head);
+  assert.equal(seed.toString('ascii', head + 4, head + 8), 'moov');
+  return Buffer.concat([
+    seed.subarray(0, head),
+    padding,
+    seed.subarray(head),
+    free(total - seed.length - padding.length)
+  ]);
+}
+function free(size) {
+  const box = Buffer.alloc(size);
+  box.writeUInt32BE(size);
+  box.write('free', 4);
+  return box;
+}
+test('generic MP4 track reads beyond the selected response prefix require a representation validator', async (t) => {
   const indexOffset = 12 * 1024,
     total = 128 * 1024,
     distant = 96 * 1024;
-  function free(size) {
-    const box = Buffer.alloc(size);
-    box.writeUInt32BE(size);
-    box.write('free', 4);
-    return box;
-  }
-  function delayedIndex(name) {
-    const seed = fs.readFileSync(new URL('./fixtures/' + name, import.meta.url));
-    const head = seed.readUInt32BE(0),
-      padding = free(indexOffset - head);
-    assert.equal(seed.toString('ascii', head + 4, head + 8), 'moov');
-    return Buffer.concat([
-      seed.subarray(0, head),
-      padding,
-      seed.subarray(head),
-      free(total - seed.length - padding.length)
-    ]);
-  }
-  const audio = delayedIndex('fragmented-generic-audio.m4a'),
-    video = delayedIndex('synthetic-fragment.mp4');
+  const audio = delayedIndex('fragmented-generic-audio.m4a', indexOffset, total),
+    video = delayedIndex('synthetic-fragment.mp4', indexOffset, total);
   const f = await fixture(t);
   await f.connect();
   const item = await unarchivedVideo(f, ['remote-delayed-index']),
@@ -1373,4 +1368,76 @@ test('generic MP4 track reads beyond the selected response prefix require corrob
   assert.equal(res.headers['content-type'], 'video/mp4');
   assert.deepEqual(await contents(res), video.subarray(distant));
   assert.ok(ranges.includes(`bytes=${indexOffset}-${indexOffset + 8191}`));
+});
+
+test('one music ID and URL cannot bind a different equal-length MP4 track index to the selected bytes', async (t) => {
+  const total = 128 * 1024,
+    indexOffset = 12 * 1024,
+    distant = 96 * 1024;
+  const audio = delayedIndex('fragmented-generic-audio.m4a', indexOffset, total),
+    video = delayedIndex('synthetic-fragment.mp4', indexOffset, total);
+  const inline = delayedIndex('fragmented-generic-audio.m4a', 128, total);
+  inline[total - 1] = 0x42;
+  const digest = (bytes) => 'sha-256=:' + createHash('sha256').update(bytes).digest('base64') + ':';
+  const f = await fixture(t);
+  await f.connect();
+  f.library.write((db) =>
+    db.prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?').run(
+      JSON.stringify({ music: { id: '77' }, sources: [{ kind: 'music', urls: [base + 'remote-track'] }] }),
+      '42'
+    )
+  );
+  const item = (await f.client.query('work-detail', { id: '42' })).media.find((m) => m.key === 'audio');
+  const calls = [];
+  let mode;
+  f.setRemote(({ headers }) => {
+    const range = new Headers(headers).get('range');
+    calls.push(range);
+    if (range?.includes(',')) {
+      return new Response(multipartBytes(mode === 'inline' ? inline : video, distant, 'parts'), {
+        status: 206,
+        headers: { 'content-type': 'multipart/byteranges; boundary=parts' }
+      });
+    }
+    const { start } = parseRange(range, total);
+    let bytes = video;
+    if (start === indexOffset || mode === 'stable-digest') bytes = audio;
+    if (mode === 'inline' && start === 0) bytes = inline;
+    const reply = originRange(bytes, range);
+    if (mode === 'weak') reply.headers.set('etag', 'W/"same-music"');
+    if (mode === 'invalid-digest') reply.headers.set('repr-digest', 'sha-256=:AA==:');
+    if (mode === 'changed-digest' || mode === 'stable-digest') reply.headers.set('repr-digest', digest(bytes));
+    return reply;
+  });
+  const get = (range) =>
+    pinnedMedia(f.client.config, f.client.grant, item, { range, signal: f.client.signal() });
+  for (mode of ['untagged', 'weak', 'invalid-digest', 'changed-digest']) {
+    for (const start of [null, 1024, distant]) {
+      const range = start === null ? null : `bytes=${start}-`;
+      calls.length = 0;
+      const res = await get(range);
+      assert.equal(res.statusCode, 404, `${mode} at ${start}`);
+      res.resume();
+      if (mode !== 'changed-digest') assert.ok(!calls.some((r) => r?.startsWith('bytes=' + indexOffset + '-')));
+    }
+  }
+  mode = 'stable-digest';
+  calls.length = 0;
+  const res = await get(`bytes=${distant}-`);
+  assert.equal(res.statusCode, 206);
+  assert.equal(res.headers['content-type'], 'audio/mp4');
+  assert.deepEqual(await contents(res), audio.subarray(distant));
+  assert.ok(calls.includes(`bytes=${indexOffset}-${indexOffset + 8191}`));
+  mode = 'inline';
+  const head = await pinnedMedia(f.client.config, f.client.grant, item, { head: true, signal: f.client.signal() });
+  assert.equal(head.statusCode, 200);
+  assert.equal(head.headers['content-type'], 'audio/mp4');
+  assert.equal(Number(head.headers['content-length']), total);
+  assert.equal((await contents(head)).length, 0);
+  for (const start of [1024, distant]) {
+    const res = await get(`bytes=${start}-`);
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.headers['content-type'], 'audio/mp4');
+    assert.deepEqual(await contents(res), inline.subarray(start));
+  }
 });
