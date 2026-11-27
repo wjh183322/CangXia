@@ -263,7 +263,7 @@ assert.deepEqual(unverifiedMappedEntries,[]);
 
 **文件与接口**　新增 server/migration.mjs、server/recovery.mjs；修改 src/backup-ui.jsx；对照 electron/backup-analysis.mjs、deleted-downloads.mjs、device-scope-state.mjs。测试文件 `tests/server-edition/migration.test.mjs`。previewImport({sources,target}) → {counts,conflicts,requiredBytes}；importApproved({previewId,target,approval})；verifyRestore({snapshot,mediaRoot}) → {matched,missing,changed}。
 
-- [ ] 在测试文件加入 `migration` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `migration` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(unexplainedMissingRelations,0);
@@ -272,16 +272,16 @@ assert.deepEqual(sourceHashesAfter,sourceHashesBefore);
 assert.equal(badOrMissingMediaReported,true);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/migration.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。从只读一致副本读取旧 Windows、旧 NAS、恢复副本、设备删除范围与任务。报告独有归属/作品/媒体、冲突和空间，导入隔离目标，重复执行幂等；正式切换单独确认。给绿联工具提供已校验快照位置、同恢复点文件清单和归档目录。由绿联备份/还原文件，藏匣独立核对并出报告；回退前另存切换后新数据。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: migration`）。
+- [x] 运行 `node --test tests/server-edition/migration.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。从只读一致副本读取旧 Windows、旧 NAS、恢复副本、设备删除范围与任务。报告独有归属/作品/媒体、冲突和空间，导入隔离目标，重复执行幂等；正式切换单独确认。给绿联工具提供已校验快照位置、同恢复点文件清单和归档目录。由绿联备份/还原文件，藏匣独立核对并出报告；回退前另存切换后新数据。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: migration`）。
 
 ### 14．安装包、完整镜像及发布验收
 
 **文件与接口**　新增 server/Dockerfile、server/Dockerfile.dockerignore、server/compose.yaml、.github/workflows/server-edition-full.yml、docs/server-edition/release-acceptance.md；修改 package.json 的 dist、scripts 中对应打包入口。测试文件 `tests/server-edition/release.test.mjs`。Windows x64 客户端 0.4.1；linux/amd64 NAS 服务；构建输出 sourceRevision、version、digest 与兼容协议。使用项目内现有固定 Chromium/媒体依赖、镜像层审查和封面黄金样本。
 
-- [ ] 在测试文件加入 `release` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `release` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(build.version,'0.4.1');
@@ -289,10 +289,10 @@ assert.equal(composeImage,'ghcr.io/wjh183322/cangxia-server:latest');
 assert.equal(approvedRelease.latestDigest,approvedRelease.numberedDigest);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/release.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 运行 `node --test tests/server-edition/release.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
 - [ ] 接入正式入口。在新分支运行构建及隔离测试，先形成编号候选。逐页同尺寸/缩放对照，安装、拉取、更新、保卷重启、证书变化、两台 Windows 睡眠与异地链路均实测；代表性 5 万作品，记录 LAN 冷暖列表、封面、视频与混合负载。完整备份/恢复彩排包括实际媒体；确认镜像可见性和发布许可，验收通过才指向 latest。留下装机、备份、恢复与版本回退指引，分别记录未测与失败。
 - [ ] 重跑同一命令，全部断言通过；同时执行下面的候选交付检查，保留真实设备结果。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: release`）。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: release`）。
 
 ## 完整交付核对
 
