@@ -1,5 +1,5 @@
 // Launched only by the Windows integration test, using its private temporary profile.
-import { app, BrowserWindow, powerMonitor } from 'electron';
+import { app, BrowserWindow, powerMonitor, shell } from 'electron';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -72,6 +72,27 @@ app.whenReady().then(async () => {
     await waitFor(() => js(win, 'document.body.innerText.includes("释放使用权")'));
     assert.equal((await js(win, 'window.cangxia.state()')).storage.mode, 'server');
     assert.equal(await js(win, 'window.cangxia.windowRole'), 'library');
+    await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
+    const clickText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.includes(${JSON.stringify(label)})).click()`);
+    await clickText('全部结果全选');
+    await waitFor(()=>js(win,"document.querySelector('.selection-dock')?.textContent.includes('42')"));
+    await js(win,"document.querySelector('[aria-label=顶部下一页]').click()");
+    await waitFor(()=>js(win,"!!document.querySelector('[data-work-id=\"9007199254740993143\"]')"));
+    await js(win,"document.querySelector('[data-work-id=\"9007199254740993143\"] .card-checkbox').click()");
+    await waitFor(()=>js(win,"document.querySelector('.selection-dock')?.textContent.includes('41')"));
+    await js(win,`document.querySelector('[data-work-id="9007199254740993143"] .cover-button').click()`);
+    await waitFor(()=>js(win,"document.querySelector('.detail-type')?.textContent.includes('9007199254740993143')"));
+    let original;
+    shell.openExternal=async url=>{original=url;};
+    await js(win,"window.cangxia.openOriginal('9007199254740993143')");
+    assert.equal(original,'https://www.douyin.com/note/9007199254740993143');
+    await js(win,"window.cangxia.openOriginal('9007199254740993999')");
+    assert.equal(original,'https://www.douyin.com/video/9007199254740993999');
+    await js(win,"document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await waitFor(()=>js(win,"!document.querySelector('.detail-type')"));
+    assert.equal(await js(win,"document.querySelector('[aria-label=顶部跳转页码]').value"),'2');
+    await clickText('全部作品');
+    await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('44')"));
     const receipt = await js(win, "window.cangxia.setTags('99',['fixture-tag'],0)");
     assert.equal(receipt.entityVersion, 1);
     await js(win, `document.querySelector('button[aria-label="设置"]').click()`);

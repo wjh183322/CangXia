@@ -1,3 +1,4 @@
+import {registerCatalogueHandlers} from './server-ipc.mjs';
 import { app, BrowserWindow, ipcMain, powerMonitor, safeStorage, screen,shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -186,6 +187,7 @@ app
     ipc('serverRelease', 'workspace', () => client.release());
     ipc('serverReceipt', 'workspace', (id) => client.receipt(id));
     ipc('serverCommand', 'workspace', (command) => client.command(command));
+    registerCatalogueHandlers({ipc,client});
     registerReadHandlers({ipc,client,openExternal:url=>shell.openExternal(url),notify:value=>{
       if(alive(workspace)&&client.state().owned)workspace.webContents.send('cangxia:change',value);
     }});

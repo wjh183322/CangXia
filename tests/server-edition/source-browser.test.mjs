@@ -402,7 +402,7 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6, 7])
+for (const version of [3, 4, 5, 6, 7, 8])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
     const {
@@ -414,7 +414,7 @@ for (const version of [3, 4, 5, 6, 7])
       upgradeV3,
       upgradeV4,
       upgradeV5,
-      upgradeV6
+      upgradeV6,upgradeV7
     } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -437,8 +437,9 @@ for (const version of [3, 4, 5, 6, 7])
     }
     if (version >= 5) db.exec(upgradeV4);
     if (version >= 6) db.exec(upgradeV5);
+    if (version>=7)db.exec(upgradeV6);
+    if (version>=8)db.exec(upgradeV7);
     if (version === 7) {
-      db.exec(upgradeV6);
       db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
       db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();
       for (const [index, id] of ['MS4wLjABlegacy001', 'MS4wLjABlegacy002', '78'].entries()) {
@@ -484,7 +485,7 @@ for (const version of [3, 4, 5, 6, 7])
     const preview = inspectUpgrade(root, expectedId);
     assert.equal(preview.state, 'migration-required');
     assert.equal(preview.from, version);
-    if (version === 7) assert.equal(preview.to, 8);
+    assert.equal(preview.to, CURRENT_SCHEMA);
     assert.deepEqual(fs.readFileSync(file), bytes);
     const approval = {
       from: version,

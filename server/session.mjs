@@ -1,9 +1,10 @@
+import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection} from './catalogue.mjs';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
 import { createReadJobs, readState } from './read-jobs.mjs';
 import { historyRuns, historyItems, jobSummary } from './read-history.mjs';
-import { boundIdentity, readWorkDetail, createSourceOperations } from './read-sources.mjs';
+import { boundIdentity, createSourceOperations } from './read-sources.mjs';
 import { createReadStore } from './read-store.mjs';
 import { failure } from './service-error.mjs';
 import { removeMembership } from './memberships.mjs';
@@ -41,7 +42,7 @@ function setTags(db, { payload, entityVersion }) {
     typeof id !== 'string' ||
     !Array.isArray(tags) ||
     tags.length > 100 ||
-    tags.some((x) => typeof x !== 'string' || !x.trim() || x.length > 128)
+    tags.some((x) => typeof x !== 'string' || !x.trim() || x.length > 80)
   )
     throw invalid();
   if (!db.prepare('SELECT 1 FROM works WHERE id=?').get(id))
@@ -51,7 +52,7 @@ function setTags(db, { payload, entityVersion }) {
   if (version !== entityVersion) throw failure(409, 'STALE_ENTITY', '作品标签已更新，请重新读取。');
   db.prepare('DELETE FROM work_tags WHERE work_id=?').run(id);
   const add = db.prepare('INSERT INTO work_tags VALUES (?,?)');
-  for (const tag of new Set(tags)) add.run(id, tag);
+  for (const tag of new Set(tags.map(t=>t.trim().replace(/^#/,'')).filter(Boolean))) add.run(id, tag);
   db.prepare('INSERT OR REPLACE INTO entity_versions VALUES (?,?)').run(entity, version + 1);
   return { id, entityVersion: version + 1 };
 }
@@ -60,6 +61,9 @@ function initialState(db) {
   return {
     version: serverIdentity.version,
     works: [],
+    libraryRevision: catalogueRevision(db),
+    contentRevision: catalogueRevision(db),
+    mediaCount:db.prepare("SELECT count(DISTINCT work_id) AS n FROM media_files WHERE lower(relative_path) NOT LIKE '%.json'").get().n,
     collections: [{ id: '__all__', name: '收藏', added: true, count }],
     members: { __all__: [] },
     queue: { jobs: [], paused: false },
@@ -75,6 +79,7 @@ export function createSessionService({
   source,
   readDelay,
   commands = {},
+  catalogueActions = {},
   queries = {}
 }) {
   const bootId = randomUUID(),
@@ -107,6 +112,12 @@ export function createSessionService({
         return { added: true };
       },
       'set-tags': setTags,
+      'catalogue-action': (db,command,owner)=>{
+        const {action,selection}=command.payload;
+        const ids=confirmedSelection(db,selection,owner,{collect:true});
+        if(!Object.hasOwn(catalogueActions,action))throw failure(409,'ACTION_UNAVAILABLE','当前服务尚未启用此操作，未处理任何作品。');
+        return catalogueActions[action](db,ids,{...owner,selection,operationId:command.operationId});
+      },
       'remove-membership': (db, { payload, entityVersion }) => {
         if (Object.keys(payload).some((key) => !['source', 'workId'].includes(key))) throw invalid();
         return removeMembership(db, { ...payload, expectedVersion: entityVersion });
@@ -116,7 +127,11 @@ export function createSessionService({
   );
   const reads = new Map(
     Object.entries({
-      'work-detail': readWorkDetail,
+      'work-detail': catalogueDetail,
+      'list-works': listWorks,
+      'catalogue-position': cataloguePosition,
+      'catalogue-choices': catalogueChoices,
+      'resolve-selection': confirmedSelection,
       'read-job': (db, { jobId }) => jobSummary(db, jobId),
       'history-runs': historyRuns,
       'history-items': historyItems,

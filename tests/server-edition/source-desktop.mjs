@@ -210,10 +210,9 @@ app.whenReady().then(async () => {
     await waitFor(() =>
       js(
         win,
-        "!document.querySelector('.read-history-dialog')||document.body.innerText.includes('此作品已不在原列表')"
+        `!document.querySelector('.read-history-dialog')&&!!document.querySelector('[data-work-id="9200"].located')`
       )
     );
-    if (await js(win, "!!document.querySelector('.read-history-dialog')")) await click('关闭');
     await click('读取作者作品');
     await click('继续读到末尾');
     await waitFor(() => js(win, "document.querySelector('.read-result h3')?.textContent==='本轮读取完成'"));

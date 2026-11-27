@@ -18,6 +18,7 @@ import {
   upgradeV5,
   upgradeV6,
   upgradeV7,
+  upgradeV8,
   verifyIdentity,
   writeDurably
 } from './library.mjs';
@@ -238,7 +239,8 @@ export async function applyUpgrade(input) {
     if (from <= 4) writer.exec(upgradeV4);
     if (from <= 5) writer.exec(upgradeV5);
     if (from <= 6) writer.exec(upgradeV6);
-    writer.exec(upgradeV7);
+    if (from <= 7) writer.exec(upgradeV7);
+    writer.exec(upgradeV8);
     writer.exec(`PRAGMA user_version=${CURRENT_SCHEMA}`);
     if (verifyIdentity(writer, expectedId) !== to) throw Error('Upgraded schema failed verification.');
     writer

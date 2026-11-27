@@ -170,11 +170,36 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     if (result.readSummary.outcome !== 'imported') throw Error(result.collector.message);
     return source.id;
   });
+  let creatorRefresh;
+  handle('refreshWorkCreators',async id=>{
+    if(creatorRefresh)throw Error('已有作者信息更新正在进行。');
+    if(!await client.query('work-detail',{id}))throw Error('找不到作品。');
+    const task={id,epoch:client.epoch,stopped:false};creatorRefresh=task;
+    try{
+      const receipt=await startRead({source:{kind:'link',id},mode:'full'});
+      task.jobId=receipt.jobId;
+      if(task.stopped)await controlRead({action:'stop',jobId:task.jobId});
+      const result=await waitRead(receipt);
+      if(result.readSummary.outcome!=='imported')throw Error(result.collector.message||'未取得作者信息。');
+      if(task.stopped)throw Error('作者信息更新已停止。');
+      task.profiles=true;
+      const refreshed=await sourceOperation('creator-profiles',{id});
+      await state();
+      return refreshed;
+    }finally{if(creatorRefresh===task)creatorRefresh=null;}
+  });
+  handle('stopWorkCreators',async id=>{
+    const task=creatorRefresh;if(!task||task.id!==id||task.epoch!==client.epoch)return false;
+    task.stopped=true;
+    if(task.profiles&&activeSource){activeSource.stopped=true;await client.call('source/stop',{operationId:activeSource.id});}
+    else if(task.jobId)await controlRead({action:'stop',jobId:task.jobId});return true;
+  });
   handle('workDetail', (id) => client.query('work-detail', { id }));
   handle('openOriginal', async (id) => {
     if (typeof id !== 'string' || !/^\d{1,40}$/.test(id) || !/[1-9]/.test(id)) throw Error('作品 ID 无效。');
     const stored = await client.query('work-detail', { id });
-    let target = 'https://www.douyin.com/video/' + id;
+    if(stored?.invalidOriginal)throw Error('原作品链接与所选 ID 不符。');
+    let target = 'https://www.douyin.com/'+(stored?.type==='images'?'note':'video')+'/'+id;
     if (stored?.url) {
       let url;
       try {

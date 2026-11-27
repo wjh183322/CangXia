@@ -96,6 +96,7 @@ export function createHttpsService(options) {
           case '/v1/source/stop':
           case '/v1/source/folders':
           case '/v1/source/author':
+          case '/v1/source/creator-profiles':
           case '/v1/source/resolve-work': {
             result = await sessions.sourceOperation(who, body.grant, req.url.split('/').pop(), body);
             break;

@@ -1,3 +1,5 @@
+import {workCreators,sameCreator} from '../shared/creators.mjs';
+import {saveWorks} from './read-store.mjs';
 import { randomUUID } from 'node:crypto';
 import { isUuid } from './library.mjs';
 import { abortable } from '../electron/browser-api.mjs';
@@ -35,19 +37,29 @@ export function readWorkDetail(db, { id }) {
     'type',
     'publishedAt',
     'duration',
-    'url',
     'author',
     'coAuthors',
     'coAuthorsState',
     'creatorsCheckedAt',
-    'sourceStatus',
     'remoteState',
     'checkedAt'
   ])
     if (work[key] !== undefined) metadata[key] = work[key];
+  if (work.url) {
+    try {
+      const url=new URL(work.url);
+      const match=url.pathname.match(/^\/(video|note|slides)\/(\d{1,40})\/?$/);
+      if(url.protocol!=='https:'||url.port||url.username||url.password||!['douyin.com','www.douyin.com'].includes(url.hostname)||match?.[2]!==id)throw Error();
+      metadata.url=url.origin+url.pathname;
+    }catch{metadata.invalidOriginal=true;}
+  }
+  if(work.sourceStatus){
+    const {state,reason,checkedAt}=work.sourceStatus;
+    metadata.sourceStatus={state,reason,checkedAt};
+  }
   if (work.music) {
     const { id, title, author, duration, state, clip, mixPending } = work.music;
-    metadata.music = { id, title, author, duration, state, clip, mixPending };
+    metadata.music = { id, title, author, duration, state, mixPending, ...(clip?{clip:{begin:clip.begin,end:clip.end,volume:clip.volume,unit:clip.unit}}:{}) };
   }
   return metadata;
 }
@@ -175,7 +187,7 @@ export function createSourceOperations() {
   const slots = new WeakMap();
   const stopped = () => failure(409, 'SOURCE_STOPPED', '来源读取已停止。');
   function begin(session, action, id) {
-    if (!['folders', 'author', 'resolve-work'].includes(action) || !isUuid(id))
+    if (!['folders', 'author', 'resolve-work','creator-profiles'].includes(action) || !isUuid(id))
       throw failure(400, 'INVALID_REQUEST', '来源操作无效。');
     if (
       slots.has(session.signal) ||
@@ -243,6 +255,27 @@ async function sourceAction(source, session, kind, payload) {
         throw failure(409, 'STALE_SOURCE_READ', '账号状态已变化。');
       return fn(db);
     });
+  if(kind==='creator-profiles'){
+    const work=session.read(db=>readWorkDetail(db,{id:payload.id}));
+    if(!work)throw failure(404,'WORK_UNKNOWN','找不到作品。');
+    const profiles=[],people=workCreators(work);
+    let attempted=0,unmatched=0;
+    for(const person of people){
+      if(!/^MS4wLjAB[A-Za-z0-9_-]{8,240}$/.test(person.secUid))continue;
+      if(attempted++)await delay(1100,undefined,{signal:session.signal});
+      const row=await source.lookupAuthor(input,'https://www.douyin.com/user/'+person.secUid);
+      const profile={uid:row.uid,secUid:row.id,nickname:row.name,uniqueId:row.uniqueId};
+      if(row.id!==person.secUid||!sameCreator(person,profile)){unmatched++;continue;}
+      profiles.push(profile);
+    }
+    return commit(db=>{
+      const current=readWorkDetail(db,{id:work.id});
+      if(!current)throw failure(404,'WORK_UNKNOWN','找不到作品。');
+      const accepted=profiles.filter(p=>workCreators(current).some(a=>sameCreator(a,p)));
+      saveWorks(db,{works:[],aux:{audioSourceHints:[],creatorProfiles:accepted}});
+      return {updated:accepted.length,message:'已核对 '+accepted.length+' 位作者'+(unmatched?'，身份不符的资料已跳过':'')};
+    });
+  }
   if (kind === 'folders') {
     const rows = await source.discoverFolders(input);
     return commit((db) => {
