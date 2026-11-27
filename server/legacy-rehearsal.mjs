@@ -997,7 +997,7 @@ async function verifiedLegacyCover(assets,claims,sources){
   const check=value=>{if(!value)throw Error('unmatched native cover');};
   const pathOf=a=>child(sources[a.from.index].directory,a.from.relative);
   const video=assets.get('video'),reference=assets.get('cover'),meta=assets.get('metadata');
-  check(video&&reference&&meta);
+  check(video&&meta);
   const json=JSON.parse(meta.metadataJSON??fs.readFileSync(pathOf(meta),'utf8'));
   const hd=claims[0].hd,chosen=assets.get(hd.key);
   check(chosen && (hd.key==='cover'||chosen.legacyCoverKey===hd.key));
@@ -1006,12 +1006,12 @@ async function verifiedLegacyCover(assets,claims,sources){
   const verify=(a,type)=>verifyFormat({file:pathOf(a),size:a.size},type,signal);
   await verify(video,'video/mp4');
   const dims=await verify(chosen,mime[path.extname(chosen.relative).toLowerCase()]);
-  if(chosen!==reference)await verify(reference,mime[path.extname(reference.relative).toLowerCase()]);
+  if(reference&&chosen!==reference)await verify(reference,mime[path.extname(reference.relative).toLowerCase()]);
   check(dims.width===hd.width&&dims.height===hd.height && contentHash(json.hdCover)===contentHash(hd));
   check(['video_frame','cover','origin_cover','cover_original_scale','platform'].includes(hd.source));
   for(const claim of claims){
     check(contentHash(claim.hd)===contentHash(hd));
-    for(const a of new Set([video,reference,chosen])){
+    for(const a of new Set([video,reference,chosen].filter(Boolean))){
       const record=claim.records.find(r=>r.key===a.key), item=json.assets.find(r=>r.key===a.key);
       check(record && item && record.sha256===a.sha256 && record.size===a.size &&
         record.file===path.posix.basename(a.relative) && item.file===record.file && item.size===record.size);
@@ -1020,7 +1020,7 @@ async function verifiedLegacyCover(assets,claims,sources){
         contentHash(record.match??null)===contentHash(hd.match??null) && contentHash(item.match??null)===contentHash(hd.match??null));
     }
   }
-  if(hd.source==='video_frame')check(Number.isSafeInteger(hd.match?.frame)&&hd.match.frame>=0 &&
+  if(hd.source==='video_frame')check(reference && Number.isSafeInteger(hd.match?.frame)&&hd.match.frame>=0 &&
     Number.isFinite(hd.match.seconds) && Number.isFinite(hd.match.correlation));
   return {nativeKey:hd.key,source:hd.source,width:dims.width,height:dims.height};
 }

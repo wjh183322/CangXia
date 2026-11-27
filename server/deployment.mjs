@@ -23,6 +23,11 @@ export function storagePaths(mountRoot, libraryChild, recycleRelative, mountInfo
   if (fs.readdirSync(mountRoot).some(name=>!allowed.has(name)) ||
       mountInfo.split('\n').some(line=>line.split(' ')[4]?.startsWith(mountRoot+'/')))
     throw Error('此挂载只能包含专用资料库与已声明的回收路径，不能包含其他目录或子挂载。');
+  for(let i=1;i<parts.length;i++){
+    const parent=directory(path.join(mountRoot,...parts.slice(0,i)));
+    if(fs.readdirSync(parent).some(name=>name!==parts[i]))
+      throw Error('回收映射的上级目录包含不属于本资料库的内容。');
+  }
   const bin = parts.length ? directory(path.join(mountRoot,...parts)) : undefined;
   return {root,bin};
 }

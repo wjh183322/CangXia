@@ -8,6 +8,7 @@ import { openLibrary } from '../../server/library.mjs';
 import { openDownloadStore } from '../../server/download-store.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { createTrashAdapter } from '../../server/trash.mjs';
+import {preserveBeforeRollback,restoreApproved} from '../../server/recovery.mjs';
 
 function fixture(t, fileHook) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-removal-'));
@@ -329,6 +330,22 @@ async function verifyTestRecycle(f) {
   f.cmd('control-trash-probe', { token: sample.token, action: 'verify', observed: true });
   await until(status, (p) => p.verified && !p.busy);
 }
+
+test('detached restore still requires reconciliation of an approved paused file deletion',async t=>{
+  const f=fixture(t),uid='42',root=path.dirname(f.layout.root);
+  f.library.write(db=>db.prepare('INSERT INTO source_account VALUES(1,?,?,NULL)').run(uid,'fixture'));
+  await verifyTestRecycle(f);
+  const sample=f.query('trash-status');
+  fs.renameSync(sample.original,path.join(f.bin,'retained-fixture-challenge.txt'));
+  const preview=f.preview('files');
+  const approved=f.cmd('confirm-removal',{token:preview.token});
+  f.cmd('control-removal',{token:approved.token,action:'pause'});
+  const proof=await preserveBeforeRollback({root,libraryId:f.library.libraryId,uid,confirmed:true,imageDigest:'sha256:'+'a'.repeat(64)});
+  assert.equal(proof.verified,true);
+  const target=path.join(path.dirname(root),'blocked-detached');
+  await assert.rejects(restoreApproved({...proof,target,uid,libraryId:f.library.libraryId,confirmed:true}),/文件操作/);
+  assert.equal(fs.existsSync(target),false);assert.ok(fs.existsSync(f.original));
+});
 
 for (const restoring of [false, true])
   for (const swappedSide of ['original', 'recycled'])

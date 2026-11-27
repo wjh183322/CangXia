@@ -317,7 +317,7 @@ function populate(db, uid, rows, assets, media) {
     if(a.hdCover){
       // All three byte identities were checked against the same native download and its metadata.
       const source=assetsByWork.get(a.work);
-      db.prepare('INSERT INTO hd_covers VALUES(?,?,?,?)').run(a.work,source.get('video'),source.get('cover'),JSON.stringify(a.hdCover));
+      db.prepare('INSERT INTO hd_covers VALUES(?,?,?,?)').run(a.work,source.get('video'),source.get('cover')??'',JSON.stringify(a.hdCover));
     }
   }
   db.prepare('UPDATE download_options SET revision=max(revision,?)').run(revision);
