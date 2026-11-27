@@ -318,7 +318,7 @@ function databaseDigest(db, ...exclude) {
   }
   return hash.digest('hex');
 }
-async function existing(target, previewId, guard) {
+export async function verifyImportedTarget(target, previewId, guard = () => {}) {
   const layout = inspectLayout(target),
     db = connect(layout);
   try {
@@ -355,7 +355,7 @@ export async function importApproved(input) {
     throw Error('需明确确认本次预览、账号与独立目标。');
   const { plan, checked, report } = await prepare(input);
   if (previewId !== report.previewId) throw Error('预览已变化，请重新核对。');
-  if (fs.existsSync(target)) return existing(target, previewId, guard);
+  if (fs.existsSync(target)) return verifyImportedTarget(target, previewId, guard);
   checkSpace(target, report.requiredBytes);
   const parent = path.dirname(target),
     scratch = path.join(parent, '.cx-' + previewId.slice(0, 32));
@@ -407,7 +407,7 @@ export async function importApproved(input) {
     stage = child(scratch, 'volume');
   try {
     lock.exec('BEGIN IMMEDIATE');
-    if (fs.existsSync(target)) return await existing(target, previewId, guard);
+    if (fs.existsSync(target)) return await verifyImportedTarget(target, previewId, guard);
     const library = openLibrary({ root: stage, expectedId: binding.libraryId }),
       layout = inspectLayout(stage, library.libraryId),
       media = path.join(layout.dir, 'media');
@@ -495,7 +495,7 @@ export async function importApproved(input) {
           db.prepare('INSERT INTO upgrade_receipts VALUES(?,?)').run(previewId, JSON.stringify(receipt));
         });
       }
-      await existing(stage, previewId, guard);
+      await verifyImportedTarget(stage, previewId, guard);
     } finally {
       library.close();
     }
@@ -508,7 +508,7 @@ export async function importApproved(input) {
       if (!fs.existsSync(target)) throw e;
     }
     syncDirectory(parent);
-    return await existing(target, previewId, guard);
+    return await verifyImportedTarget(target, previewId, guard);
   } finally {
     lock.close();
   }

@@ -372,6 +372,17 @@ async function verifyReadable(store, rows, guard, head = false) {
   }
   return { streamed, inactive };
 }
+export async function verifyRegisteredPlayback(root, libraryId) {
+  const lib = openLibrary({ root, expectedId: libraryId });
+  if (lib.state !== 'ready') throw Error('待移交的正式库版本不符。');
+  try {
+    const store = openDownloadStore({ root, library: lib });
+    try {
+      return await verifyReadable(store, store.db.prepare('SELECT * FROM archive_resources ORDER BY id').all(), () => {});
+    } finally { store.close(); }
+  } finally { lib.close(); }
+}
+
 export async function restoreApproved(input) {
   const { snapshot, mediaRoot, target, manifestSha256, libraryId, uid, confirmed, guard = () => {} } = input;
   if (confirmed !== true || !isUuid(libraryId) || !uid)

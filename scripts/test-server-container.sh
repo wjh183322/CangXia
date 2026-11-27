@@ -57,6 +57,26 @@ up
 node tests/server-edition/compose-fixture.mjs native-roundtrip "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG/identity"
 "${compose[@]}" down --timeout 20
 unset CANGXIA_LIBRARY_CHILD CANGXIA_NATIVE_RECYCLE_RELATIVE
+export CANGXIA_LIBRARY="$seed/handoff" CANGXIA_APPROVED="$seed/cutover-admin" CANGXIA_CONFIG="$seed/import-config" CANGXIA_LIBRARY_CHILD=formal
+mkdir -m 700 "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG" "$CANGXIA_APPROVED" "$seed/migration-source"
+mkdir -p "$CANGXIA_APPROVED"/{sources,manifests,restores} "$CANGXIA_CONFIG/PREPARE-IMPORTED-CANGXIA"
+node tests/server-edition/import-handoff-fixture.mjs "$seed/migration-source" "$CANGXIA_LIBRARY" "$CANGXIA_APPROVED"
+sudo chown -R "0:$CANGXIA_GID" "$CANGXIA_APPROVED"; sudo chmod -R u=rwX,g=rX,o= "$CANGXIA_APPROVED"
+refuse
+"${compose[@]}" run --rm --no-deps -T server prepare-import
+up
+node tests/server-edition/compose-fixture.mjs populated "$CANGXIA_LIBRARY/formal" "$CANGXIA_CONFIG/identity"
+"${compose[@]}" down --timeout 20
+export CANGXIA_CONFIG="$seed/config"; refuse
+export CANGXIA_LIBRARY="$seed/cutover-copy" CANGXIA_CONFIG="$seed/copy-config"
+mkdir -m 700 "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG"; mkdir "$CANGXIA_CONFIG/PREPARE-IMPORTED-CANGXIA"
+sudo sed -i 's/existing-import/from-backup/' "$CANGXIA_APPROVED/cutover.json"
+"${compose[@]}" run --rm --no-deps -T server prepare-import
+up
+node tests/server-edition/compose-fixture.mjs populated "$CANGXIA_LIBRARY/formal" "$CANGXIA_CONFIG/identity"
+"${compose[@]}" down --timeout 20
+unset CANGXIA_LIBRARY_CHILD
+export CANGXIA_APPROVED="$seed/approved"
 export CANGXIA_CONFIG="$seed/config"
 export CANGXIA_LIBRARY="$seed/library"
 # The browser/native tests run with synthetic inputs in a separate temporary library.

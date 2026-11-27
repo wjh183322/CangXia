@@ -39,6 +39,22 @@ node server/rehearsal-cli.mjs seal --kind recovery --directory D:\frozen\history
 }
 ```
 
+## 另行批准后将已导入的库交给正式服务
+
+从导入完成报告独立保存旧源、`previewId`、抖音 `uid`、新库 `libraryId`、`manifestSha256`，以及配套数据库快照和完整媒体。用绿联在独立介质上实际备份并还原到新管理员输入区的 `restores/imported/snapshot` 与 `restores/imported/media`。核实报告与原件，保留正在运行的库、原配置、恢复介质及旧端。停止两端写入，并记录地址、镜像摘要和所需回退步骤。
+
+使用**另一个停止的 Compose 项目**准备目标。指定全新的私有宿主挂载 `CANGXIA_LIBRARY`、`CANGXIA_CONFIG` 和 `CANGXIA_REHEARSAL`，三者及新管理员只读输入区 `CANGXIA_APPROVED` 须在物理目录上彼此独立，也须与旧运行库及原彩排区独立。在身份目录中只创建空文件夹 `PREPARE-IMPORTED-CANGXIA`。设置 `CANGXIA_LIBRARY_CHILD=formal`，为新客户端设置 HTTPS 地址。保留管理员输入区的 sources、manifests、restores。准备阶段使用新身份目录，后续彩排的 rehearsal.json 使用新 devices.json 中的服务账号。
+
+在管理员输入区准备 `cutover.json`，以下标记值应逐一换成同一迁移报告中的原值。
+
+```json
+{"confirmed":true,"mode":"from-backup","target":"formal","restore":"imported","uid":"来源UID","libraryId":"导入库UUID","previewId":"导入预览的64位摘要","manifestSha256":"独立备份清单的64位摘要"}
+```
+
+`from-backup` 从独立备份建立全新的 formal 子目录。须预留足量空间，并保持该子目录名尚未使用。工具重新绑定文件身份并通过正式媒体接口逐件核验。如管理员已经把完整的具名彩排目标在同一文件系统内原子移到专用挂载的 formal 子目录，可改用 `existing-import`。该模式复核原导入回执、数据库、独立备份、媒体字节和原文件身份；跨卷复制或导入后曾有新增写入的目标应改用新恢复点单独核对。
+
+在匹配的部署包目录用 `docker compose run --rm --no-deps server prepare-import` 单独准备。完成时打印核实的库 UUID 与清单摘要并退出。它为这个 UUID 单独签发证书及两份设备凭据。普通启动不接受准备标记，已有身份目录不能覆盖；中断时保留已有文件，使用另一组全新目录重做。取得本次正式开放批准后才运行 `docker compose up -d`，分机核对新指纹和设备凭据，登录新服务并验证正式列表与实际媒体播放。回退前先独立封存切换后新写入，再停止新项目并恢复原项目、原卷和原设备配置。
+
 ## 在 Windows 执行并查看报告
 
 用拥有控制权的客户端打开「设置 → NAS 连接设置 → 查看迁移彩排与恢复点」。输入未使用的目标目录名并预览。核对账号、各来源库身份、作品、人工标签、来源归属及次序、原归档目录、任务和缺失文件。翻页查看明细。历史独有项、来源冲突、设备本地隐藏、显式删除及无法确定位置/次序的资料进入候选。报告保留来源和记录标识。取消或断开控制会在核验边界停止；重新连接后可刷新报告或重复原批准。
