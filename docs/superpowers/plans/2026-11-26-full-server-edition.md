@@ -17,6 +17,8 @@
 
 任务 08–10 已通过独立审查。测试覆盖进程中断后的下载续传与登记、目录移动及高清封面恢复、正式 Windows 视频拖动、配乐、缓存锁定与平铺导出。媒体测试使用隔离服务和合成媒体；实体双机及真实异地性能仍需正式候选现场验收。
 
+任务 11–12 的实现和独立审查已完成。删除/恢复及五类维护操作经隔离测试；真实 UGOS 回收位置的厂商支持与现场还原证据仍属发布条件，未验证时保留原文件。初步入口对照中的迁移和恢复操作由任务 13 完成。
+
 ## Global Constraints
 
 - 在 `codex/server-edition-full` 开发，业务和界面对照提交 `08e6436522a3828211e9c32b51f90d7d830b4fa8`。保留 main、备份版、既有 NAS 版、试验分支及试验镜像。
@@ -225,7 +227,7 @@ assert.deepEqual(nasDownloadsAfterExport,nasDownloadsBefore);
 
 **文件与接口**　新增 server/removal.mjs、server/trash.mjs；修改 src/deletion-ui.jsx；对照 electron/deletion-coordinator.mjs、deletion-history.mjs、local-removal.mjs。测试文件 `tests/server-edition/removal.test.mjs`。previewRemoval({scope,selection,revision}) → {token,files,relations}；confirmRemoval(token,operationId)、restoreRemoval(token,operationId)；trashAdapter.trash(file)、restore(receipt)。
 
-- [ ] 在测试文件加入 `removal` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `removal` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(otherFolderHasA,true);
@@ -234,16 +236,16 @@ assert.equal(unverifiedTrash.removed,0);
 assert.equal(conflictingFileOverwritten,false);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/removal.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。关系、作品元数据、正式媒体、缓存分别处理。绑定确认范围和版本；文件操作前验证目录与身份。用正式运行身份在实际挂载上删除专用样本、从绿联回收站还原并验摘要。找不到受支持且经验证的回收路径则停止可恢复文件删除并保留原件，列为发布阻断；不能用直接 unlink 通过验收。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: removal`）。
+- [x] 运行 `node --test tests/server-edition/removal.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。关系、作品元数据、正式媒体、缓存分别处理。绑定确认范围和版本；文件操作前验证目录与身份。用正式运行身份在实际挂载上删除专用样本、从绿联回收站还原并验摘要。找不到受支持且经验证的回收路径则停止可恢复文件删除并保留原件，列为发布阻断；不能用直接 unlink 通过验收。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: removal`）。
 
 ### 12．辅助业务与完整入口对照
 
 **文件与接口**　新增 server/maintenance.mjs；修改 src/defect-repair-ui.jsx、storage-size-ui.jsx、backup-ui.jsx；对照 electron/repair-checks.mjs、defect-repair.mjs、directory-size.mjs、work-diagnostic.mjs。测试文件 `tests/server-edition/maintenance.test.mjs`。startCheck({selection,kind,operationId})、getCheckPage(query)、retryRepair(command)、exportDiagnostic({workId})；沿用任务 01 清单补齐所有剩余入口。
 
-- [ ] 在测试文件加入 `maintenance` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `maintenance` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(missingFile.workDeleted,false);
@@ -252,10 +254,10 @@ assert.equal(diagnosticLeaksSecret,false);
 assert.deepEqual(unverifiedMappedEntries,[]);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/maintenance.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。覆盖来源核对、文件状态和大小、下载失败重试、补齐选择、诊断、历史清理及启动退出。逐入口连接真实 handler 并覆盖取消、重复请求、旧结果返回、旧版对照差异；占位响应或按钮仅能点击不算完成。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: maintenance`）。
+- [x] 运行 `node --test tests/server-edition/maintenance.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。覆盖来源核对、文件状态和大小、下载失败重试、补齐选择、诊断、历史清理及启动退出。逐入口连接真实 handler 并覆盖取消、重复请求、旧结果返回、旧版对照差异；占位响应或按钮仅能点击不算完成。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: maintenance`）。
 
 ### 13．迁移彩排、快照移交与恢复核对
 
