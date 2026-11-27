@@ -1445,11 +1445,19 @@ export function createDownloads({
         const opts = db.prepare('SELECT concurrency,paused FROM download_options').get();
         const candidates = db
           .prepare(
-            `SELECT j.id,j.work_id FROM download_jobs j JOIN download_manifests m ON j.id=m.id
+            `SELECT j.id,j.work_id,
+              j.state IN ('queued','running') AND json_extract(m.body,'$.finalizationPending') IS 1 AS registration_only
+              FROM download_jobs j JOIN download_manifests m ON j.id=m.id
       WHERE j.state IN ('pausing','cancelling') OR (?=0 AND j.state IN ('queued','running')) ORDER BY m.rowid`
           )
           .all(opts.paused);
+        // Registration checks every registered file. Run this work's admitted byte repairs first.
+        const nextByWork = new Map();
         for (const row of candidates) {
+          const next = nextByWork.get(row.work_id);
+          if (!next || (next.registration_only && !row.registration_only)) nextByWork.set(row.work_id, row);
+        }
+        for (const row of nextByWork.values()) {
           if (active.size >= opts.concurrency) break;
           if (active.has(row.id) || [...active.values()].some((a) => a.workId === row.work_id)) continue;
           const controller = new AbortController(),

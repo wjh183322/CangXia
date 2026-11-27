@@ -15,6 +15,7 @@ import { createHttpsService } from '../../server/http.mjs';
 import { parseRange } from '../../server/media.mjs';
 import { ServerClient, pinnedMedia } from '../../electron/server-client.mjs';
 import { ServerMedia, mediaURL } from '../../electron/server-media.mjs';
+import { registerCatalogueHandlers } from '../../electron/server-ipc.mjs';
 
 test('single inclusive byte ranges, suffixes and invalid starts', () => {
   assert.deepEqual(parseRange('bytes=10-19', 40), { status: 206, start: 10, end: 19, length: 10 });
@@ -1602,10 +1603,11 @@ test('audio restoration recomputes only its work status, retaining independent m
   }
 });
 
-for (const failAudio of [false, true])
+for (const retryFrom of ['none', 'maintenance', 'download manager'])
   test(
-    'shared picture/audio/JSON repair settles one registration; audio failure = ' + failAudio,
+    'shared picture/audio/JSON repair settles one registration; retry from ' + retryFrom,
     async (t) => {
+      const failAudio = retryFrom !== 'none';
       let failing = false,
         record = false,
         held = false;
@@ -1676,6 +1678,8 @@ for (const failAudio of [false, true])
       assert.equal((await settled(id)).pendingJobs, 2);
       failing = failAudio;
       record = true;
+      if (retryFrom === 'download manager')
+        await cmd('control-download', { action: 'concurrency', ids: null, value: 1 });
       await cmd('control-download', { action: 'resume', ids: null });
       const deadline=setTimeout(()=>entered.reject(Error('audio scope did not start')),10000);
       try{await entered.promise;}finally{clearTimeout(deadline);}
@@ -1693,6 +1697,10 @@ for (const failAudio of [false, true])
           )
         );
         assert.deepEqual(fs.readFileSync(image), fs.readFileSync(image + '.saved'));
+        if (retryFrom === 'download manager') {
+          await cmd('enqueue-download', { workIds: ['43'], selection: 'missing' });
+          await cmd('control-download', { action: 'pause', ids: ['43'] });
+        }
       } finally {
         release.resolve();
       }
@@ -1716,17 +1724,41 @@ for (const failAudio of [false, true])
       if (failAudio) {
         assert.ok(!fs.existsSync(meta));
         assert.ok(!fs.existsSync(audio));
-        failing = false;
-        const again = await repair();
-        await f.downloads.run();
-        assert.equal((await settled(again)).items[0].fileStatus, 'complete');
+        if (retryFrom === 'download manager') {
+          const ui = {};
+          registerCatalogueHandlers({ client: f.client, ipc: (name, _role, fn) => { ui[name] = fn; } });
+          const failed = async () => (await ui.downloadPage({ tab: 'failed' })).jobs
+            .map((j) => [j.id, j.downloadState]).sort();
+          const expected = [['42', 'finalization-pending'], ['audio:42', 'failed']];
+          assert.deepEqual(await failed(), expected);
+          assert.equal((await ui.retryDownloads()).queued, 2);
+          await f.downloads.run();
+          assert.deepEqual(await failed(), expected, 'a persistent audio error must stay visible');
+          failing = false;
+          assert.equal((await ui.retryDownloads()).queued, 2);
+          await f.downloads.run();
+          assert.deepEqual(await failed(), []);
+          const states = new Map((await jobs()).jobs.map((j) => [j.id, j.downloadState]));
+          assert.equal(states.get('42'), 'complete');
+          assert.equal(states.get('audio:42'), 'complete');
+          assert.equal(states.get('43'), 'paused');
+          assert.equal((await ui.retryDownloads()).queued, 0);
+          assert.deepEqual((await settled(id)).items[0], item, 'the old repair receipt describes its own attempt');
+        } else {
+          failing = false;
+          const again = await repair();
+          await f.downloads.run();
+          assert.equal((await settled(again)).items[0].fileStatus, 'complete');
+        }
         assert.equal(
           requests.filter((x) => x === 'img0').length,
           1,
           'registration-only retry must not transfer the image again'
         );
       }
-      assert.equal(requests.filter((x) => x === 'audio').length,failAudio?2:1);
+      const audioAttempts = { none: 1, maintenance: 2, 'download manager': 3 };
+      assert.equal(requests.filter((x) => x === 'audio').length, audioAttempts[retryFrom]);
+      assert.equal(requests.filter((x) => x === 'img1' || x === 'remote').length, 0);
       assert.deepEqual(fs.readFileSync(image), fs.readFileSync(image + '.saved'));
       assert.deepEqual(fs.readFileSync(audio), fs.readFileSync(audio + '.saved'));
       const keys = JSON.parse(fs.readFileSync(meta)).assets.map((a) => a.key);
