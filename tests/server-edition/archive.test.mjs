@@ -7,6 +7,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openLibrary } from '../../server/library.mjs';
+import { saveWorks } from '../../server/read-store.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parseSourceDetail } from '../../server/source-parser.mjs';
 import { createDownloads } from '../../server/downloads.mjs';
 import { createSessionService } from '../../server/session.mjs';
@@ -266,14 +268,17 @@ test('repeated folder discovery and count-only updates perform no archive hashin
       (db) => db.prepare("SELECT revision FROM archive_state WHERE work_id='71'").get()?.revision ?? 0
     );
   const baseline = revision();
-  let wakes=0;
-  const drain=f.d.run;
-  f.d.run=()=>{wakes++;return drain();};
+  let wakes = 0;
+  const drain = f.d.run;
+  f.d.run = () => {
+    wakes++;
+    return drain();
+  };
   for (const count of [1, 1, 9]) {
     entries = [{ ...entries[0], count }];
     digests = 0;
     await f.discover();
-    assert.equal(wakes,0);
+    assert.equal(wakes, 0);
     await drain();
     assert.equal(revision(), baseline);
     assert.equal(digests, 0);
@@ -388,6 +393,11 @@ test(
       ['only-video-platform', 'reference'],
       ['only-video-frame', 'reference'],
       ['only-video-wrong', 'wrong'],
+      ['reread-disjoint', 'reference'],
+      ['reread-retained', 'reference'],
+      ['late-disjoint', 'reference'],
+      ['reread-fallback', 'reference'],
+      ['recovery-disjoint', 'reference'],
       ['parsed-upgrade', 'reference'],
       ['changed-video', 'reference'],
       ['disjoint-cover', 'reference'],
@@ -399,6 +409,7 @@ test(
       ['cancel', 'reference']
     ]) {
       const onlyVideo = mode.startsWith('only-video');
+      let late = false;
       const parsed = (extra = false, changed = false) =>
         parseSourceDetail({
           workId: '72',
@@ -413,23 +424,41 @@ test(
                 vid: changed ? 'new-video' : 'same-video',
                 play_addr: { uri: 'video-id', url_list: film.videoUrls },
                 cover: {
-                  uri: 'page-cover',
+                  uri: mode === 'reread-fallback' && extra ? 'alternate-page' : 'page-cover',
                   url_list:
-                    mode === 'disjoint-cover' && extra
+                    (mode === 'disjoint-cover' ||
+                      mode === 'reread-disjoint' ||
+                      mode === 'reread-fallback' ||
+                      late) &&
+                    extra
                       ? ['https://p3.douyinpic.com/other-page']
                       : film.coverUrls
                 },
                 ...(extra
                   ? { origin_cover: { uri: 'origin-hd', url_list: ['https://p3.douyinpic.com/hd'] } }
-                  : {})
+                  : mode === 'reread-fallback'
+                    ? { origin_cover: { uri: 'origin-hd', url_list: ['https://p3.douyinpic.com/tiny'] } }
+                    : {})
               }
             }
           })
         });
-      const realParser = ['parsed-upgrade', 'changed-video', 'disjoint-cover'].includes(mode);
+      const realParser = [
+        'parsed-upgrade',
+        'changed-video',
+        'disjoint-cover',
+        'reread-disjoint',
+        'reread-retained',
+        'late-disjoint',
+        'reread-fallback',
+        'recovery-disjoint'
+      ].includes(mode);
       const work = realParser ? parsed() : structuredClone(film);
       if (realParser)
-        assert.notEqual(parsed(true).mediaQuality.identities.cover, work.mediaQuality.identities.cover);
+        assert.equal(
+          parsed(true).mediaQuality.identities.cover === work.mediaQuality.identities.cover,
+          mode === 'reread-fallback'
+        );
       let high = false,
         repair = false,
         fetchedVideo = 0;
@@ -437,6 +466,26 @@ test(
       const f = fixture(t, work, {
         coverPython: python,
         fileHook(name, event) {
+          if (
+            mode === 'recovery-disjoint' &&
+            !intercepted &&
+            name === 'beforeFormalPlacement' &&
+            path.basename(event.file).startsWith('高清封面-')
+          ) {
+            intercepted = true;
+            throw Object.assign(Error('simulated storage interruption'), { code: 'EIO' });
+          }
+          if (
+            mode === 'late-disjoint' &&
+            !late &&
+            name === 'beforeFormalPlacement' &&
+            path.basename(event.file).startsWith('高清封面-')
+          ) {
+            late = true;
+            f.library.write((db) =>
+              saveWorks(db, { works: [parsed(true)], aux: { audioSourceHints: [], creatorProfiles: [] } })
+            );
+          }
           if (
             intercepted ||
             !['swapped', 'cancel'].includes(mode) ||
@@ -453,16 +502,18 @@ test(
           }
         },
         source: {
-          account: () => ({ uid: '42' }),
+          account: () => ({ uid: '42', authEpoch: 'fixture' }),
+          readDetail: async () => parsed(true),
           readDownloadDetail: async () =>
             realParser
               ? parsed(repair, repair && mode === 'changed-video')
               : {
                   ...work,
-                  coverUrls: high ? ['https://p3.douyinpic.com/hd'] : work.coverUrls
+                  coverUrls: high ? ['https://p3.douyinpic.com/hd', ...work.coverUrls] : work.coverUrls
                 }
         },
         fetchAsset: async (url) => {
+          if (url.endsWith('/tiny')) return new Response(small, { headers: { 'Content-Type': 'image/png' } });
           if (url.endsWith('/video')) fetchedVideo++;
           else if (onlyVideo && !repair) return new Response(null, { status: 404 });
           return new Response(
@@ -483,23 +534,81 @@ test(
         f.rows().some((r) => r.key === 'cover'),
         !onlyVideo
       );
+      if (mode.startsWith('reread-')) {
+        const { jobId } = f.command('start-read', { source: { kind: 'link', id: '72' }, mode: 'full' });
+        let job;
+        for (let n = 0; n < 600; n++) {
+          job = f.query('read-job', { jobId });
+          if (job.status === 'complete') break;
+          await delay(10);
+        }
+        assert.equal(job.status, 'complete', JSON.stringify(job));
+        const row = f.library.read((db) =>
+          JSON.parse(db.prepare("SELECT body FROM works WHERE id='72'").get().body)
+        );
+        assert.equal(row.mediaQuality.identities.cover, parsed(true).mediaQuality.identities.cover);
+        assert.equal(
+          row.coverVariants.some((v) => v.urls.includes(film.coverUrls[0])),
+          mode === 'reread-retained'
+        );
+        assert.equal(
+          digest(fs.readFileSync(f.file('cover'))),
+          digest(fs.readFileSync(path.join(files, 'reference.png')))
+        );
+      }
       repair = true;
       high = mode === 'platform' || mode === 'only-video-platform';
       const { revision, scope } = f.query('list-works', { source: 'all' });
-      const response = f.ipc.catalogueAction('repair-cover', {
-        source: 'all',
-        revision,
-        scope,
-        all: true,
-        ids: [],
-        confirmedCount: 1
-      });
+      const enqueue = () =>
+        f.ipc.catalogueAction('repair-cover', {
+          source: 'all',
+          revision,
+          scope,
+          all: true,
+          ids: [],
+          confirmedCount: 1
+        });
+      if (mode === 'reread-disjoint' || mode === 'reread-fallback') {
+        assert.throws(enqueue, (e) => e.code === 'NAS_MEDIA_SET_REVIEW');
+        assert.equal(f.query('work-detail', { id: '72' }).hdCover, null);
+        assert.equal(
+          f.rows().some((r) => r.key === 'cover-hd'),
+          false
+        );
+        continue;
+      }
+      const response = enqueue();
       assert.equal(response.queued, 1);
       await f.d.run();
+      if (mode === 'recovery-disjoint') {
+        assert.equal(f.state('hd:72').reason.code, 'EIO');
+        assert.equal(
+          f.d.store.fileCommits('72').filter((c) => c.stage === 'verified' && c.body.key === 'cover-hd')
+            .length,
+          1
+        );
+        await f.close();
+        late = true;
+        f.library.write((db) =>
+          saveWorks(db, { works: [parsed(true)], aux: { audioSourceHints: [], creatorProfiles: [] } })
+        );
+        f.start();
+        f.command('control-download', { action: 'retry', jobId: 'hd:72' });
+        await f.d.run();
+        assert.equal(
+          fs.readdirSync(path.dirname(f.file('cover'))).some((name) => name.startsWith('高清封面-')),
+          false
+        );
+      }
       const outcome = f.state('hd:72');
       assert.equal(fetchedVideo, 1);
-      if (['changed-video', 'disjoint-cover'].includes(mode)) {
+      if (['changed-video', 'disjoint-cover', 'late-disjoint', 'recovery-disjoint'].includes(mode)) {
         assert.equal(outcome.reason?.code, 'NAS_MEDIA_SET_REVIEW');
+        assert.equal(f.query('work-detail', { id: '72' }).hdCover, null);
+        assert.equal(
+          f.rows().some((r) => r.key === 'cover-hd'),
+          false
+        );
         continue;
       }
       if (['swapped', 'cancel'].includes(mode)) {

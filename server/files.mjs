@@ -955,16 +955,15 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
   return settlePlacement({ store, commit, destination, dir, staged });
 }
 
-function assetProof(store, workId, asset) {
-  return store
-    .fileCommits(workId)
-    .findLast(
-      (commit) =>
-        commit.stage === 'registered' &&
-        commit.resourceId === asset.id &&
-        commit.body.sha256 === asset.sha256 &&
-        commit.body.size === asset.size
-    )?.body;
+export function registeredAssetProof(db, workId, asset) {
+  const row = db
+    .prepare(
+      `SELECT body FROM file_commits WHERE work_id=? AND resource_id=?
+    AND stage='registered' AND json_extract(body,'$.sha256')=? AND json_extract(body,'$.size')=?
+    ORDER BY revision DESC LIMIT 1`
+    )
+    .get(workId, asset.id, asset.sha256, asset.size);
+  return row && JSON.parse(row.body);
 }
 
 function permitsResource(store, workId) {
@@ -1014,7 +1013,7 @@ export async function resolveResource({
   if (!permitsResource(store, workId)) return null;
   const row = store.resources(workId).find((asset) => asset.key === key && asset.state === 'complete');
   if (!row) return null;
-  const proof = assetProof(store, workId, row);
+  const proof = registeredAssetProof(store.db, workId, row);
   if (!proof) throw review();
   const { media } = await roots(layout);
   const located = await fileAt(media.file, row.relative_path);
@@ -1142,12 +1141,7 @@ export async function recoverFileCommits({ store, layout, workId, jobId, guard }
             (!['queued', 'running'].includes(job.state) || !store.canPublishDownload?.(commit.body.jobId))
           );
         };
-        const hdChanged =
-          commit.body.hdInputs &&
-          ['video', 'cover'].some(
-            (key) =>
-              store.resources(commit.workId).find((r) => r.key === key)?.sha256 !== commit.body.hdInputs[key]
-          );
+        const hdChanged = commit.body.hdInputs && !store.hdCommitCurrent?.(commit);
         const obsolete =
           hdChanged ||
           (commit.body.archiveRevision !== undefined &&
@@ -1159,6 +1153,8 @@ export async function recoverFileCommits({ store, layout, workId, jobId, guard }
           recoverOnly: isStopping() || obsolete,
           guard() {
             guard?.();
+            if (commit.body.hdInputs && !store.hdCommitCurrent?.(commit))
+              throw problem('NAS_MEDIA_SET_REVIEW', '归档媒体来源已变更。');
             if (
               commit.body.archiveRevision !== undefined &&
               commit.body.archiveRevision !== archiveRevision(store, commit.workId)
@@ -1194,7 +1190,7 @@ function moveInventory(store, workId, home) {
   if (rows.length !== store.db.prepare('SELECT count(*) AS n FROM media_files WHERE work_id=?').get(workId).n)
     throw review();
   return rows.map((asset) => {
-    const proof = assetProof(store, workId, asset);
+    const proof = registeredAssetProof(store.db, workId, asset);
     if (!proof || path.posix.dirname(asset.relative_path) !== homePath(home)) throw review();
     return {
       name: path.posix.basename(asset.relative_path),
@@ -1359,7 +1355,7 @@ async function writeMetadata({ store, layout, work, home, jobId, signal, guard }
       size: row.size,
       sha256: row.sha256,
       mime: row.mime,
-      ...assetProof(store, workId, row)?.dimensions
+      ...registeredAssetProof(store.db, workId, row)?.dimensions
     }))
   };
   const bytes = Buffer.from(JSON.stringify(info, null, 2), 'utf8');

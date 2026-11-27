@@ -27,6 +27,7 @@ import {
   openFileStage,
   openStagedPartial,
   recoverFileCommits,
+  registeredAssetProof,
   resolveResource,
   stageCheckpoints,
   sealTransfer,
@@ -187,6 +188,47 @@ function freeze(work, audioOnly) {
   return { expected, candidates };
 }
 
+function hdSourceProof(db, workId) {
+  const hdInputs = {},
+    hdSources = {};
+  for (const asset of db
+    .prepare("SELECT * FROM archive_resources WHERE work_id=? AND key IN ('video','cover')")
+    .all(workId)) {
+    const proof = registeredAssetProof(db, workId, asset);
+    if (!proof?.identity || !proof.mtimeNs) throw needsReview();
+    hdInputs[asset.key] = asset.sha256;
+    hdSources[asset.key] = {
+      identity: proof.resourceIdentity ?? null,
+      observation: proof.observationIdentity ?? null,
+      group: proof.group ?? null,
+      selectedIdentity: proof.selectedCoverIdentity ?? null,
+      fileIdentity: proof.identity,
+      mtimeNs: proof.mtimeNs
+    };
+  }
+  if (!hdSources.video) throw needsReview();
+  return { hdInputs, hdSources };
+}
+
+function assertHDSources(frozen, sources) {
+  for (const [key, proof] of Object.entries(sources)) {
+    const target = frozen.expected.find((item) => item.key === key);
+    if (!target) throw needsReview();
+    const urls = frozen.candidates[key];
+    if (key === 'cover') {
+      // A manifest's preferred URI can belong to a different variant than the pixel winner.
+      if (proof.group && urls.some((url) => coverObject(url) === proof.group)) continue;
+      if (target.sourceIdentity && target.identity === proof.selectedIdentity) continue;
+      if (!proof.group && proof.observation && proof.observation === candidateDigest(urls)) continue;
+    } else if (
+      target.identity === proof.identity &&
+      (target.sourceIdentity || (proof.observation && proof.observation === candidateDigest(urls)))
+    )
+      continue;
+    throw needsReview();
+  }
+}
+
 function refreshCandidates(job, work) {
   const observed = wantedResources(work, job.audioOnly);
   if (observed.length !== job.expected.length) throw needsReview();
@@ -195,18 +237,7 @@ function refreshCandidates(job, work) {
     if (candidate.key !== expected.key || candidate.kind !== expected.kind) throw needsReview();
     // The verified detail may add an original-cover URI ahead of its old page-cover URI.
     // This exception only reads candidates for HD repair. The video still has to match its frozen identity.
-    if (job.hdInputs && expected.key === 'cover') {
-      if (
-        job.hdInputs.cover &&
-        expected.sourceIdentity &&
-        candidate.sourceIdentity &&
-        expected.sourceIdentity !== candidate.sourceIdentity
-      ) {
-        const before = new Set(job.candidates.cover.map(coverObject));
-        if (!candidate.candidates.some((url) => before.has(coverObject(url)))) throw needsReview();
-      }
-      continue;
-    }
+    if (job.hdInputs && expected.key === 'cover') continue;
     if (expected.sourceIdentity && candidate.sourceIdentity) {
       if (expected.sourceIdentity !== candidate.sourceIdentity) throw needsReview();
       continue;
@@ -552,6 +583,25 @@ export function createDownloads({
   const store = openDownloadStore({ library, root, fileHook }),
     { db, layout } = store;
   const archive = createArchive(store);
+  function validateHDSource(workId, expected) {
+    const current = hdSourceProof(db, workId);
+    if (
+      contentHash(current.hdInputs) !== contentHash(expected.hdInputs) ||
+      (expected.hdSources && contentHash(current.hdSources) !== contentHash(expected.hdSources))
+    )
+      throw needsReview();
+    assertHDSources(freeze(store.work(workId), false), current.hdSources);
+    return current.hdSources;
+  }
+  store.hdCommitCurrent = (commit) => {
+    try {
+      validateHDSource(commit.workId, commit.body);
+      return true;
+    } catch (error) {
+      if (['NAS_MEDIA_SET_REVIEW', 'NAS_MEDIA_TARGET'].includes(error.code)) return false;
+      throw error;
+    }
+  };
   store.canPublishDownload = (id) => {
     const job = getJob(db, id);
     if (!job) return false;
@@ -631,6 +681,11 @@ export function createDownloads({
       const frozen = freeze(work, scope === 'audio');
       for (const candidates of Object.values(frozen.candidates))
         for (const url of candidates) validMediaTarget(url);
+      let hd;
+      if (scope === 'repair-cover') {
+        hd = hdSourceProof(conn, workId);
+        assertHDSources(frozen, hd.hdSources);
+      }
       put(conn, {
         id: jobId,
         workId,
@@ -638,16 +693,7 @@ export function createDownloads({
         ...frozen,
         auth,
         audioOnly: scope === 'audio',
-        ...(scope === 'repair-cover' && {
-          hdInputs: Object.fromEntries(
-            conn
-              .prepare(
-                "SELECT key,sha256 FROM archive_resources WHERE work_id=? AND key IN ('video','cover')"
-              )
-              .all(workId)
-              .map((row) => [row.key, row.sha256])
-          )
-        }),
+        ...hd,
         state: 'queued',
         completedKeys: [],
         filesComplete: false,
@@ -782,6 +828,7 @@ export function createDownloads({
     if (observed?.id !== job.workId) throw needsReview();
     if (observed.remoteState === 'unavailable') throw failure('NAS_SOURCE_UNAVAILABLE', '原作品已失效。');
     if (observed.statusOnly) throw notAvailable();
+    if (job.hdInputs) assertHDSources(freeze(observed, false), validateHDSource(job.workId, job));
     const candidates = refreshCandidates(job, observed);
     return change(job.id, (current) => {
       current.candidates = candidates;
@@ -914,6 +961,9 @@ export function createDownloads({
     const area = ({ dimensions }) => (dimensions.width ?? 0) * (dimensions.height ?? 0);
     const best = comparisons.toSorted((a, b) => area(b) - area(a))[0];
     if (candidateOnly) return best;
+    if (cover && target.sourceIdentity && new Set(job.candidates.cover.map(coverObject)).size === 1) {
+      best.stage.commit.body.selectedCoverIdentity = target.identity;
+    }
     const previous = existing
       ? {
           missing: !!existing.missing,
@@ -971,22 +1021,20 @@ export function createDownloads({
       cover = await resolve('cover');
     if (!video) throw failure('NAS_FILE_MISSING', '请先补齐视频。');
     if (video.sha256 !== job.hdInputs.video || cover?.sha256 !== job.hdInputs.cover) throw needsReview();
+    const hdSources = validateHDSource(workId, job);
+    assertHDSources(job, hdSources);
     let freshReference;
     const guard = () => {
+      validateHDSource(workId, job);
       requireWriter(job, signal);
       if (!cover && store.resources(workId).some((row) => row.key === 'cover')) throw needsReview();
       freshReference?.();
       for (const asset of [video, cover].filter(Boolean))
         assertResourceCurrent({ store, resource: asset, stat: lstatSync(asset.file, { bigint: true }) });
     };
+    guard();
     const old = currentHDCover(db, workId);
     if (old && (await resolve(old.key))?.sha256 === old.sha256) return;
-    const frozenVideo = job.expected.find((item) => item.key === 'video');
-    if (
-      video.resourceIdentity !== frozenVideo.identity ||
-      (!frozenVideo.sourceIdentity && video.observationIdentity !== candidateDigest(job.candidates.video))
-    )
-      throw needsReview();
     const target = job.expected.find((item) => item.key === 'cover');
     const identity = contentHash(job.hdInputs);
     const publish = async ({ stage, result, mime, ext, dimensions }, source) => {
@@ -1002,6 +1050,7 @@ export function createDownloads({
       });
       if (!existing || existing.sha256 !== result.sha256 || existing.missing) {
         stage.commit.body.hdInputs = job.hdInputs;
+        stage.commit.body.hdSources = hdSources;
         const previous = existing && {
           missing: !!existing.missing,
           superseded: !existing.missing,
