@@ -81,7 +81,7 @@ function setup(t) {
     library.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { source, provider, session, library, make, sessions, who, grant };
+  return { source, provider, session, library, make, sessions, who, grant, root };
 }
 test('restored NAS state is verified against self, and another UID makes no change', async (t) => {
   const { source, provider, session, make, library } = setup(t);
@@ -496,3 +496,88 @@ test('post-write rejection retains prior committed profile and leaves first fail
   await restored.recover(session);
   assert.equal(provider.lastSaved.fixture, 'first');
 });
+
+test('typed exact work lookup recognizes explicit gone business messages while HTTP failures and ambiguity retain work', async (t) => {
+  const { source, provider, session } = setup(t);
+  const { authEpoch } = await source.verifyAccount(session);
+  const workId = '101';
+  const detail = (page) => {
+    provider.page = page;
+    return source.readDetail({ workId, authEpoch, signal: session.signal });
+  };
+  const result = await detail({ status_code: 42, status_msg: '该作品已下架' });
+  assert.equal(result.sourceStatus.state, 'unavailable');
+  assert.match(result.sourceStatus.reason, /已下架/);
+  assert.equal(result.id, workId);
+  assert.equal(source.account().authEpoch, authEpoch);
+  await assert.rejects(detail({ status_code: 42, status_msg: '该作品已下架', data: { aweme_id: '202' } }), {
+    code: 'SOURCE_PAGE_INVALID'
+  });
+  assert.equal(
+    (await detail({ status_code: 0, status_msg: '作品可能已删除' })).sourceStatus.state,
+    'unknown'
+  );
+  provider.read = async () => ({ status: 503, text: JSON.stringify({ status_msg: '该作品已下架' }) });
+  await assert.rejects(source.readDetail({ workId, authEpoch, signal: session.signal }), {
+    code: 'SOURCE_PAGE_INVALID'
+  });
+});
+test('successful verification detaches the reader from a late login response', async (t) => {
+  const { library, session, root } = setup(t);
+  let login, reader;
+  const makeProvider = async (saved) => {
+    const p = {
+      uid: saved?.fixtureUid ?? '101',
+      async self() {
+        return { uid: this.uid, nickname: 'fixture' };
+      },
+      async sessionKey() {
+        return 'fingerprint-' + this.uid;
+      },
+      async storage() {
+        return { cookies: [], origins: [], fixtureUid: this.uid };
+      },
+      async beginLogin() {},
+      async loginView() {
+        return { phase: 'loading' };
+      },
+      endLogin() {},
+      async close() {},
+      async read() {
+        return { status: 200, text: '{"aweme_list":[],"has_more":false}' };
+      }
+    };
+    if (saved) reader = p;
+    else login = p;
+    return p;
+  };
+  const source = createSourceBrowser({ library, root, openProvider: makeProvider });
+  t.after(() => source.close());
+  await source.openLogin(session);
+  const { authEpoch } = await source.verifyAccount(session);
+  login.uid = '202'; // A response already dispatched by the retired login browser.
+  const page = await source.readSourcePage({
+    source: { kind: 'total', id: '__all__' },
+    cursor: '0',
+    authEpoch,
+    signal: session.signal
+  });
+  assert.equal(page.terminal, true);
+  assert.equal(reader.uid, '101');
+  assert.notEqual(login, reader);
+});
+test(
+  'a delayed native QR status response cannot set credentials in the verified Chromium reader',
+  { timeout: 12000 },
+  async (t) => {
+    const { library, root, session } = setup(t);
+    const { openOfficialProvider } = await import('../../server/source-provider.mjs');
+    const { delayedStatusDuringVerification } = await import('./source-provider-fixture.mjs');
+    await delayedStatusDuringVerification(
+      t,
+      (openProvider) => createSourceBrowser({ library, root, openProvider }),
+      openOfficialProvider,
+      session
+    );
+  }
+);

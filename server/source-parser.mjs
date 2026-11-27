@@ -351,7 +351,24 @@ export function parseSourceDetail({ workId, status, text, retryAfter, observedAt
     const filters = [data?.filter_detail, data?.data?.filter_detail].filter(Boolean);
     if (filters.length > 1 || filters.some((f) => f.aweme_id !== workId))
       throw invalid('过滤结果与目标作品不一致');
-    const verdict = filteredSourceState(data, workId) ?? detailSourceState(null, workId);
+    const ids = [data?.aweme_id, data?.awemeId, data?.data?.aweme_id, data?.data?.awemeId].filter(
+      (v) => v != null
+    );
+    if (ids.some((v) => String(v) !== workId)) throw invalid('业务响应与目标作品不一致');
+    const messages = [data?.status_msg, data?.message, data?.data?.status_msg, data?.data?.message]
+      .filter((v) => typeof v === 'string')
+      .join(' ');
+    const explicitGone =
+      !filters.length &&
+      goneMessage(messages) &&
+      !/失败|异常|错误|重试|频繁|timeout|error|retry/i.test(messages);
+    const reason = explicitGone
+      ? '平台明确提示' +
+        (/已下架/.test(messages) ? '作品已下架' : /不存在/.test(messages) ? '作品不存在' : '作品已删除')
+      : null;
+    const verdict =
+      filteredSourceState(data, workId) ??
+      (reason ? { state: 'unavailable', reason } : detailSourceState(null, workId));
     return { id: workId, statusOnly: true, sourceStatus: statusRecord(verdict), remoteState: verdict.state };
   }
   const raw = first || nested;

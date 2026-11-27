@@ -190,11 +190,31 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
   async function verify(current) {
     const previous = current.identity;
     current.identity = null;
-    const sessionKey = await current.provider.sessionKey();
+    let sessionKey = await current.provider.sessionKey();
     if (!sessionKey) throw loginRequired();
     const identity = await identify(current, current.end.signal);
-    const state = await current.provider.storage();
+    let state = await current.provider.storage();
     if (sessionKey !== (await current.provider.sessionKey())) throw stale();
+    if (current.view) {
+      // Replies to already-issued login requests belong to the old cookie jar.
+      current.view = null;
+      current.provider.endLogin();
+      await current.provider.close();
+      try {
+        guard(current.session);
+        current.provider = await openProvider(state, current.end.signal);
+        guard(current.session);
+        sessionKey = await current.provider.sessionKey();
+        if (!sessionKey) throw loginRequired();
+        const pinned = await identify(current, current.end.signal);
+        if (pinned.uid !== identity.uid) throw wrong();
+        state = await current.provider.storage();
+        if (sessionKey !== (await current.provider.sessionKey())) throw stale();
+      } catch (error) {
+        await retire(current);
+        throw error;
+      }
+    }
     guard(current.session);
     const profileId = randomUUID();
     let prior;
@@ -237,8 +257,10 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
       const current = action === 'open' ? await browser(session) : slot;
       if (!current || current.session.signal !== session.signal) throw stale();
       if (Date.now() < resumeAt && action !== 'close') throw limited();
-      if (action === 'open') current.view = randomUUID();
-      else if (!id || !current.view || current.view !== id) throw stale();
+      if (action === 'open') {
+        current.identity = null;
+        current.view = randomUUID();
+      } else if (!id || !current.view || current.view !== id) throw stale();
       if (action === 'close') {
         current.view = null;
         await retire(current);

@@ -40,17 +40,17 @@ const sourceFailure = () =>
   new SourceError('SOURCE_BROWSER', 'NAS 无法打开抖音官方页面，请检查浏览器和网络。');
 const unsupported = () => new SourceError('MANUAL_UNAVAILABLE', '当前验证控件已变化，请重新查看抖音的提示。');
 
-async function allowRequest(request, page, authorize) {
+async function allowRequest(request, page, authorize, authorizeNavigation) {
   const url = new URL(request.url());
-  if (url.protocol !== 'https:' || url.port || url.username || url.password) return false;
   const frame = request.frame();
   if (frame.page() !== page) return false;
   const main = frame === page.mainFrame(),
     method = request.method(),
     type = request.resourceType();
+  if (main && request.isNavigationRequest()) return authorizeNavigation(request);
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) return false;
   if (request.isNavigationRequest()) {
     if (method !== 'GET') return false;
-    if (main) return official(url);
     return (
       frame.parentFrame() === page.mainFrame() &&
       (['', 'about:blank'].includes(frame.url()) ||
@@ -148,7 +148,11 @@ async function launchContext(saved) {
   }
 }
 
-export async function openOfficialProvider(saved, signal, { createContext = launchContext } = {}) {
+export async function openOfficialProvider(
+  saved,
+  signal,
+  { createContext = launchContext, now = Date.now } = {}
+) {
   let context;
   try {
     signal.throwIfAborted();
@@ -159,14 +163,61 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
       manualPanel,
       login,
       pendingRead;
+    let startup = true,
+      clicked = false;
+    function authorizeNavigation(req) {
+      const exact = req.url() === home && req.method() === 'GET' && !req.redirectedFrom();
+      if (startup) {
+        startup = false;
+        return exact;
+      }
+      const view = login;
+      if (!view) return false;
+      try {
+        view.check();
+        signal.throwIfAborted();
+        const passive =
+          view.passive &&
+          view.document === key &&
+          page.url() === home &&
+          !clicked &&
+          !view.issueRequest &&
+          !manualPanel &&
+          now() < view.openUntil;
+        if (!exact || view.navigation || (!view.opening && !passive)) throw unsupported();
+        view.passiveFrom = passive ? key : null;
+        view.navigation = { request: req, initial: view.opening, confirmed: false };
+        view.passive = false;
+        view.opening = false;
+        view.document = null;
+        manualPanel = null;
+        pendingRead = null;
+        return true;
+      } catch {
+        login = null;
+        manualPanel = null;
+        return false;
+      }
+    }
     page.on('framenavigated', (frame) => {
       if (frame !== page.mainFrame()) return;
       key = 'cx' + randomUUID();
       manualPanel = null;
-      if (login?.opening) {
-        login.opening = false;
-        login.document = key;
-      } else login = null;
+      const nav = login?.navigation;
+      if (!nav || !nav.confirmed || frame.url() !== home) {
+        login = null;
+        return;
+      }
+      try {
+        login.check();
+        signal.throwIfAborted();
+      } catch {
+        login = null;
+        return;
+      }
+      login.document = key;
+      login.passive = nav.initial;
+      login.navigation = null;
     });
     function live() {
       signal.throwIfAborted();
@@ -195,7 +246,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
       const view = live(),
         route = url.pathname.replace(/\/$/, '');
       if (route === '/passport/web/get_qrcode') {
-        if (method !== 'GET' || view.issueRequest || Date.now() >= view.openUntil) return false;
+        if (method !== 'GET' || view.issueRequest || now() >= view.openUntil) return false;
         view.issueRequest = request;
         return true;
       }
@@ -208,26 +259,25 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           !request.postDataBuffer()?.length ||
           !view.shown ||
           view.remaining <= 0 ||
-          Date.now() >= view.pollUntil
+          now() >= view.pollUntil
         )
           return false;
         const state = await page.evaluate(stateScript);
         if (!['scanned', 'connecting'].includes(state.phase) && (await bitmap())?.hash !== view.shown)
           return false;
-        if (live() !== view || !view.shown || view.remaining <= 0 || Date.now() >= view.pollUntil)
-          return false;
+        if (live() !== view || !view.shown || view.remaining <= 0 || now() >= view.pollUntil) return false;
         view.remaining--;
         return true;
       }
       const action = view.manual;
-      if (!action || Date.now() >= action.until || !action.routes.includes(route)) return false;
+      if (!action || now() >= action.until || !action.routes.includes(route)) return false;
       const panel = await page.evaluate(panelScript, { key, action: 'locate' });
       if (
         live() !== view ||
         view.manual !== action ||
         !panel?.challenge ||
         panel.id !== action.node ||
-        Date.now() >= action.until
+        now() >= action.until
       )
         return false;
       view.manual = null;
@@ -235,9 +285,13 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
     }
     page.on('response', (response) => {
       const view = login;
+      if (view?.navigation?.request === response.request()) {
+        view.navigation.confirmed = response.status() === 200 && response.url() === home;
+      }
       if (view?.issueRequest !== response.request()) return;
       view.issued =
         response.status() === 200 && /^application\/json\b/i.test(response.headers()['content-type'] || '');
+      if (view.issued) view.observeUntil = now() + 15000;
       if (!view.issued) {
         view.shown = null;
         view.issueFailure = response.status() === 429 ? 'limited' : 'refused';
@@ -253,7 +307,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
     await context.route('**/*', async (route) => {
       let allowed = false;
       try {
-        allowed = await allowRequest(route.request(), page, authorize);
+        allowed = await allowRequest(route.request(), page, authorize, authorizeNavigation);
       } catch {}
       let preserveBlank = false;
       if (!allowed)
@@ -261,23 +315,44 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           const req = route.request(),
             frame = req.frame();
           preserveBlank =
-            req.isNavigationRequest() &&
-            frame.parentFrame() === page.mainFrame() &&
-            ['', 'about:blank'].includes(frame.url());
+            (req.isNavigationRequest() && frame === page.mainFrame()) ||
+            (req.isNavigationRequest() &&
+              frame.parentFrame() === page.mainFrame() &&
+              ['', 'about:blank'].includes(frame.url()));
         } catch {}
       await (allowed ? route.fallback() : route.abort(preserveBlank ? 'aborted' : undefined)).catch(() => {});
     });
     await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    let clicked = false;
-    async function fixed(fn) {
+    async function fixed(fn, observeBootstrap = false) {
+      const initial = key,
+        view = login;
+      const reloaded = () =>
+        observeBootstrap && view && view === login && view.passiveFrom === initial && !clicked;
+
       try {
         signal.throwIfAborted();
         if (!official(new URL(page.url()))) throw sourceFailure();
+        if (observeBootstrap && view?.navigation && !view.navigation.initial) {
+          view.check();
+          return { phase: 'loading' };
+        }
         const value = await abortable(fn(), AbortSignal.any([signal, AbortSignal.timeout(16000)]));
         signal.throwIfAborted();
         if (!official(new URL(page.url()))) throw sourceFailure();
+        if (reloaded()) {
+          view.check();
+          return { phase: 'loading' };
+        }
+        if (observeBootstrap && (view !== login || key !== initial)) throw unsupported();
         return value;
       } catch (e) {
+        if (
+          reloaded() &&
+          (e.code === 'MANUAL_UNAVAILABLE' || /Execution context was destroyed/.test(e.message))
+        ) {
+          view.check();
+          return { phase: 'loading' };
+        }
         if (e instanceof SourceError) throw e;
         if (e.name === 'TimeoutError')
           throw new SourceError('SOURCE_TIMEOUT', '抖音页面响应超时，请稍后重试。');
@@ -337,10 +412,11 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
       beginLogin: (check) =>
         fixed(async () => {
           check();
-          login = { check, opening: true, openUntil: Date.now() + 30000, remaining: 24 };
+          login = { check, opening: true, openUntil: now() + 30000, remaining: 24 };
           clicked = false;
           await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          live();
+          if (login?.navigation && !login.navigation.initial) login.check();
+          else live();
         }),
       endLogin: () => {
         login = null;
@@ -351,6 +427,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           const view = live();
           if (
             !view.issued ||
+            (!view.pollUntil && now() >= view.observeUntil) ||
             view.token !== token ||
             !view.image ||
             (await bitmap())?.hash !== view.image ||
@@ -358,7 +435,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           )
             throw unsupported();
           view.shown = view.image;
-          view.pollUntil ??= Date.now() + 45000;
+          view.pollUntil ??= now() + 45000;
           return {};
         }),
       loginView: () =>
@@ -379,6 +456,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           }
           const panel = await page.evaluate(panelScript, { key, action: 'locate' });
           if (state.phase === 'verification' || panel?.challenge) {
+            view.passive = false;
             view.shown = null;
             view.image = null;
             const manual = panel?.challenge ? await page.evaluate(smsControls, { key, panel }) : null;
@@ -391,8 +469,11 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
             return { phase: 'verification', manual: null };
           }
           manualPanel = null;
+          const unread = () => view.issued && !view.pollUntil && now() >= view.observeUntil;
+          const unpainted = () => new SourceError('SOURCE_TIMEOUT', '抖音二维码未能显示，请刷新。');
           if (panel?.id && view.issued) {
-            if (view.remaining <= 0 || (view.pollUntil && Date.now() >= view.pollUntil))
+            if (unread()) throw unpainted();
+            if (view.remaining <= 0 || (view.pollUntil && now() >= view.pollUntil))
               return { phase: 'expired' };
             const qr = await bitmap();
             if (qr && live() === view) {
@@ -405,6 +486,9 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
             }
           }
           if (panel?.loginEntry === 'ready' && !clicked) {
+            if (live() !== view) throw unsupported();
+            clicked = true;
+            view.passive = false;
             const result = await page.evaluate(panelScript, { key, action: 'open' });
             clicked = result?.loginEntry === 'clicked';
           } else if (
@@ -415,10 +499,11 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           ) {
             return { phase: 'connecting', signedIn: true };
           }
-          if (!view.issued && Date.now() >= view.openUntil)
+          if (unread()) throw unpainted();
+          if (!view.issued && now() >= view.openUntil)
             throw new SourceError('SOURCE_TIMEOUT', '等待抖音二维码超时，请刷新。');
           return { phase: 'loading' };
-        }),
+        }, true),
       manual: (command) =>
         fixed(async () => {
           if (
@@ -438,7 +523,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
             throw unsupported();
           view.manual = {
             node: approved.node,
-            until: Date.now() + 3000,
+            until: now() + 3000,
             routes:
               command.action === 'send'
                 ? ['/passport/web/send_code']
