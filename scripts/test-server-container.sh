@@ -49,6 +49,15 @@ refuse; grep -q migration-required "$seed/refusal"
 test "$old_bytes" = "$(sha256sum "$seed/old/cangxia-server/library.sqlite" "$seed/old/cangxia-server/media/fixture.png")"
 test -z "$(ls -A "$seed/old/cangxia-server/snapshots")"
 fixture_run upgrade
+export CANGXIA_LIBRARY="$seed/scoped" CANGXIA_LIBRARY_CHILD=archive CANGXIA_NATIVE_RECYCLE_RELATIVE=native-mirror
+export CANGXIA_CONFIG="$seed/scoped-config"
+mkdir -m 700 "$CANGXIA_LIBRARY" "$CANGXIA_LIBRARY/archive" "$CANGXIA_LIBRARY/native-mirror" "$CANGXIA_CONFIG"
+mkdir "$CANGXIA_LIBRARY/archive/CREATE-NEW-CANGXIA" "$CANGXIA_CONFIG/CREATE-NEW-CANGXIA"
+up
+node tests/server-edition/compose-fixture.mjs native-roundtrip "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG/identity"
+"${compose[@]}" down --timeout 20
+unset CANGXIA_LIBRARY_CHILD CANGXIA_NATIVE_RECYCLE_RELATIVE
+export CANGXIA_CONFIG="$seed/config"
 export CANGXIA_LIBRARY="$seed/library"
 # The browser/native tests run with synthetic inputs in a separate temporary library.
 mkdir -m 700 "$seed/browser"

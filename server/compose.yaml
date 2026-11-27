@@ -17,6 +17,8 @@ services:
     ports:
       - "${CANGXIA_PORT:-9443}:9443"
     environment:
+      CANGXIA_LIBRARY_CHILD: "${CANGXIA_LIBRARY_CHILD:-}"
+      CANGXIA_NATIVE_RECYCLE_RELATIVE: "${CANGXIA_NATIVE_RECYCLE_RELATIVE:-}"
       CANGXIA_URL: "${CANGXIA_URL:?Set the HTTPS address used by your Windows clients}"
       CANGXIA_REHEARSAL_ROOT: /rehearsal
       CANGXIA_SOURCE_UID: "${CANGXIA_SOURCE_UID:-}"

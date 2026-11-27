@@ -176,6 +176,7 @@ export function createTrashAdapter({ layout, bin }) {
       recycle = directoryId(bin, mountFilesystems);
     if (
       media.dev !== recycle.dev ||
+      (linux && (!media.mount || media.mount !== recycle.mount)) ||
       equal(media, recycle) ||
       [path.relative(bin, layout.media), path.relative(layout.root, bin)].some(
         (rel) => !rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel)

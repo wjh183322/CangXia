@@ -1,4 +1,4 @@
-import {separatePaths} from './rehearsal-files.mjs';
+import {directory, segment, separatePaths} from './rehearsal-files.mjs';
 import {checkApprovalMount,prepareRecovery} from './deployment-recovery.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +8,20 @@ import {pathToFileURL} from 'node:url';
 import {openLibrary, syncDirectory, writeDurably, isUuid} from './library.mjs';
 
 const marker = 'CREATE-NEW-CANGXIA';
+// This opt-in uses one dedicated share. Two binds of the same filesystem have
+// different Linux mount identities, so a no-replace rename between them fails.
+export function storagePaths(mountRoot, libraryChild, recycleRelative, mountInfo) {
+  if (!libraryChild && !recycleRelative) return {root:mountRoot};
+  const root = directory(path.join(mountRoot,segment(libraryChild)));
+  const parts = recycleRelative ? recycleRelative.split('/').map(segment) : [];
+  if (parts[0] === libraryChild) throw Error('回收路径必须独立于资料库。');
+  const allowed = new Set([libraryChild,...parts.slice(0,1)]);
+  if (fs.readdirSync(mountRoot).some(name=>!allowed.has(name)) ||
+      mountInfo.split('\n').some(line=>line.split(' ')[4]?.startsWith(mountRoot+'/')))
+    throw Error('此挂载只能包含专用资料库与已声明的回收路径，不能包含其他目录或子挂载。');
+  const bin = parts.length ? directory(path.join(mountRoot,...parts)) : undefined;
+  return {root,bin};
+}
 function privateEntry(file, directory) {
   const st = fs.lstatSync(file);
   if ((directory ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) ||
@@ -71,7 +85,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     separatePaths(['/library','/config','/rehearsal','/approved'],mountInfo);
     checkApprovalMount(mountInfo,'/approved',process.getuid());
     privateEntry('/rehearsal',true);
-    Object.assign(process.env,prepareDeployment({root:'/library',config:'/config',url:process.env.CANGXIA_URL}));
+    const {root,bin}=storagePaths('/library',process.env.CANGXIA_LIBRARY_CHILD,process.env.CANGXIA_NATIVE_RECYCLE_RELATIVE,mountInfo);
+    if(bin) process.env.CANGXIA_RECYCLE_MEDIA_ROOT=bin;
+    else delete process.env.CANGXIA_RECYCLE_MEDIA_ROOT;
+    Object.assign(process.env,prepareDeployment({root,config:'/config',url:process.env.CANGXIA_URL}));
     const devices=JSON.parse(fs.readFileSync(process.env.CANGXIA_DEVICES_FILE,'utf8'));
     const configuration=prepareRecovery({dir:'/rehearsal',inputsDir:'/approved',accountId:Object.values(devices)[0].accountId,env:process.env});
     const {runService} = await import('./start.mjs');

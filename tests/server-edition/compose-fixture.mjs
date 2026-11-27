@@ -29,6 +29,29 @@ if(mode==='seed'){
     assert.ok(downloads.store.resources(work.id).some(r=>r.key==='image-0'));
     library.write(db=>db.exec('UPDATE source_account SET profile_id=NULL'));
   }finally{await downloads.close();library.close();}
+}else if(mode==='native-roundtrip'){
+  // This is a disposable Linux share. The simulated native UI action only verifies the mount topology.
+  const a=new ServerClient();
+  try{
+    await a.connect(JSON.parse(fs.readFileSync(path.join(config,'windows-1.json'))));await a.acquire();
+    const command=(kind,payload)=>a.command({kind,payload,operationId:randomUUID(),entityVersion:0});
+    const challenge=await command('start-trash-probe',{supported:true,reference:'synthetic Linux mount',retention:'fixture only'});
+    const status=async phase=>{
+      for(let i=0;i<100;i++){
+        const value=await a.query('trash-status',{});
+        if(value.phase===phase&&!value.busy)return value;
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+      throw Error('Timed out waiting for '+phase);
+    };
+    const probe=await status('await-native');
+    const physical=p=>path.join(root,path.relative('/library',p));
+    const original=physical(probe.original),recycled=physical(probe.bin);
+    assert.ok(fs.statSync(recycled).isFile());assert.ok(!fs.existsSync(original));
+    fs.renameSync(recycled,original);
+    await command('control-trash-probe',{token:challenge.probeToken,action:'verify',observed:true});
+    assert.equal((await status('verified')).verified,true);
+  }finally{await a.release().catch(()=>{});}
 }else if(mode==='empty'||mode==='populated'){
   const read=n=>JSON.parse(fs.readFileSync(path.join(config,'windows-'+n+'.json')));
   const a=new ServerClient(),b=new ServerClient();
