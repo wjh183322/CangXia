@@ -24,7 +24,7 @@ import {
   isUuid,
   verifyIdentity
 } from './library.mjs';
-import { inventory, verifiedSnapshot } from './upgrade.mjs';
+import { detachBatchCredentials, inventory, verifiedSnapshot } from './upgrade.mjs';
 import { child, directory, disjoint, fileProof, segment } from './rehearsal-files.mjs';
 
 // A separate process cannot release the live download worker's POSIX SQLite lock by closing a descriptor.
@@ -417,6 +417,15 @@ export async function restoreApproved(input) {
     await fs.promises.copyFile(child(snapshot, 'library.sqlite'), file, fs.constants.COPYFILE_EXCL);
     if ((await fileProof(file)).sha256 !== manifest.databaseSha256)
       throw Error('恢复数据库复制期间发生变化。');
+    // Also detach older v17 recovery points created before batch bindings were scrubbed.
+    // Sanitize only the verified new copy. The sealed external snapshot stays byte-identical.
+    const copy=new DatabaseSync(pathToFileURL(file).href+'?mode=rw');
+    try{
+      if(copy.prepare(`SELECT 1 FROM download_batches WHERE json_type(auth,'$.sessionKey') IS NOT NULL
+        OR state IN ('pending','paused','waiting-auth') LIMIT 1`).get()){
+        copy.exec('PRAGMA secure_delete=ON');detachBatchCredentials(copy);copy.exec('VACUUM');
+      }
+    }finally{copy.close();}
     for (const item of manifest.media) {
       guard();
       const parts = item.relative_path.split('/').map(segment);
@@ -452,7 +461,17 @@ export async function restoreApproved(input) {
           throw Error('存在单独需要恢复的文件操作或回收区，请先核对对应文件。');
         // The new volume cannot grant a confirmation issued against the previous mount and lease.
         db.exec("UPDATE removal_batches SET state='discarded' WHERE state='preview'");
-        return rebindFiles(db, archive, guard);
+        // Only entries matching their original work version before internal inode rebinding
+        // may follow that administrative change. A previously stale consent stays stale.
+        db.exec(`CREATE TEMP TABLE matched_batch_items AS
+          SELECT i.batch,i.work_id FROM download_batch_items i JOIN download_batches b ON b.id=i.batch
+          JOIN download_work_versions v ON v.work_id=i.work_id AND v.revision=i.version
+          WHERE b.state='restore-auth' AND i.state='pending' AND EXISTS(
+            SELECT 1 FROM media_files m WHERE m.work_id=i.work_id)`);
+        const rebound=rebindFiles(db,archive,guard);
+        db.exec(`UPDATE download_batch_items AS i SET version=v.revision FROM matched_batch_items p
+          JOIN download_work_versions v ON v.work_id=p.work_id WHERE i.batch=p.batch AND i.work_id=p.work_id`);
+        return rebound;
       });
       const store = openDownloadStore({ root: scratch, library: lib });
       try {

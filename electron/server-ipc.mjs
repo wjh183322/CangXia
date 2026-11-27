@@ -10,6 +10,7 @@ export function registerCatalogueHandlers({ ipc, client }) {
   const control = (action, ids = null, extra = {}) => command('control-download', { action, ids, ...extra });
   ipc('downloadPage', 'workspace', (query) => client.query('download-page', query));
   ipc('downloadBatch', 'workspace', (query) => client.query('download-batch', query));
+  ipc('authorizeDownloadBatch','workspace',id=>command('authorize-download-batch',{id}));
   ipc('validateDownloadSelection','workspace',query=>client.query('validate-downloads',query));
   ipc('previewDownloads', 'workspace', (workIds) => client.query('preview-download', { workIds }));
   ipc('repairVideoCover', 'workspace', (workIds, revision) =>

@@ -21,7 +21,7 @@ export function admitBatch(db,query,scope,{operationId,account,selection,auth}) 
 
 export function batchStatus(db,id,account) {
   const b=db.prepare('SELECT id,account,scope,total,state FROM download_batches WHERE id=?').get(id);
-  if(!b||(account!==undefined&&account!==b.account))throw changed();
+  if(!b||(account!==undefined&&account!==b.account&&b.state!=='restore-auth'))throw changed();
   const counts=Object.fromEntries(db.prepare('SELECT state,count(*) AS n FROM download_batch_items WHERE batch=? GROUP BY state')
     .all(id).map(row=>[row.state,row.n]));
   return {id:b.id,scope:b.scope,total:b.total,state:b.state,pending:counts.pending??0,queued:counts.queued??0,
@@ -30,7 +30,10 @@ export function batchStatus(db,id,account) {
 }
 
 export function batchList(db,audioOnly) {
-  return db.prepare(`SELECT id FROM download_batches WHERE scope ${audioOnly?'=':'<>'} 'audio' ORDER BY rowid DESC LIMIT 10`)
+  const family="scope "+(audioOnly?'=':'<>')+" 'audio'";
+  return db.prepare(`SELECT id FROM download_batches WHERE ${family} AND (
+    state IN ('pending','paused','waiting-auth','restore-auth') OR rowid IN
+    (SELECT rowid FROM download_batches WHERE ${family} ORDER BY rowid DESC LIMIT 10)) ORDER BY rowid DESC`)
     .all().map(b=>batchStatus(db,b.id));
 }
 
@@ -44,13 +47,14 @@ export function batchPage(db,{id,page=1},owner) {
 
 export function controlBatches(db,action,ids=null,audioOnly=false) {
   if(!['pause','resume','cancel'].includes(action))return 0;
+  const allowed=action==='cancel'?"('pending','paused','waiting-auth','restore-auth')":"('pending','paused')";
   const q=ids===null?
-    db.prepare("SELECT id FROM download_batches WHERE state IN ('pending','paused')"+(audioOnly?" AND scope='audio'":"")).all():
+    db.prepare("SELECT id FROM download_batches WHERE state IN "+allowed+(audioOnly?" AND scope='audio'":"")).all():
     ids.filter(id=>id.startsWith('batch:')).map(id=>({id:id.slice(6)}));
   let count=0;
   for(const {id} of q){
     if(action==='cancel')count+=db.prepare("UPDATE download_batch_items SET state='cancelled' WHERE batch=? AND state='pending'").run(id).changes;
-    db.prepare("UPDATE download_batches SET state=? WHERE id=? AND state IN ('pending','paused')").run(
+    db.prepare("UPDATE download_batches SET state=? WHERE id=? AND state IN "+allowed).run(
       action==='pause'?'paused':action==='resume'?'pending':'cancelled',id);
   }
   if(q.length)db.exec('UPDATE download_options SET revision=revision+1');
@@ -68,16 +72,22 @@ export async function dispatchBatches(store,{enqueue,authorized,closed,wake}) {
     if(!batch)return;
     const original=JSON.parse(batch.auth);
     store.withWrite(db=>{
+      const auth=authorized(db,original);
+      if(!auth){
+        db.prepare("UPDATE download_batches SET state='waiting-auth' WHERE id=?").run(batch.id);
+        db.exec('UPDATE download_options SET revision=revision+1');
+        return;
+      }
       const set=db.prepare("UPDATE download_batch_items SET state=?,reason=? WHERE batch=? AND work_id=? AND state='pending'");
       const items=db.prepare(`SELECT i.work_id,i.version,v.revision FROM download_batch_items i
         LEFT JOIN download_work_versions v ON v.work_id=i.work_id
         WHERE i.batch=? AND i.state='pending' ORDER BY i.rowid LIMIT 16`).all(batch.id);
       for(const row of items){
         let state='changed',reason='作品、文件或已有任务的版本已变化，请重新选择。';
-        if(row.version===row.revision && authorized(db,original)){
+        if(row.version===row.revision){
           db.exec('SAVEPOINT batch_item');
           try{
-            const result=enqueue(db,[row.work_id],batch.scope);
+            const result=enqueue(db,[row.work_id],batch.scope,auth);
             state=result.queued?'queued':result.existing?'existing':result.removed?'removed':'skipped';
             reason=null;
           }catch(error){
@@ -85,7 +95,7 @@ export async function dispatchBatches(store,{enqueue,authorized,closed,wake}) {
             if(!error.status && !error.code?.startsWith('NAS_') && !error.code?.startsWith('SOURCE_'))throw error;
             state='failed';reason='来源、文件或任务未通过核对，请重新选择。';
           }finally{db.exec('RELEASE batch_item');}
-        }else if(row.version===row.revision)reason='来源账号或登录版本已变更，请重新确认。';
+        }
         set.run(state,reason,batch.id,row.work_id);
       }
       if(!db.prepare("SELECT 1 FROM download_batch_items WHERE batch=? AND state='pending' LIMIT 1").get(batch.id))

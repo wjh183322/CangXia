@@ -323,6 +323,11 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
   }
   return {
     account: () => (slot?.identity ? { ...slot.identity } : null),
+    hasDownloadProfile(profileId) {
+      if(closed)return false;
+      const saved=storage.load(profileId);
+      return !!saved&&Array.isArray(saved.cookies)&&Array.isArray(saved.origins);
+    },
     recover: (session) =>
       serial(async () => {
         const current = await browser(session, { recoveryOnly: true });

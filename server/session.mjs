@@ -136,6 +136,7 @@ export function createSessionService({
         return { added: true };
       },
       ...(downloads&&{
+        'authorize-download-batch':downloads.authorizeBatch,
         'enqueue-download':(db,{payload,operationId},{who})=>{
           if(Object.keys(payload).some(k=>!['workIds','selection','revision'].includes(k)))throw invalid();
           if(payload.revision!==undefined&&catalogueRevision(db)!==payload.revision)throw failure(409,'STALE_SELECTION','作品列表已更新，请重新确认。');
@@ -437,7 +438,7 @@ export function createSessionService({
       if(['start-check','retry-repair','control-check'].includes(command.kind))maintenance.wake(receipt,service.sourceSession(who,grant));
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
-      if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
+      if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['authorize-download-batch','enqueue-download','control-audio','control-download','catalogue-action','set-tags','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
       return receipt;
     },
     receipt(who, grant, operationId) {

@@ -75,6 +75,14 @@ export function inventory(db) {
   return { counts, media };
 }
 
+// The detached library has no source browser. Persist consent and pending item versions,
+// and require an explicit same-UID binding before dispatch on a restored system.
+export function detachBatchCredentials(db){
+  db.exec(`UPDATE download_batches SET auth=json_remove(auth,'$.sessionKey'),
+    state=CASE WHEN state IN ('pending','paused','waiting-auth') THEN 'restore-auth' ELSE state END
+    WHERE json_type(auth,'$.sessionKey') IS NOT NULL OR state IN ('pending','paused','waiting-auth')`);
+}
+
 function hashFile(file) {
   const hash = createHash('sha256');
   const buffer = Buffer.alloc(128 * 1024);
@@ -127,6 +135,7 @@ export async function verifiedSnapshot(layout, status, request) {
           isolated.exec(
             "DELETE FROM download_auth; UPDATE download_manifests SET body=json_remove(body,'$.auth.sessionKey') WHERE json_type(body,'$.auth.sessionKey') IS NOT NULL"
           );
+        if(status.from>=17)detachBatchCredentials(isolated);
         if (status.from >= 5) isolated.exec('UPDATE source_account SET profile_id=NULL');
         if (status.from >= 3) isolated.exec('DELETE FROM interactive_lease');
         isolated.exec('VACUUM');

@@ -547,7 +547,24 @@ export function createDownloads({
       put(conn, job);
       return job;
     });
-  function enqueue(conn, ids, scope = 'unsaved') {
+  function interactiveAuth(conn){
+    const auth=binding(conn);
+    if(source?.account()?.uid!==auth.uid)throw authRequired();
+    return auth;
+  }
+  function backgroundAuth(conn,original){
+    try{
+      const current=binding(conn);
+      if(original?.uid!==current.uid||original.authEpoch!==current.authEpoch||original.sessionKey!==current.sessionKey)return null;
+      const profile=conn.prepare('SELECT profile_id FROM source_account WHERE singleton=1').get()?.profile_id;
+      const present=source?.hasDownloadProfile ? source.hasDownloadProfile(profile) : source?.account()?.uid===current.uid;
+      return present?current:null;
+    }catch{return null;}
+  }
+  function enqueue(conn,ids,scope='unsaved'){
+    return enqueueAuthorized(conn,ids,scope,interactiveAuth(conn));
+  }
+  function enqueueAuthorized(conn, ids, scope, auth) {
     if (
       !Array.isArray(ids) ||
       !ids.length ||
@@ -555,8 +572,6 @@ export function createDownloads({
     )
       throw invalid();
     if(ids.some(id=>removalOwnsFiles(conn,id)))throw failure('NAS_REMOVAL_BUSY','作品正在处理删除或恢复，请先核对回执。');
-    const auth = binding(conn);
-    if (source?.account()?.uid !== auth.uid) throw authRequired();
     const groups = groupsFor(conn, ids);
     const eligible =
       scope === 'unsaved'
@@ -638,9 +653,18 @@ export function createDownloads({
     return { jobId: first, queued, existing, removed, unavailable: groups.unavailable.length };
   }
   function admit(conn,query,scope,context){
-    const auth=binding(conn);
-    if(source?.account()?.uid!==auth.uid)throw authRequired();
+    const auth=interactiveAuth(conn);
     return admitBatch(conn,query,scope,{...context,auth});
+  }
+  function authorizeBatch(conn,{payload:{id}},{who}){
+    const batch=conn.prepare('SELECT state,auth,account FROM download_batches WHERE id=?').get(id);
+    if(!batch || !['waiting-auth','restore-auth'].includes(batch.state) ||
+       (batch.state!=='restore-auth' && batch.account!==who.accountId))throw authRequired();
+    const current=interactiveAuth(conn);
+    if(JSON.parse(batch.auth).uid!==current.uid||!backgroundAuth(conn,current))throw authRequired();
+    conn.prepare("UPDATE download_batches SET account=?,auth=?,state='pending' WHERE id=?").run(who.accountId,JSON.stringify(current),id);
+    conn.exec('UPDATE download_options SET revision=revision+1');
+    return {batchId:id,authorized:true};
   }
   function submitIds(conn,ids,scope,context){
     const query=explicitIds(ids);
@@ -1468,16 +1492,13 @@ export function createDownloads({
   let dispatch;
   function run(){
     if(closing)return task??Promise.resolve();
-    if(!dispatch)dispatch=dispatchBatches(store,{enqueue,closed:()=>closing,wake:()=>void runJobs().catch(()=>{}),
-      authorized:(conn,original)=>{
-        try{return source?.account()?.uid===original.uid && contentHash(binding(conn))===contentHash(original);}
-        catch{return false;}
-      }}).finally(()=>{dispatch=null;});
+    if(!dispatch)dispatch=dispatchBatches(store,{enqueue:enqueueAuthorized,closed:()=>closing,wake:()=>void runJobs().catch(()=>{}),
+      authorized:backgroundAuth}).finally(()=>{dispatch=null;});
     return Promise.all([dispatch,runJobs()]).then(()=>{if(!closing)return runJobs();});
   }
   return {
     enqueue,
-    admit,submitIds,previewQuery,batchPage,
+    admit,submitIds,previewQuery,batchPage,authorizeBatch,
     fenceUnavailable,stopUnavailable,
     fetchSourceMedia,
     sourceAuthorization: () => binding(db),

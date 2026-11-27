@@ -10,7 +10,7 @@ const methods = [
   'flatOpen', 'flatPause', 'flatPrepare', 'flatResume', 'flatRetry', 'flatStart',
   'historyItems', 'importLink', 'inspectDefects', 'listDirectory', 'listWorks', 'logout',
   'makeDirectory', 'markSourceUnavailable', 'openCache', 'openDiagnostics', 'openOriginal', 'pause',
-  'pickerLocations', 'downloadBatch', 'previewDownloadSelection', 'previewDownloads', 'previewRemoval', 'previewRestore', 'readAuthor',
+  'pickerLocations', 'downloadBatch', 'authorizeDownloadBatch', 'previewDownloadSelection', 'previewDownloads', 'previewRemoval', 'previewRestore', 'readAuthor',
   'readHistoryItems', 'readHistoryRuns', 'refreshFiles', 'refreshQrLogin', 'refreshStorageSize', 'refreshWorkCreators',
   'removalHistory', 'removalStatus', 'repairPage', 'repairVideoCover', 'reportCoverStatus', 'resolveSelection',
   'restoreRemoval', 'resume', 'resumeDefectRepair', 'resumeReconcile', 'retryDownloads', 'serverCommand',
