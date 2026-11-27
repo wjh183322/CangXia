@@ -193,11 +193,24 @@ function refreshCandidates(job, work) {
   for (const [index, expected] of job.expected.entries()) {
     const candidate = observed[index];
     if (candidate.key !== expected.key || candidate.kind !== expected.kind) throw needsReview();
+    // The verified detail may add an original-cover URI ahead of its old page-cover URI.
+    // This exception only reads candidates for HD repair. The video still has to match its frozen identity.
+    if (job.hdInputs && expected.key === 'cover') {
+      if (
+        job.hdInputs.cover &&
+        expected.sourceIdentity &&
+        candidate.sourceIdentity &&
+        expected.sourceIdentity !== candidate.sourceIdentity
+      ) {
+        const before = new Set(job.candidates.cover.map(coverObject));
+        if (!candidate.candidates.some((url) => before.has(coverObject(url)))) throw needsReview();
+      }
+      continue;
+    }
     if (expected.sourceIdentity && candidate.sourceIdentity) {
       if (expected.sourceIdentity !== candidate.sourceIdentity) throw needsReview();
       continue;
     }
-    if (job.hdInputs && expected.key === 'cover') continue;
     const before = job.candidates[expected.key];
     if (!before.length && ['video', 'cover'].includes(expected.key)) continue;
     if (candidateDigest(before) !== candidateDigest(candidate.candidates)) throw needsReview();
@@ -956,11 +969,14 @@ export function createDownloads({
     const resolve = (key) => resolveResource({ store, layout, workId, key, verify: true, signal });
     const video = await resolve('video'),
       cover = await resolve('cover');
-    if (!video || !cover) throw failure('NAS_FILE_MISSING', '请先补齐视频及普通封面。');
-    if (video.sha256 !== job.hdInputs.video || cover.sha256 !== job.hdInputs.cover) throw needsReview();
+    if (!video) throw failure('NAS_FILE_MISSING', '请先补齐视频。');
+    if (video.sha256 !== job.hdInputs.video || cover?.sha256 !== job.hdInputs.cover) throw needsReview();
+    let freshReference;
     const guard = () => {
       requireWriter(job, signal);
-      for (const asset of [video, cover])
+      if (!cover && store.resources(workId).some((row) => row.key === 'cover')) throw needsReview();
+      freshReference?.();
+      for (const asset of [video, cover].filter(Boolean))
         assertResourceCurrent({ store, resource: asset, stat: lstatSync(asset.file, { bigint: true }) });
     };
     const old = currentHDCover(db, workId);
@@ -1028,10 +1044,7 @@ export function createDownloads({
       python: coverPython,
       async platform(resolution) {
         let best;
-        try {
-          if (source?.readDownloadDetail) job = await refresh(job, signal);
-          best = await downloadOne(job, target, home, signal, true);
-        } catch (error) {
+        function handleCandidateError(error) {
           guard();
           if (
             storage.has(error.code) ||
@@ -1046,7 +1059,48 @@ export function createDownloads({
           )
             throw error;
         }
-        if (best && comparableResolution(best.dimensions, resolution)) return publish(best, 'platform');
+        if (source?.readDownloadDetail) {
+          try {
+            job = await refresh(job, signal);
+          } catch (error) {
+            handleCandidateError(error);
+          }
+        }
+        try {
+          best = await downloadOne(job, target, home, signal, true);
+        } catch (error) {
+          handleCandidateError(error);
+        }
+        if (!best) return;
+        if (comparableResolution(best.dimensions, resolution))
+          return { ready: await publish(best, 'platform') };
+        if (!cover) {
+          const { file, size, sha256 } = best.result;
+          const proof = best.stage.commit.body.transfer;
+          freshReference = () => {
+            const stat = lstatSync(file, { bigint: true }),
+              dirStat = lstatSync(best.stage.dir, { bigint: true });
+            if (
+              !dirStat.isDirectory() ||
+              String(dirStat.dev) !== best.stage.commit.body.directory.dev ||
+              String(dirStat.ino) !== best.stage.commit.body.directory.ino
+            )
+              throw failure('NAS_FILE_REVIEW', '候选封面暂存目录已变更。');
+            if (
+              !proof ||
+              !stat.isFile() ||
+              stat.nlink !== 1n ||
+              String(stat.dev) !== proof.identity.dev ||
+              String(stat.ino) !== proof.identity.ino ||
+              String(stat.mtimeNs) !== proof.mtimeNs ||
+              Number(stat.size) !== size ||
+              proof.sha256 !== sha256
+            )
+              throw failure('NAS_FILE_REVIEW', '候选封面身份已变更。');
+          };
+          freshReference();
+          return { reference: { file, size, sha256 } };
+        }
       },
       async publish(bytes, dimensions) {
         const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -1088,7 +1142,7 @@ export function createDownloads({
       guard();
       conn
         .prepare('INSERT OR REPLACE INTO hd_covers VALUES(?,?,?,?)')
-        .run(workId, video.sha256, cover.sha256, JSON.stringify(result));
+        .run(workId, video.sha256, cover?.sha256 ?? '', JSON.stringify(result));
     });
   }
 

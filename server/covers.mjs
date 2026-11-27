@@ -38,7 +38,7 @@ export async function assessCover({
     signal?.throwIfAborted();
     guard?.();
     store.layout.assertCurrent();
-    for (const asset of [video, cover])
+    for (const asset of [video, cover].filter(Boolean))
       assertResourceCurrent({ store, resource: asset, stat: lstatSync(asset.file, { bigint: true }) });
   }
   const descriptor = ({ file, size, sha256 }) => ({ file, size, sha256 });
@@ -71,8 +71,7 @@ export async function assessCover({
   }
   try {
     check();
-    const movie = descriptor(video),
-      reference = descriptor(cover);
+    const movie = descriptor(video);
     const resolution = await call('probe', { mode: 'probe', video: movie });
     if (resolution.accepted === false) return resolution;
     if (!(resolution.width > 0 && resolution.height > 0))
@@ -94,7 +93,10 @@ export async function assessCover({
       };
     const fresh = await platform?.(resolution);
     check();
-    if (fresh) return { ...base, ...fresh };
+    if (fresh?.ready) return { ...base, ...fresh.ready };
+    const reference = cover ? descriptor(cover) : fresh?.reference;
+    if (!reference)
+      return { accepted: false, reason: 'reference_invalid', message: '没有可核实的封面可供匹配。' };
     const output = path.join(dir, 'matched.png');
     const match = await call('match', { video: movie, reference, output });
     if (match.accepted === false) return match;
@@ -116,6 +118,7 @@ export async function assessCover({
     const result = {
       ...base,
       source: 'video_frame',
+      referenceSha256: reference.sha256,
       width,
       height,
       frame: match.frame,

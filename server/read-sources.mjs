@@ -1,3 +1,4 @@
+import { recordedAuthorFolder } from './files.mjs';
 import {mergeCreatorFields} from './source-work-merge.mjs';
 import {workCreators,sameCreator,mergeCreator} from '../shared/creators.mjs';
 import {saveWorks} from './read-store.mjs';
@@ -331,24 +332,33 @@ async function sourceAction(source, session, kind, payload) {
   if (kind === 'folders') {
     const rows = await source.discoverFolders(input);
     return commit((db) => {
-      db.prepare("UPDATE read_sources SET missing=1 WHERE uid=? AND source_id LIKE 'folder:%'").run(
-        account.uid
-      );
+      const observed = rows.map(row => 'folder:' + row.id);
+      const removed=db.prepare(`UPDATE read_sources SET missing=1 WHERE uid=? AND source_id LIKE 'folder:%' AND missing=0
+        AND source_id NOT IN (SELECT value FROM json_each(?))`).run(account.uid,JSON.stringify(observed)).changes;
+      const previous=db.prepare("SELECT name,missing,json_extract(body,'$.folder') AS folder FROM read_sources WHERE source_id=?");
+      let archiveChanged=removed>0;
       const put = db.prepare(`INSERT INTO read_sources VALUES(?,?,?,?,0,0) ON CONFLICT(source_id)
-        DO UPDATE SET name=excluded.name,body=excluded.body,missing=0`);
-      for (const row of rows) put.run('folder:' + row.id, account.uid, row.name, JSON.stringify(row));
-      return { count: rows.length };
+        DO UPDATE SET name=excluded.name,body=excluded.body,missing=0
+        WHERE read_sources.missing<>0 OR read_sources.name<>excluded.name OR read_sources.body<>excluded.body`);
+      for (const row of rows) {
+        const key='folder:'+row.id, old=previous.get(key);
+        if (old && (old.missing || old.name!==row.name)) archiveChanged=true;
+        const body=old?.folder && old.name===row.name ? {...row,folder:old.folder} : row;
+        put.run(key,account.uid,row.name,JSON.stringify(body));
+      }
+      return { count: rows.length, archiveChanged };
     });
   }
   if (kind === 'author') {
     const row = await source.lookupAuthor(input, payload.text);
     return commit((db) => {
       const key = 'author:' + row.id,
-        old = db.prepare('SELECT body,added FROM read_sources WHERE source_id=?').get(key);
+        old = db.prepare('SELECT body,added,name FROM read_sources WHERE source_id=?').get(key);
       const previous=old&&JSON.parse(old.body);
       if (previous && previous.uid !== row.uid)
         throw failure(409, 'AUTHOR_MISMATCH', '作者身份已变化。');
       const entry={...previous,...row,name:row.name||previous?.name||'未命名作者',uniqueId:row.uniqueId||previous?.uniqueId||''};
+      entry.folder=recordedAuthorFolder(db,row.id,old?.name || entry.name);
       db.prepare(
         `INSERT INTO read_sources VALUES(?,?,?,?,1,0) ON CONFLICT(source_id)
         DO UPDATE SET body=excluded.body,name=excluded.name,added=1`

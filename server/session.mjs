@@ -326,8 +326,9 @@ export function createSessionService({
     },
     sourceOperation(who, grant, action, payload) {
       return discovery.call(source, service.sourceSession(who, grant), action, payload).then(result => {
-        if(downloads) void downloads.run().catch(()=>{});
-        return result;
+        const {archiveChanged,...response}=result;
+        if(downloads && (archiveChanged || ['creator-profiles','author'].includes(action))) void downloads.run().catch(()=>{});
+        return response;
       });
     },
     sourceSession(who, grant) {

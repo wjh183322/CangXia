@@ -13,9 +13,9 @@ export function currentHDCover(db, workId) {
     .prepare(
       `SELECT h.body FROM hd_covers h
     JOIN archive_resources v ON v.work_id=h.work_id AND v.key='video' AND v.sha256=h.video_sha
-    JOIN archive_resources c ON c.work_id=h.work_id AND c.key='cover' AND c.sha256=h.cover_sha
+    LEFT JOIN archive_resources c ON c.work_id=h.work_id AND c.key='cover'
     JOIN archive_resources output ON output.work_id=h.work_id AND output.key=json_extract(h.body,'$.key') AND output.sha256=json_extract(h.body,'$.sha256')
-    WHERE h.work_id=?`
+    WHERE h.work_id=? AND coalesce(c.sha256,'')=h.cover_sha`
     )
     .get(workId);
   return row && JSON.parse(row.body);
@@ -265,6 +265,22 @@ function validHome(home) {
   return home;
 }
 
+function authorFolder(id, name) {
+  return '作者作品/' + safeName(name, 32) + '-' + createHash('sha256').update(id).digest('hex').slice(0, 10);
+}
+export function recordedAuthorFolder(db, id, name) {
+  const source = db
+    .prepare("SELECT json_extract(body,'$.folder') AS folder FROM read_sources WHERE source_id=?")
+    .get('author:' + id);
+  if (source?.folder) return source.folder;
+  const prior = db
+    .prepare(
+      "SELECT json_extract(body,'$.home.folder') AS folder FROM archive_homes WHERE json_extract(body,'$.home.kind')='author' AND json_extract(body,'$.home.id')=? ORDER BY rowid LIMIT 1"
+    )
+    .get(id);
+  return prior?.folder || authorFolder(id, name);
+}
+
 export function planDestination({
   work,
   source = { kind: 'total', id: '__all__' },
@@ -276,10 +292,7 @@ export function planDestination({
   const folder =
     source.folder ||
     (author
-      ? '作者作品/' +
-        safeName(source.name ?? work.author?.nickname, 32) +
-        '-' +
-        createHash('sha256').update(source.id).digest('hex').slice(0, 10)
+      ? authorFolder(source.id, source.name ?? work.author?.nickname)
       : source.id === '__all__'
         ? '收藏'
         : source.name
@@ -332,7 +345,7 @@ function sourceFor(store, work, saved) {
     .prepare(
       `SELECT m.source_id,s.name FROM source_members m LEFT JOIN read_sources s USING(source_id)
     WHERE work_id=? AND (s.source_id IS NULL OR (s.added=1 AND s.missing=0))
-    ORDER BY CASE WHEN m.source_id LIKE 'folder:%' THEN 0 WHEN m.source_id='total' THEN 1 ELSE 2 END,m.rowid LIMIT 1`
+    ORDER BY CASE WHEN m.source_id LIKE 'folder:%' THEN 0 WHEN m.source_id='total' THEN 1 ELSE 2 END,CASE WHEN m.source_id LIKE 'author:%' THEN m.source_id END,m.rowid LIMIT 1`
     )
     .get(work.id);
   if (ref?.source_id.startsWith('folder:'))
@@ -358,8 +371,15 @@ function sourceFor(store, work, saved) {
         folder: collectionFolder(store.db, saved.home.id, old.name)
       };
   }
-  if (!saved && ref?.source_id.startsWith('author:'))
-    return { kind: 'author', id: ref.source_id.slice(7), name: ref.name };
+  if (!saved && ref?.source_id.startsWith('author:')) {
+    const id = ref.source_id.slice(7);
+    return {
+      kind: 'author',
+      id,
+      name: ref.name,
+      folder: recordedAuthorFolder(store.db, id, ref.name ?? work.author?.nickname)
+    };
+  }
   return { kind: 'total', id: '__all__', name: '收藏' };
 }
 function ownerMap(store) {
@@ -1160,13 +1180,65 @@ export async function recoverFileCommits({ store, layout, workId, jobId, guard }
         return result;
       } catch (error) {
         if (error.code === 'NAS_FILE_RECOVERY_PAUSED') return null;
-        if (error.code === 'NAS_FILE_REVIEW') markCommitForReview(store, commit);
+        if (error.code === 'NAS_FILE_REVIEW' && commit.stage !== 'moving') markCommitForReview(store, commit);
         return { id: commit.id, workId: commit.workId, stage: commit.stage, error: fileReason(error) };
       }
     });
     if (result) results.push(result);
   }
   return results;
+}
+
+function moveInventory(store, workId, home) {
+  const rows = store.resources(workId);
+  if (rows.length !== store.db.prepare('SELECT count(*) AS n FROM media_files WHERE work_id=?').get(workId).n)
+    throw review();
+  return rows.map((asset) => {
+    const proof = assetProof(store, workId, asset);
+    if (!proof || path.posix.dirname(asset.relative_path) !== homePath(home)) throw review();
+    return {
+      name: path.posix.basename(asset.relative_path),
+      id: asset.id,
+      revision: asset.revision,
+      identity: proof.identity,
+      mtimeNs: proof.mtimeNs,
+      size: asset.size,
+      sha256: asset.sha256
+    };
+  });
+}
+
+async function verifyMoveDirectory({ store, layout, commit, where, guard }) {
+  const { body, workId } = commit;
+  const inventory = moveInventory(store, workId, body.before.home);
+  if (body.inventory && JSON.stringify(inventory) !== JSON.stringify(body.inventory)) throw review();
+  const dir = await directory(layout.media, homePath(where));
+  if (!same(dir.stat, body.before.identity)) throw review();
+  const names = inventory.map((item) => item.name).sort();
+  const verified = [];
+  for (const item of inventory) {
+    guard?.();
+    const located = await fileAt(layout.media, portable(homePath(where), item.name));
+    if (!same(located.parent.stat, body.before.identity)) throw review();
+    await assertDigest(located, item);
+    verified.push([located.file, located.stat]);
+  }
+  for (const [file, stat] of verified) {
+    const current = await status(file);
+    if (
+      !same(current, idOf(stat)) ||
+      current.nlink !== 1n ||
+      current.ctimeNs !== stat.ctimeNs ||
+      current.mtimeNs !== stat.mtimeNs ||
+      current.size !== stat.size
+    )
+      throw review();
+  }
+  if (
+    !same(await status(dir.file), body.before.identity) ||
+    JSON.stringify((await fs.readdir(dir.file)).sort()) !== JSON.stringify(names)
+  )
+    throw review();
 }
 
 async function applyMove({ store, layout, commit, recoverOnly = false, guard }) {
@@ -1188,6 +1260,7 @@ async function applyMove({ store, layout, commit, recoverOnly = false, guard }) 
     if (recoverOnly) return null;
     await retry(async () => {
       store.fileHook('beforeFileMove', { workId, file: to });
+      await verifyMoveDirectory({ store, layout, commit, where: original, guard });
       if (!same(await status(from), body.before.identity) || (await status(to))) throw review();
       if (
         !same(await status(oldParent.file), idOf(oldParent.stat)) ||
@@ -1207,6 +1280,7 @@ async function applyMove({ store, layout, commit, recoverOnly = false, guard }) 
     placed = await status(to);
   }
   if (previous || !placed?.isDirectory() || !same(placed, body.before.identity)) throw review();
+  await verifyMoveDirectory({ store, layout, commit, where: target });
   await syncDirectory(oldParent.file);
   if (nextParent.file !== oldParent.file) await syncDirectory(nextParent.file);
 
@@ -1371,20 +1445,14 @@ export async function finalizeWorkFiles({
       const after = { home: target.home, identity: before.identity, collectionName: target.collectionName };
       guard();
       if (homePath(before.home) !== homePath(after.home)) {
-        const owned = await directory(layout.media, homePath(before.home));
-        if (!same(owned.stat, before.identity)) throw review();
-        const assets = store.resources(workId);
-        const names = new Set(assets.map((row) => path.posix.basename(row.relative_path)));
-        if ((await fs.readdir(owned.file)).some((name) => !names.has(name))) throw review();
-        for (const asset of assets)
-          await resolveResource({ store, layout, workId, key: asset.key, verify: true, signal });
+        const inventory = moveInventory(store, workId, before.home);
         guard();
         const commit = {
           id: randomUUID(),
           workId,
           resourceId: null,
           stage: 'moving',
-          body: { before, after, kind: 'move', jobId, archiveRevision: revision }
+          body: { before, after, inventory, kind: 'move', jobId, archiveRevision: revision }
         };
         updateCommit(store, commit);
         await applyMove({ store, layout, commit, guard });

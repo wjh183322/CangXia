@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openLibrary } from '../../server/library.mjs';
+import { parseSourceDetail } from '../../server/source-parser.mjs';
 import { createDownloads } from '../../server/downloads.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { registerCatalogueHandlers } from '../../electron/server-ipc.mjs';
@@ -74,6 +75,7 @@ function fixture(t, work, options = {}) {
     root,
     library,
     ipc,
+    discover: () => session.sourceOperation(who, grant, 'folders', {}),
     start,
     close,
     command,
@@ -187,6 +189,138 @@ test('directory move killed after rename restarts by inode and retains a changed
   );
 });
 
+for (const mutation of ['added', 'same-bytes-replaced', 'modified', 'missing']) {
+  test('restart before journaled rename rejects a source whose inventory was ' + mutation, async (t) => {
+    const f = fixture(t, album);
+    f.ipc.download(['71'], { scope: 'missing' });
+    await f.d.run();
+    const file = f.file('image-0'),
+      directory = path.dirname(file);
+    f.library.write((db) =>
+      db.exec("UPDATE works SET title='移动后',body=json_set(body,'$.name','移动后') WHERE id='71'")
+    );
+    await f.close();
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+      import {openLibrary} from './server/library.mjs';
+      import {createDownloads} from './server/downloads.mjs';
+      const root=process.argv[1],library=openLibrary({root}),d=createDownloads({root,library,
+        fileHook(name){if(name==='beforeFileMove')process.kill(process.pid,'SIGKILL');}});
+      await d.run();`,
+        f.root
+      ],
+      { cwd: repo, windowsHide: true }
+    );
+    assert.notEqual(child.status, 0);
+    assert.equal(
+      f.library.read((db) => db.prepare("SELECT COUNT(*) n FROM file_commits WHERE stage='moving'").get().n),
+      1
+    );
+    if (mutation === 'added') fs.writeFileSync(path.join(directory, '外部文件'), '保留');
+    if (mutation === 'same-bytes-replaced') {
+      fs.renameSync(file, path.join(path.dirname(directory), '原图'));
+      fs.copyFileSync(path.join(path.dirname(directory), '原图'), file);
+    }
+    if (mutation === 'modified') fs.writeFileSync(file, Buffer.alloc(small.length, 7));
+    if (mutation === 'missing') fs.renameSync(file, path.join(path.dirname(directory), '原图'));
+    f.start();
+    await f.d.run();
+    assert.equal(fs.existsSync(directory), true);
+    assert.equal(fs.existsSync(path.join(path.dirname(directory), '移动后-作者')), false);
+    assert.equal(
+      f.library.read(
+        (db) =>
+          db.prepare("SELECT revision<>completed dirty FROM archive_state WHERE work_id='71'").get().dirty
+      ),
+      1
+    );
+    if (mutation === 'added') {
+      assert.equal(fs.readFileSync(path.join(directory, '外部文件'), 'utf8'), '保留');
+      fs.renameSync(path.join(directory, '外部文件'), path.join(path.dirname(directory), '用户另存'));
+      await f.d.run();
+      assert.equal(f.info().workName, '移动后');
+    }
+  });
+}
+
+test('repeated folder discovery and count-only updates perform no archive hashing; real presence and name changes reconcile', async (t) => {
+  let entries = [{ id: '88', name: '归档夹', count: 1 }];
+  let digests = 0;
+  const f = fixture(t, album, {
+    source: { account: () => ({ uid: '42', authEpoch: 'fixture' }), discoverFolders: async () => entries },
+    fileHook(name) {
+      if (name === 'beforeResourceVerify') digests++;
+    }
+  });
+  await f.discover();
+  f.command('add-folders', { ids: ['88'] });
+  f.library.write((db) => db.exec("INSERT INTO source_members VALUES('folder:88','71',0,0)"));
+  f.ipc.download(['71'], { scope: 'missing' });
+  await f.d.run();
+  const revision = () =>
+    f.library.read(
+      (db) => db.prepare("SELECT revision FROM archive_state WHERE work_id='71'").get()?.revision ?? 0
+    );
+  const baseline = revision();
+  let wakes=0;
+  const drain=f.d.run;
+  f.d.run=()=>{wakes++;return drain();};
+  for (const count of [1, 1, 9]) {
+    entries = [{ ...entries[0], count }];
+    digests = 0;
+    await f.discover();
+    assert.equal(wakes,0);
+    await drain();
+    assert.equal(revision(), baseline);
+    assert.equal(digests, 0);
+  }
+  entries = [{ ...entries[0], name: '新夹名' }];
+  await f.discover();
+  await f.d.run();
+  const renamed = revision();
+  assert.ok(renamed > baseline);
+  assert.ok(digests > 0);
+  assert.equal(f.info().collection, '新夹名');
+  entries = [];
+  digests = 0;
+  await f.discover();
+  await f.d.run();
+  assert.ok(revision() > renamed);
+  assert.ok(digests > 0);
+});
+
+test('multiple author sources use sorted IDs after membership recreation, and later works share the original author directory', async (t) => {
+  const f = fixture(t, album);
+  f.library.write((db) =>
+    db.exec(
+      "DELETE FROM source_members; INSERT INTO read_sources VALUES('author:B','42','作者B','{}',1,0),('author:A','42','原昵称','{}',1,0); INSERT INTO source_members VALUES('author:B','71',0,0),('author:A','71',0,0)"
+    )
+  );
+  f.ipc.download(['71'], { scope: 'missing' });
+  await f.d.run();
+  const first = f.info();
+  assert.equal(first.collectionId, 'author:A');
+  const authorDir = path.dirname(path.dirname(f.file('image-0')));
+  const second = { ...album, id: '73', name: '另外的作品' };
+  f.library.write((db) => {
+    db.prepare('INSERT INTO works VALUES(?,?,?)').run(second.id, second.name, JSON.stringify(second));
+    db.exec(
+      "DELETE FROM source_members; INSERT INTO source_members VALUES('author:A','71',0,0),('author:B','71',0,0),('author:B','73',1,0),('author:A','73',1,0); UPDATE read_sources SET name='新昵称' WHERE source_id='author:A'"
+    );
+  });
+  f.ipc.download(['73'], { scope: 'missing' });
+  await f.d.run();
+  const secondRow = f.d.store.resources('73').find((row) => row.key === 'metadata');
+  const secondPath = path.join(f.d.layout.media, secondRow.relative_path);
+  assert.equal(path.dirname(path.dirname(secondPath)), authorDir);
+  assert.equal(JSON.parse(fs.readFileSync(secondPath)).collectionId, 'author:A');
+  assert.equal(JSON.parse(fs.readFileSync(secondPath)).collection, '新昵称');
+});
+
 test('an author-owned archive keeps its physical directory after collection and title changes', async (t) => {
   const f = fixture(t, album);
   f.library.write((db) =>
@@ -251,6 +385,12 @@ test(
       coverUrls: ['https://p3.douyinpic.com/ref']
     };
     for (const [mode, reference] of [
+      ['only-video-platform', 'reference'],
+      ['only-video-frame', 'reference'],
+      ['only-video-wrong', 'wrong'],
+      ['parsed-upgrade', 'reference'],
+      ['changed-video', 'reference'],
+      ['disjoint-cover', 'reference'],
       ['frame', 'reference'],
       ['reject', 'wrong'],
       ['platform', 'reference'],
@@ -258,8 +398,41 @@ test(
       ['swapped', 'reference'],
       ['cancel', 'reference']
     ]) {
-      const work = structuredClone(film);
-      let high = false;
+      const onlyVideo = mode.startsWith('only-video');
+      const parsed = (extra = false, changed = false) =>
+        parseSourceDetail({
+          workId: '72',
+          status: 200,
+          observedAt: '2026-11-26T10:00:00Z',
+          text: JSON.stringify({
+            aweme_detail: {
+              aweme_id: '72',
+              item_title: '高清视频',
+              author: { uid: '12', nickname: '合成' },
+              video: {
+                vid: changed ? 'new-video' : 'same-video',
+                play_addr: { uri: 'video-id', url_list: film.videoUrls },
+                cover: {
+                  uri: 'page-cover',
+                  url_list:
+                    mode === 'disjoint-cover' && extra
+                      ? ['https://p3.douyinpic.com/other-page']
+                      : film.coverUrls
+                },
+                ...(extra
+                  ? { origin_cover: { uri: 'origin-hd', url_list: ['https://p3.douyinpic.com/hd'] } }
+                  : {})
+              }
+            }
+          })
+        });
+      const realParser = ['parsed-upgrade', 'changed-video', 'disjoint-cover'].includes(mode);
+      const work = realParser ? parsed() : structuredClone(film);
+      if (realParser)
+        assert.notEqual(parsed(true).mediaQuality.identities.cover, work.mediaQuality.identities.cover);
+      let high = false,
+        repair = false,
+        fetchedVideo = 0;
       let intercepted = false;
       const f = fixture(t, work, {
         coverPython: python,
@@ -281,13 +454,18 @@ test(
         },
         source: {
           account: () => ({ uid: '42' }),
-          readDownloadDetail: async () => ({
-            ...work,
-            coverUrls: high ? ['https://p3.douyinpic.com/hd'] : work.coverUrls
-          })
+          readDownloadDetail: async () =>
+            realParser
+              ? parsed(repair, repair && mode === 'changed-video')
+              : {
+                  ...work,
+                  coverUrls: high ? ['https://p3.douyinpic.com/hd'] : work.coverUrls
+                }
         },
-        fetchAsset: async (url) =>
-          new Response(
+        fetchAsset: async (url) => {
+          if (url.endsWith('/video')) fetchedVideo++;
+          else if (onlyVideo && !repair) return new Response(null, { status: 404 });
+          return new Response(
             fs.readFileSync(
               path.join(
                 files,
@@ -295,12 +473,18 @@ test(
               )
             ),
             { headers: { 'Content-Type': url.endsWith('/video') ? 'video/mp4' : 'image/png' } }
-          )
+          );
+        }
       });
       f.ipc.download(['72'], { scope: 'missing' });
       await f.d.run();
-      assert.equal(f.state('72').state, 'complete', JSON.stringify(f.state('72')));
-      high = mode === 'platform';
+      assert.equal(f.state('72').state, onlyVideo ? 'failed' : 'complete', JSON.stringify(f.state('72')));
+      assert.equal(
+        f.rows().some((r) => r.key === 'cover'),
+        !onlyVideo
+      );
+      repair = true;
+      high = mode === 'platform' || mode === 'only-video-platform';
       const { revision, scope } = f.query('list-works', { source: 'all' });
       const response = f.ipc.catalogueAction('repair-cover', {
         source: 'all',
@@ -313,6 +497,11 @@ test(
       assert.equal(response.queued, 1);
       await f.d.run();
       const outcome = f.state('hd:72');
+      assert.equal(fetchedVideo, 1);
+      if (['changed-video', 'disjoint-cover'].includes(mode)) {
+        assert.equal(outcome.reason?.code, 'NAS_MEDIA_SET_REVIEW');
+        continue;
+      }
       if (['swapped', 'cancel'].includes(mode)) {
         assert.equal(intercepted, true);
         assert.equal(f.query('work-detail', { id: '72' }).hdCover, null);
@@ -326,7 +515,7 @@ test(
         );
         continue;
       }
-      if (mode === 'reject') {
+      if (mode === 'reject' || mode === 'only-video-wrong') {
         assert.equal(outcome.reason.code, 'NAS_COVER_REJECTED', JSON.stringify(outcome));
         assert.equal(f.query('work-detail', { id: '72' }).hdCover, null);
         assert.equal(
@@ -336,9 +525,17 @@ test(
         continue;
       }
       assert.equal(outcome.state, 'complete', JSON.stringify(outcome));
+      if (onlyVideo) {
+        assert.equal(f.state('72').state, 'failed');
+        assert.equal(Boolean(f.query('work-detail', { id: '72' }).downloaded), false);
+        assert.equal(
+          f.rows().some((r) => r.key === 'cover'),
+          false
+        );
+      }
       const hd = f.info().hdCover;
       assert.deepEqual(hd, f.query('work-detail', { id: '72' }).hdCover);
-      if (mode === 'frame') {
+      if (mode === 'frame' || mode === 'only-video-frame') {
         const desktop = JSON.parse(fs.readFileSync(path.join(files, 'golden.json')));
         assert.deepEqual(hd.crop, desktop.crop);
         assert.equal(hd.frame, desktop.frame);
