@@ -290,7 +290,7 @@ export function catalogueChoices(db, input, owner) {
 }
 // Called inside the downstream command's write transaction. Materialize NAS-side only,
 // before mutating anything, because the command may change its own filter or revision.
-export function confirmedSelection(db, input, owner, { collect = false, paged = false } = {}) {
+export function confirmedSelection(db, input, owner, { collect = false, paged = false, preview = false } = {}) {
   const { from, args, order, scope, revision } = context(db, input, owner);
   if (input.scope !== scope || input.revision !== revision || typeof input.all !== 'boolean') throw expired();
   const ids = strings(input.ids, 10000);
@@ -303,7 +303,7 @@ export function confirmedSelection(db, input, owner, { collect = false, paged = 
   const selection = from + ' AND ' + (input.all ? 'NOT ' : '') + membership,
     params = [...args, JSON.stringify(ids)];
   const count = db.prepare('SELECT count(*) AS n' + selection).get(...params).n;
-  if ((collect || paged) && (!Number.isSafeInteger(input.confirmedCount) || input.confirmedCount !== count))
+  if ((collect || (paged && !preview)) && (!Number.isSafeInteger(input.confirmedCount) || input.confirmedCount !== count))
     throw expired();
   if(paged)return {count,revision,sql:'SELECT w.id'+selection+' ORDER BY '+order,params};
   return collect

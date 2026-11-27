@@ -90,3 +90,5 @@ cp -a "$seed/library/cangxia-server" "$seed/browser/"
 "${compose[@]}" run --rm --no-deps -T -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
   -v "$PWD/node_modules:/opt/cangxia/node_modules:ro" -e CANGXIA_TEST_COVER_PYTHON=/opt/cover-runtime/bin/python \
   --entrypoint node server /opt/cangxia/tests/server-edition/benchmark.mjs 50000
+"${compose[@]}" run --rm --no-deps -T -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
+  -v "$PWD/node_modules:/opt/cangxia/node_modules:ro" --entrypoint node server /opt/cangxia/tests/server-edition/download-batch-benchmark.mjs 50000

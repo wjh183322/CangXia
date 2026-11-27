@@ -1,6 +1,7 @@
 import {createRemovalService} from './removal.mjs';
 import {createMaintenance} from './maintenance.mjs';
 import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection,confirmedPage} from './catalogue.mjs';
+import {admissionThreshold,controlBatches} from './download-batches.mjs';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
@@ -105,6 +106,8 @@ export function createSessionService({
     exportsByGrant.set(token,{generation:grant.generation,query});
     return {token,count:query.count,revision:query.revision};
   }
+  const customActions=catalogueActions;
+  const batchScopes=new Map([['download','unsaved'],['download-missing','missing'],['repair','repair'],['repair-cover','repair-cover'],['audio','audio']]);
   if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
     'flat-download':confirmExport, 'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
   const mutations = new Map(
@@ -133,15 +136,17 @@ export function createSessionService({
         return { added: true };
       },
       ...(downloads&&{
-        'enqueue-download':(db,{payload})=>{
+        'enqueue-download':(db,{payload,operationId},{who})=>{
           if(Object.keys(payload).some(k=>!['workIds','selection','revision'].includes(k)))throw invalid();
           if(payload.revision!==undefined&&catalogueRevision(db)!==payload.revision)throw failure(409,'STALE_SELECTION','作品列表已更新，请重新确认。');
-          return downloads.enqueue(db,payload.workIds,payload.selection);
+          return downloads.submitIds(db,payload.workIds,payload.selection??'unsaved',{operationId,account:who.accountId,selection:payload});
         },
         'control-audio':(db,{payload:{action}})=>{
           if(!['pause','resume','cancel'].includes(action))throw invalid();
           const ids=db.prepare("SELECT id FROM download_manifests WHERE hidden=0 AND id LIKE 'audio:%'").all().map(r=>r.id);
-          return downloads.control(db,{action,ids});
+          const stopped=controlBatches(db,action,null,true);
+          const result=downloads.control(db,{action,ids});
+          return {...result,cancelled:result.cancelled+stopped};
         },
         'control-download':(db,{payload})=>downloads.control(db,payload)
       }),
@@ -152,6 +157,11 @@ export function createSessionService({
         if(catalogueActions[action]===confirmExport){
           const query=confirmedSelection(db,selection,owner,{paged:true});
           return confirmExport(db,query,owner);
+        }
+        if(downloads && batchScopes.has(action) && !Object.hasOwn(customActions,action) &&
+           selection?.confirmedCount>admissionThreshold){
+          const query=confirmedSelection(db,selection,owner,{paged:true});
+          return downloads.admit(db,query,batchScopes.get(action),{operationId:command.operationId,account:owner.who.accountId,selection});
         }
         const ids=confirmedSelection(db,selection,owner,{collect:true});
         if(!Object.hasOwn(catalogueActions,action))throw failure(409,'ACTION_UNAVAILABLE','当前服务尚未启用此操作，未处理任何作品。');
@@ -165,10 +175,8 @@ export function createSessionService({
   const reads = new Map(
     Object.entries({
       ...(downloads&&{'download-selection':(db,input,owner)=>{
-        const {count}=confirmedSelection(db,input,owner);
-        const ids=confirmedSelection(db,{...input,confirmedCount:count},owner,{collect:true});
-        return downloads.preview(db,ids);
-      },'download-page':downloads.page,'preview-download':(db,{workIds})=>({...downloads.preview(db,workIds),revision:catalogueRevision(db)})}),
+        return downloads.previewQuery(db,confirmedSelection(db,input,owner,{paged:true,preview:true}));
+      },'download-page':downloads.page,'download-batch':downloads.batchPage,'preview-download':(db,{workIds})=>({...downloads.preview(db,workIds),revision:catalogueRevision(db)})}),
       ...(downloads && {'audio-page':downloads.audioPage,'validate-downloads':downloads.validateSelection}),
       'export-page': (db,{token,offset},{grant})=>{
         const batch=exportsByGrant.get(token);

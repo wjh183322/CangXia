@@ -29,6 +29,7 @@
 !server/covers.mjs
 !server/deployment-recovery.mjs
 !server/deployment.mjs
+!server/download-batches.mjs
 !server/download-records.mjs
 !server/download-resources.mjs
 !server/download-store.mjs
@@ -66,6 +67,7 @@
 !server/schema/v14.sql
 !server/schema/v15.sql
 !server/schema/v16.sql
+!server/schema/v17.sql
 !server/schema/v3.sql
 !server/schema/v4.sql
 !server/schema/v6.sql

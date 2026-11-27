@@ -86,6 +86,26 @@ export function TagEditor({work,allTags,onSave,onFilter,busy,lookup}) {
   useEffect(()=>{if(!lookup)return;let current=true;lookup({source:'all',kind:'myTags',query,page:tagPage}).then(report=>{if(current)setRemote(report);}).catch(()=>{if(current)setRemote(null);});return ()=>{current=false;};},[lookup,query,tagPage,work.entityVersion]);
   return <div className="local-tag-editor"><label>我的标签</label><div className="detail-tags">{(work.localTags||[]).map(t=><button key={t} onClick={()=>onFilter(t)}>#{t}</button>)}</div><p className="muted small">点击上方标签筛选；在下方勾选标注后保存。</p><input className="choice-search" placeholder="搜索已有的我的标签" value={query} onChange={e=>{setQuery(e.target.value);setTagPage(1);}}/><div className="tag-options quick-tags">{[...new Set([...draft,...(lookup?remote?.items.map(([id])=>id)||[]:allTags)])].filter(t=>t.toLowerCase().includes(query.toLowerCase())).slice(0,150).map(t=><button key={t} className={draft.includes(t)?'selected':''} onClick={()=>setDraft(draft.includes(t)?draft.filter(x=>x!==t):[...draft,t])}>{draft.includes(t)&&<Check size={12}/>}#{t}</button>)}</div>{lookup&&(tagPage>1||remote?.hasMore)&&<div className="pagination"><button disabled={tagPage===1} onClick={()=>setTagPage(tagPage-1)}>上一页</button><button disabled={!remote?.hasMore} onClick={()=>setTagPage(tagPage+1)}>下一页</button></div>}<form onSubmit={e=>{e.preventDefault();const t=input.trim().replace(/^#/,'');if(t){setDraft([...new Set([...draft,t])]);setInput('');}}}><input value={input} onChange={e=>setInput(e.target.value)} placeholder="新建我的标签" maxLength={80}/><button type="submit">添加</button></form><button className="button secondary" disabled={busy||JSON.stringify(draft)===JSON.stringify(work.localTags||[])} onClick={()=>onSave(draft)}>保存标注</button></div>;
 }
+export function DownloadAdmissions({queue,getPage,onCancel,busy}) {
+  const [view,setView]=useState(null),[data,setData]=useState(null);
+  useEffect(()=>{
+    if(!view)return;
+    let current=true;
+    getPage(view).then(result=>{if(current)setData({...result,id:view.id});})
+      .catch(error=>{if(current)setData({id:view.id,error:error.message});});
+    return ()=>{current=false;};
+  },[getPage,view,queue?.revision]);
+  return (queue?.batches??[]).map(b=><section key={b.id} className="queue-actions" aria-label="所选作品入队进度">
+    <div><strong>已受理 {b.total} 个作品</strong><p role="status">待处理 {b.pending} · 已入队 {b.queued} · 已在队列 {b.existing} · 无需下载 {b.skipped} · 已移除旧任务 {b.removed} · 已取消 {b.cancelled} · 需重新确认 {b.changed+b.failed}</p></div>
+    {b.pending>0&&<button className="text-button" disabled={busy} onClick={()=>onCancel(b.id)}>取消这批剩余作品</button>}
+    {b.changed+b.failed>0&&<button className="text-button" onClick={()=>setView(view?.id===b.id?null:{id:b.id,page:1})}>查看需确认的作品</button>}
+    {view?.id===b.id&&data?.id===b.id&&<div>{data.error?<p role="alert">{data.error}</p>:<>
+      {data.items.map(i=><p key={i.workId}>{i.workId} · {i.reason}</p>)}
+      {data.page>1&&<button onClick={()=>setView({...view,page:data.page-1})}>上一页</button>}
+      {data.page*50<data.changed+data.failed&&<button onClick={()=>setView({...view,page:data.page+1})}>下一页</button>}</>}</div>}
+  </section>);
+}
+
 export function DownloadManager({queue,getPage,onClear,onToggle,onRetry,onRetryFailed,onDetail,onVerify,onConcurrency,onCancel,cancelBusy=false,busy,initialState}) {
   const [tab,setTab]=useState(initialState?.tab||'active'),[selected,setSelected]=useState(initialState?.selection?.ids||[]),[page,setPage]=useState(initialState?.page||1),listRef=useRef(null),restore=useRef(initialState),tabMounted=useRef(false);
   const [pageData,setPageData]=useState(null),[pageError,setPageError]=useState(''),request=useRef(0);

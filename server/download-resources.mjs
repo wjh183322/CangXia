@@ -167,7 +167,9 @@ export const downloadStatus=`CASE WHEN json_extract(w.body,'$.remoteState')='una
  WHEN ${checking} THEN 'checking' WHEN NOT ${hasMedia} THEN 'unsaved'
  WHEN ${complete} THEN 'complete' ELSE 'partial' END`;
 
+const installed=new WeakSet();
 export function installDownloadStatus(db) {
+  if(installed.has(db))return;
   db.function('cx_complete',{deterministic:true},(id,body,rows,manifest)=>{
     try{
       const work={...JSON.parse(body),id},old=manifest&&JSON.parse(manifest);
@@ -186,5 +188,6 @@ export function installDownloadStatus(db) {
       }));
     }catch{return 0;}
   });
+  installed.add(db);
 }
 

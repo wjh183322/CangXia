@@ -1,4 +1,5 @@
 import {getJob,putJob as put,fenceUnavailable} from './download-records.mjs';
+import {admitBatch,admissionThreshold,batchList,batchPage,controlBatches,dispatchBatches} from './download-batches.mjs';
 import {inspectInventory} from './maintenance-inventory.mjs';
 import {sharedRepairPeers,needsResourceWork} from './maintenance-queue.mjs';
 import {removalOwnsFiles} from './removal.mjs';
@@ -384,6 +385,7 @@ function queueState(db,audioOnly=false) {
   }
   return {
     summary: true,
+    batches:batchList(db,audioOnly),
     paused: audioOnly?rows.some(r=>['paused','pausing'].includes(r.state)):!!opts.paused,
     revision: opts.revision,
     concurrency: opts.concurrency,
@@ -419,14 +421,22 @@ function explicitIds(ids) {
   const selected=[...new Set(ids)];
   return {sql:'SELECT value AS id FROM json_each(?)',params:[JSON.stringify(selected)],count:selected.length};
 }
-function preview(db,ids) {
-  const q=explicitIds(ids);
+const statusStatements=new WeakMap();
+function groupsFor(db,ids) {
+  explicitIds(ids);
   installDownloadStatus(db);
+  let status=statusStatements.get(db);
+  if(!status){
+    status=db.prepare('SELECT '+downloadStatus+' AS group_name FROM works w WHERE w.id=?');
+    statusStatements.set(db,status);
+  }
   const groups={unsaved:[],partial:[],complete:[],unavailable:[],checking:[]};
-  for(const row of db.prepare(selectionRows(q)+' SELECT id,group_name FROM statuses').iterate(...q.params))groups[row.group_name].push(row.id);
-  const report=previewQuery(db,q);
-  if(report.selected!==q.count)throw invalid();
-  return {groups,report};
+  for(const id of new Set(ids)){
+    const row=status.get(id);
+    if(!row)throw invalid();
+    groups[row.group_name].push(id);
+  }
+  return groups;
 }
 
 export function createDownloads({
@@ -521,7 +531,7 @@ export function createDownloads({
     if(ids.some(id=>removalOwnsFiles(conn,id)))throw failure('NAS_REMOVAL_BUSY','作品正在处理删除或恢复，请先核对回执。');
     const auth = binding(conn);
     if (source?.account()?.uid !== auth.uid) throw authRequired();
-    const { groups, report } = preview(conn, ids);
+    const groups = groupsFor(conn, ids);
     const eligible =
       scope === 'unsaved'
         ? groups.unsaved
@@ -599,7 +609,52 @@ export function createDownloads({
         }
       }
     }
-    return { jobId: first, queued, existing, removed, unavailable: report.unavailable };
+    return { jobId: first, queued, existing, removed, unavailable: groups.unavailable.length };
+  }
+  function admit(conn,query,scope,context){
+    const auth=binding(conn);
+    if(source?.account()?.uid!==auth.uid)throw authRequired();
+    return admitBatch(conn,query,scope,{...context,auth});
+  }
+  function submitIds(conn,ids,scope,context){
+    const query=explicitIds(ids);
+    if(query.count<=admissionThreshold)return enqueue(conn,ids,scope);
+    if(!Number.isSafeInteger(context.selection.revision))throw invalid();
+    return admit(conn,query,scope,context);
+  }
+  // Bulk changes for ordinary jobs do not need thousands of JSON round trips through JS.
+  // Receipt-linked repairs, active transfers and staged files retain the normal per-job path.
+  function simpleQueueControl(conn,action){
+    if(action==='clear'){
+      const n=conn.prepare("UPDATE download_manifests SET hidden=1 WHERE hidden=0 AND id IN (SELECT id FROM download_jobs WHERE state='complete')").run().changes;
+      if(n)conn.exec('UPDATE download_options SET revision=revision+1');
+      return n;
+    }
+    const from={pause:"j.state='queued'",resume:"j.state='paused'",cancel:"j.state IN ('queued','paused')",
+      retry:"j.state IN ('failed','review','waiting-auth','waiting-rate','finalization-pending')"}[action];
+    if(!from)return 0;
+    const resuming=action==='resume'||action==='retry';
+    let auth;
+    if(resuming){
+      try{auth=binding(conn);if(source?.account()?.uid!==auth.uid)return 0;}catch{return 0;}
+    }
+    conn.exec('CREATE TEMP TABLE IF NOT EXISTS cx_control_ids(id TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM cx_control_ids');
+    const selected=conn.prepare(`INSERT INTO cx_control_ids SELECT j.id FROM download_jobs j JOIN download_manifests m ON m.id=j.id
+      JOIN works w ON w.id=j.work_id WHERE m.hidden=0 AND ${from}
+      AND json_extract(m.body,'$.legacyTask') IS NULL AND coalesce(json_extract(m.body,'$.cleanupPending'),0)=0
+      AND j.id NOT IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM maintenance_queue_links l WHERE l.job=j.id)
+      ${action==='pause'?'':"AND NOT EXISTS (SELECT 1 FROM removal_items i JOIN removal_batches b ON b.token=i.token WHERE i.work_id=j.work_id AND b.scope IN ('files','restore-files') AND b.state IN ('running','paused','restoring','checking'))"}
+      ${action==='cancel'?"AND NOT EXISTS (SELECT 1 FROM file_commits f WHERE f.work_id=j.work_id AND json_extract(f.body,'$.jobId')=j.id)":''}
+      ${resuming?"AND json_extract(m.body,'$.auth.uid')=? AND coalesce(json_extract(w.body,'$.remoteState'),'')<>'unavailable'":''}`)
+      .run(JSON.stringify([...active.keys()]),...(resuming?[auth.uid]:[])).changes;
+    if(!selected)return 0;
+    const to={pause:'paused',resume:'queued',retry:'queued',cancel:'cancelled'}[action];
+    const extra=resuming?",'$.auth',json(?),'$.reason',NULL":'';
+    conn.prepare(`UPDATE download_manifests SET body=json_set(body,'$.state',?${extra}) WHERE id IN cx_control_ids`)
+      .run(to,...(resuming?[JSON.stringify(auth)]:[]));
+    conn.prepare('UPDATE download_jobs SET state=? WHERE id IN cx_control_ids').run(to);
+    conn.exec('UPDATE download_options SET revision=revision+1');
+    return selected;
   }
   function control(conn, { action, jobId, ids, value, state }) {
     if (action === 'concurrency') {
@@ -614,17 +669,20 @@ export function createDownloads({
       conn
         .prepare('UPDATE download_options SET paused=?,revision=revision+1')
         .run(Number(action === 'pause'));
+    const batchChanges=controlBatches(conn,action,all?null:jobId?[jobId]:ids);
+    if(!all && !jobId)ids=ids.filter(id=>!id.startsWith('batch:'));
+    if(jobId?.startsWith('batch:'))return {changed:batchChanges,cancelled:batchChanges};
+    const fast=all&&!state?simpleQueueControl(conn,action):0;
+    const relevant={pause:"j.state IN ('running','queued','awaiting-registration')",resume:"j.state='paused'",
+      clear:"j.state='complete'",cancel:"(j.state NOT IN ('complete','cancelled') OR json_extract(m.body,'$.cleanupPending')=1)"}[action];
     const keys = all && action==='retry'
       ? conn.prepare('SELECT j.id'+join+filterSql('failed')).all().map(row=>row.id)
       : all
-      ? conn
-          .prepare('SELECT id FROM download_manifests WHERE hidden=0')
-          .all()
-          .map((r) => r.id)
+      ? conn.prepare('SELECT j.id'+join+(relevant??'1')).all().map(r=>r.id)
       : jobId
         ? [jobId]
         : [...new Set(ids)];
-    let changed = 0;
+    let changed = batchChanges+fast;
     for (const id of keys) {
       const job = getJob(conn, id);
       if (!job) {
@@ -1307,7 +1365,7 @@ export function createDownloads({
     }
   }
   let wake;
-  function run() {
+  function runJobs() {
     if (closing) return task || Promise.resolve();
     for (const [id, slot] of active) if (stopping.has(getJob(db, id)?.state)) slot.controller.abort();
     if (task) {
@@ -1323,10 +1381,16 @@ export function createDownloads({
           .prepare(
             `SELECT j.id,j.work_id,
               j.state IN ('queued','running') AND json_extract(m.body,'$.finalizationPending') IS 1 AS registration_only
-              FROM download_jobs j JOIN download_manifests m ON j.id=m.id
-      WHERE j.state IN ('pausing','cancelling') OR (?=0 AND j.state IN ('queued','running')) ORDER BY m.rowid`
+              FROM download_manifests m CROSS JOIN download_jobs j ON j.id=m.id
+      WHERE (j.state IN ('pausing','cancelling') OR (?=0 AND j.state IN ('queued','running'))) AND
+        j.work_id NOT IN (SELECT value FROM json_each(?)) AND NOT (
+          json_extract(m.body,'$.finalizationPending') IS 1 AND j.state IN ('queued','running') AND EXISTS(
+            SELECT 1 FROM download_jobs p JOIN download_manifests pm ON pm.id=p.id
+            WHERE p.work_id=j.work_id AND p.id<>j.id AND p.state IN ('queued','running')
+            AND json_extract(pm.body,'$.finalizationPending') IS NOT 1))
+      ORDER BY m.rowid LIMIT 32`
           )
-          .all(opts.paused);
+          .all(opts.paused,JSON.stringify([...active.values()].map(slot=>slot.workId)));
         // Registration checks every registered file. Run this work's admitted byte repairs first.
         const nextByWork = new Map();
         for (const row of candidates) {
@@ -1371,19 +1435,34 @@ export function createDownloads({
       if (!closing) await archive.run();
     })().finally(() => {
       task = null;
-      if (rerun && !closing) return run();
+      if (rerun && !closing) return runJobs();
     });
     return task;
   }
+  let dispatch;
+  function run(){
+    if(closing)return task??Promise.resolve();
+    if(!dispatch)dispatch=dispatchBatches(store,{enqueue,closed:()=>closing,wake:()=>void runJobs().catch(()=>{}),
+      authorized:(conn,original)=>{
+        try{return source?.account()?.uid===original.uid && contentHash(binding(conn))===contentHash(original);}
+        catch{return false;}
+      }}).finally(()=>{dispatch=null;});
+    return Promise.all([dispatch,runJobs()]).then(()=>{if(!closing)return runJobs();});
+  }
   return {
     enqueue,
+    admit,submitIds,previewQuery,batchPage,
     fenceUnavailable,stopUnavailable,
     fetchSourceMedia,
     sourceAuthorization: () => binding(db),
     readMediaDetail:(workId,auth,signal)=>source.readDownloadDetail({workId,...auth,signal}),
     archive,
     control,
-    preview: (conn, ids) => preview(conn, ids).report,
+    preview: (conn, ids) => {
+      const query=explicitIds(ids),report=previewQuery(conn,query);
+      if(report.selected!==query.count)throw invalid();
+      return report;
+    },
     page: (db,input)=>downloadPage(db,input),
     validateSelection:(db,{tab,ids})=>{
       if(!Array.isArray(ids)||ids.length>10000||ids.some(id=>typeof id!=='string'||id.length>100))throw invalid();
@@ -1408,7 +1487,7 @@ export function createDownloads({
       for (const slot of active.values()) slot.controller.abort();
       try {
         await archive.close();
-        await task;
+        await Promise.all([task,dispatch]);
       } finally {
         store.close();
       }
