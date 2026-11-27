@@ -69,7 +69,9 @@ export function registerMaintenanceHandlers({
   handle('markSourceUnavailable', (workId, revision) =>
     command('mark-source-unavailable', { workId, revision })
   );
-  handle('reportCoverStatus', (workId, failed) => command('cover-display', { workId, failed }));
+  handle('reportCoverStatus', (workId, failed, identity) =>
+    command('cover-display', { workId, failed, identity })
+  );
   handle('openDiagnostics', () => openDirectory(diagnostics.dir));
   handle('exportWorkDiagnostic', async (workId) => {
     const epoch = client.epoch,
@@ -81,17 +83,19 @@ export function registerMaintenanceHandlers({
     });
     client.assert(epoch);
     if (canceled || !filePath) return { saved: false };
-    const temporary=path.join(path.dirname(filePath),'.cangxia-diagnostic-'+randomUUID()+'.tmp');
-    const file=await fs.open(temporary,'wx',0o600);
-    try{
-      try{
-        await file.writeFile(JSON.stringify(record,null,2)+'\n','utf8');
+    const temporary = path.join(path.dirname(filePath), '.cangxia-diagnostic-' + randomUUID() + '.tmp');
+    const file = await fs.open(temporary, 'wx', 0o600);
+    try {
+      try {
+        await file.writeFile(JSON.stringify(record, null, 2) + '\n', 'utf8');
         await file.sync();
-      }finally{await file.close();}
+      } finally {
+        await file.close();
+      }
       client.assert(epoch);
-      await fs.rename(temporary,filePath);
-    }catch(error){
-      await fs.unlink(temporary).catch(()=>{});
+      await fs.rename(temporary, filePath);
+    } catch (error) {
+      await fs.unlink(temporary).catch(() => {});
       throw error;
     }
     return { saved: true };

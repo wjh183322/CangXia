@@ -4,7 +4,9 @@ import path from 'node:path';
 import { catalogueRevision, confirmedSelection } from './catalogue.mjs';
 import { resolveResource, withWorkFiles } from './files.mjs';
 import { recordedWork } from './download-store.mjs';
+import { displayCover, mediaList } from './media.mjs';
 import { wantedResources } from './downloads.mjs';
+import { downloadScope, summarizeRepairJobs } from './maintenance-queue.mjs';
 import { failure } from './service-error.mjs';
 
 const invalid = () => failure(400, 'INVALID_CHECK', '检查范围或参数无效。');
@@ -126,22 +128,26 @@ function checkedSelection(db, s, owner, repairOnly = false) {
 function jobIssues(db, id) {
   const rows = db
     .prepare(
-      "SELECT j.state,json_extract(m.body,'$.cleanupPending') cleanup FROM download_jobs j LEFT JOIN download_manifests m ON m.id=j.id WHERE j.work_id=?"
+      "SELECT j.id,j.state,json_extract(m.body,'$.cleanupPending') cleanup FROM download_jobs j LEFT JOIN download_manifests m ON m.id=j.id WHERE j.work_id=?"
     )
     .all(id);
   const issues = [];
   if (db.prepare('SELECT 1 FROM maintenance_cover_failures WHERE work_id=?').get(id))
     issues.push(issue('COVER_DISPLAY_FAILED', 'cover'));
-  if (rows.some((j) => j.cleanup)) issues.push(issue('NAS_CLEANUP_PENDING', 'cleanup'));
-  if (
-    rows.some((j) => j.state === 'finalization-pending') ||
-    db
-      .prepare('SELECT 1 FROM archive_state WHERE work_id=? AND error IS NOT NULL AND revision<>completed')
-      .get(id)
-  )
-    issues.push(issue('NAS_REGISTRATION_PENDING', 'registration'));
-  if (rows.some((j) => ['failed', 'review', 'waiting-rate', 'waiting-auth'].includes(j.state)))
-    issues.push(issue('NAS_DOWNLOAD_FAILED', 'download'));
+  for (const job of rows) {
+    const scope = downloadScope(job.id, id);
+    if (!scope) continue;
+    const add = (code, stage) => issues.push({ ...issue(code, stage), jobId: job.id, scope });
+    if (job.cleanup) add('NAS_CLEANUP_PENDING', 'cleanup');
+    if (job.state === 'finalization-pending') add('NAS_REGISTRATION_PENDING', 'registration');
+    else if (
+      ['failed', 'review', 'waiting-rate', 'waiting-auth'].includes(job.state) ||
+      (job.state === 'unavailable' && sourceState(recordedWork(db, id)) === 'available')
+    )
+      add('NAS_DOWNLOAD_FAILED', 'download');
+  }
+  if (db.prepare('SELECT 1 FROM archive_state WHERE work_id=? AND revision<>completed').get(id))
+    issues.push({ ...issue('NAS_REGISTRATION_PENDING', 'registration'), scope: 'archive' });
   return issues;
 }
 async function files(downloads, id, signal) {
@@ -184,7 +190,7 @@ async function files(downloads, id, signal) {
       issues.push(issue(code, 'files', knownKey(row.key)));
     }
   }
-  if (rows.length) {
+  if (rows.some((r) => !['audio', 'metadata'].includes(r.key))) {
     try {
       for (const target of wantedResources(work, false))
         if (target.candidates.length && !rows.some((r) => r.key === target.key))
@@ -195,14 +201,11 @@ async function files(downloads, id, signal) {
   }
   const state = sourceState(work);
   if (state === 'unavailable') issues.push(issue('SOURCE_UNAVAILABLE', 'source'));
-  const blocked = issues.some((i) =>
-    [
-      'NAS_FILE_REVIEW',
-      'NAS_FILE_PATH',
-      'NAS_FILE_OPERATION',
-      'NAS_MEDIA_SET_REVIEW',
-      'NAS_CLEANUP_PENDING'
-    ].includes(i.code)
+  const blocked = issues.some(
+    (i) =>
+      ['NAS_FILE_REVIEW', 'NAS_FILE_PATH', 'NAS_FILE_OPERATION', 'NAS_MEDIA_SET_REVIEW'].includes(i.code) ||
+      (i.code === 'NAS_CLEANUP_PENDING' &&
+        !issues.some((j) => j.jobId === i.jobId && j.code === 'NAS_REGISTRATION_PENDING'))
   );
   const pending = issues.some((i) =>
     ['NAS_FILE_MISSING', 'NAS_DOWNLOAD_FAILED', 'NAS_REGISTRATION_PENDING'].includes(i.code)
@@ -217,12 +220,68 @@ async function files(downloads, id, signal) {
     issues
   };
 }
+function repairScopes(workId, issues) {
+  const scopes = new Map();
+  for (const i of issues) {
+    if (i.jobId) scopes.set(i.scope, { id: i.jobId, scope: i.scope, retry: true });
+    else if (i.code === 'NAS_FILE_MISSING' && i.key && i.key !== 'metadata') {
+      const scope = i.key === 'audio' ? 'audio' : i.key === 'cover-hd' ? 'cover-hd' : 'media';
+      const current = scopes.get(scope);
+      if (!current)
+        scopes.set(scope, {
+          id: scope === 'audio' ? 'audio:' + workId : scope === 'cover-hd' ? 'hd:' + workId : workId,
+          scope,
+          missing: true
+        });
+      else current.missing = true;
+    }
+  }
+  return [...scopes.values()];
+}
+function admitRepairJobs(db, downloads, run, workId, operations, issues) {
+  const jobs = [];
+  for (const { id, scope, retry, missing } of operations) {
+    db.exec('SAVEPOINT maintenance_enqueue');
+    try {
+      const needsBytes =
+        missing &&
+        db
+          .prepare(
+            "SELECT 1 FROM download_manifests WHERE id=? AND json_extract(body,'$.finalizationPending')=1"
+          )
+          .get(id);
+      const response =
+        retry && !needsBytes
+          ? downloads.control(db, { action: 'retry', jobId: id })
+          : downloads.enqueue(
+              db,
+              [workId],
+              { media: 'repair', audio: 'audio', 'cover-hd': 'repair-cover' }[scope]
+            );
+      const state = db.prepare('SELECT state FROM download_jobs WHERE id=?').get(id)?.state;
+      if (
+        !(response.queued || response.existing) ||
+        !['queued', 'running', 'paused', 'pausing'].includes(state)
+      )
+        throw stale();
+      db.prepare('INSERT INTO maintenance_queue_links VALUES(?,?,?)').run(run, workId, id);
+      jobs.push({ id, scope, state });
+      db.exec('RELEASE maintenance_enqueue');
+    } catch {
+      db.exec('ROLLBACK TO maintenance_enqueue; RELEASE maintenance_enqueue');
+      jobs.push({ id, scope, state: 'failed' });
+      issues.push({ ...issue('REPAIR_FAILED', 'download'), jobId: id, scope });
+    }
+  }
+  return jobs;
+}
 function summary(db, r) {
   const { n, done } = db
     .prepare('SELECT count(*) n,count(result) done FROM maintenance_items WHERE run=?')
     .get(r.id);
   return {
     id: r.id,
+    pendingJobs: db.prepare('SELECT count(*) n FROM maintenance_queue_links WHERE run=?').get(r.id).n,
     kind: r.kind,
     state: r.state,
     created: r.created,
@@ -236,12 +295,13 @@ function summary(db, r) {
 }
 function getCheckPage(db, input, owner) {
   const run = owned(db, input.id, owner),
-    page = pageNumber(input.page);
+    requested = pageNumber(input.page);
   if (input.version !== undefined && run.version !== input.version) throw stale();
   const { where, args } = matches(input),
     from = ' FROM maintenance_items WHERE run=? AND result IS NOT NULL' + where;
   const count = db.prepare('SELECT count(*) n' + from).get(run.id, ...args).n;
   const pages = Math.max(1, Math.ceil(count / pageSize));
+  const page = input.follow === true ? Math.min(pages, requested) : requested;
   if (page > pages) throw invalid();
   const items = db
     .prepare('SELECT result' + from + ' ORDER BY ordinal LIMIT ? OFFSET ?')
@@ -288,6 +348,28 @@ function diagnostic(db, { workId }, owner) {
     .all(workId, owner.who.accountId)
     .map((row) => {
       const value = JSON.parse(row.result);
+      const jobs = (Array.isArray(value.jobs) ? value.jobs : []).flatMap((job) => {
+        const scope = downloadScope(job?.id, workId);
+        if (!scope) return [];
+        const state = [
+          'queued',
+          'paused',
+          'pausing',
+          'running',
+          'cancelling',
+          'cancelled',
+          'complete',
+          'failed',
+          'review',
+          'waiting-auth',
+          'waiting-rate',
+          'finalization-pending',
+          'unavailable'
+        ].includes(job.state)
+          ? job.state
+          : 'unknown';
+        return [{ id: job.id, scope, state }];
+      });
       const issues = (Array.isArray(value.issues) ? value.issues : []).map((i) =>
         issue(
           Object.hasOwn(reasons, i?.code) ? i.code : 'NAS_FILE_OPERATION',
@@ -301,6 +383,8 @@ function diagnostic(db, { workId }, owner) {
         kind: ['files', 'source', 'repair', 'reconcile'].includes(row.kind) ? row.kind : 'check',
         time: row.created,
         issues,
+        ...(jobs.length && { jobs }),
+        ...(['complete', 'failed'].includes(value.registration) && { registration: value.registration }),
         fileStatus: ['complete', 'pending', 'blocked', 'failed', 'queued'].includes(value.fileStatus)
           ? value.fileStatus
           : 'unknown',
@@ -449,7 +533,11 @@ export function createMaintenance({ library, downloads }) {
         });
         if (!row) break;
         const workId = row.work_id;
-        let result, sourceUpdate, auth, priorSource;
+        let result,
+          sourceUpdate,
+          auth,
+          priorSource,
+          operations = [];
         if (kind === 'source') {
           priorSource = session.read((db) => sourceStamp(db, workId));
           try {
@@ -510,9 +598,34 @@ export function createMaintenance({ library, downloads }) {
             issues: pending ? [issue('NAS_REGISTRATION_PENDING', 'registration')] : []
           };
         } else result = await withWorkFiles(downloads.layout, workId, () => files(downloads, workId, signal));
+        if (kind === 'repair' && result.repairable) {
+          operations = repairScopes(workId, result.issues);
+          if (
+            result.issues.some(
+              (i) => i.scope === 'archive' || (i.code === 'NAS_FILE_MISSING' && i.key === 'metadata')
+            )
+          ) {
+            const outcome = await downloads.archive.reconcileArchive({
+              workId,
+              signal,
+              guard: () =>
+                session.read((db) => {
+                  guard(db);
+                  if (sourceState(recordedWork(db, workId)) === 'unavailable') throw stale();
+                })
+            });
+            result.registration = outcome.pending ? 'failed' : 'complete';
+            if (!outcome.pending)
+              result.issues = result.issues.filter(
+                (i) => i.scope !== 'archive' && !(i.code === 'NAS_FILE_MISSING' && i.key === 'metadata')
+              );
+          }
+        }
         commit((db) => {
           if (kind === 'files' || kind === 'repair') {
-            const mediaIssues = result.issues.filter((i) => ['files', 'registration'].includes(i.stage));
+            const mediaIssues = result.issues.filter(
+              (i) => i.stage === 'files' || i.code === 'NAS_MEDIA_SET_REVIEW'
+            );
             if (mediaIssues.length) {
               const state = mediaIssues.every((i) => i.code === 'NAS_FILE_MISSING') ? 'partial' : 'checking';
               db.prepare(
@@ -542,31 +655,21 @@ export function createMaintenance({ library, downloads }) {
             db.prepare(
               "UPDATE works SET body=json_set(body,'$.remoteState',?,'$.sourceStatus',json(?)) WHERE id=?"
             ).run(sourceUpdate, JSON.stringify(record), workId);
+            if (sourceUpdate === 'unavailable') downloads.fenceUnavailable(db, workId);
           }
           if (kind === 'repair') {
             result.queued = false;
             if (result.repairable) {
-              // Keep partial queue writes out of the check receipt if admission fails.
-              db.exec('SAVEPOINT maintenance_enqueue');
-              try {
-                const accepted = downloads.enqueue(db, [workId], 'repair');
-                result.queued = !!(accepted.queued || accepted.existing);
-                if (result.queued) {
-                  result.fileStatus = 'queued';
-                  result.downloadState = db
-                    .prepare('SELECT state FROM download_jobs WHERE id=?')
-                    .get(accepted.jobId).state;
-                  db.prepare('INSERT INTO maintenance_queue_links VALUES(?,?,?)').run(
-                    id,
-                    workId,
-                    accepted.jobId
-                  );
-                }
-                db.exec('RELEASE maintenance_enqueue');
-              } catch {
-                db.exec('ROLLBACK TO maintenance_enqueue; RELEASE maintenance_enqueue');
-                result.fileStatus = 'failed';
-                result.issues.push(issue('REPAIR_FAILED', 'download'));
+              const jobs = admitRepairJobs(db, downloads, id, workId, operations, result.issues);
+              if (jobs.length)
+                result = summarizeRepairJobs({
+                  ...result,
+                  jobs,
+                  queued: jobs.some((j) => j.state !== 'failed')
+                });
+              else if (result.registration) {
+                result.fileStatus = result.registration === 'complete' ? 'complete' : 'failed';
+                result.repairable = result.registration !== 'complete';
               }
             }
           }
@@ -577,6 +680,7 @@ export function createMaintenance({ library, downloads }) {
           );
           db.prepare('UPDATE maintenance_runs SET version=version+1 WHERE id=?').run(id);
         });
+        if (sourceUpdate === 'unavailable') downloads.stopUnavailable(workId);
         if (result.queued) void downloads.run().catch(() => {});
         await nextTurn();
       }
@@ -633,7 +737,7 @@ export function createMaintenance({ library, downloads }) {
       'start-check': startCheck,
       'retry-repair': retryRepair,
       'control-check': control,
-      'cover-display': (db, { payload: { workId, failed } }) => {
+      'cover-display': (db, { payload: { workId, failed, identity } }) => {
         if (
           typeof workId !== 'string' ||
           !/^\d{1,40}$/.test(workId) ||
@@ -641,10 +745,18 @@ export function createMaintenance({ library, downloads }) {
           !recordedWork(db, workId)
         )
           throw invalid();
+        const cover = displayCover(mediaList(db, workId));
+        if (!cover || cover.version !== identity?.version || cover.resourceId !== identity?.resourceId)
+          throw stale();
+        const version = JSON.stringify([cover.resourceId, cover.version]);
         const change = failed
-          ? db.prepare('INSERT OR IGNORE INTO maintenance_cover_failures VALUES(?)')
-          : db.prepare('DELETE FROM maintenance_cover_failures WHERE work_id=?');
-        return { changed: !!change.run(workId).changes };
+          ? db
+              .prepare(
+                'INSERT INTO maintenance_cover_failures(work_id,version) VALUES(?,?) ON CONFLICT(work_id) DO UPDATE SET version=excluded.version WHERE version IS NOT excluded.version'
+              )
+              .run(workId, version)
+          : db.prepare('DELETE FROM maintenance_cover_failures WHERE work_id=?').run(workId);
+        return { workId, changed: !!change.changes };
       },
       'mark-source-unavailable': (db, { payload }) => {
         if (
@@ -662,6 +774,7 @@ export function createMaintenance({ library, downloads }) {
             .run(JSON.stringify(state), payload.workId).changes
         )
           throw invalid();
+        downloads?.fenceUnavailable(db, payload.workId);
         return { workId: payload.workId, sourceStatus: 'unavailable' };
       }
     },

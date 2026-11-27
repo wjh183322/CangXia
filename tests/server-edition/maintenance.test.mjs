@@ -16,7 +16,7 @@ const keys = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t) {
+async function fixture(t, optionsForDownloads = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-maint-'));
   const library = openLibrary({ root, mode: 'init' });
   const observed = new Map();
@@ -41,7 +41,8 @@ async function fixture(t) {
     fetchAsset: async () =>
       new Response(image, {
         headers: { 'Content-Type': 'image/png', 'Content-Length': String(image.length) }
-      })
+      }),
+    ...optionsForDownloads
   });
   const file = path.join(downloads.layout.media, 'folder', 'one', 'video.mp4');
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -236,11 +237,17 @@ test('rate limit stops at the item boundary and resume never replays already com
 });
 test('manual status and cover reports stay per-work and stale manual confirmation cannot change source', async (t) => {
   const f = await fixture(t);
+  f.library.write((db) =>
+    db.exec(
+      "UPDATE works SET body=json_set(body,'$.coverUrls',json('[\"https://p3.douyinpic.com/fixture/cover\"]')) WHERE id='11'"
+    )
+  );
+  const identity = (await f.query('work-detail', { id: '11' })).mediaCover;
   const { revision } = await f.query('list-works', { source: 'all' });
   await assert.rejects(f.command('mark-source-unavailable', { workId: '11', revision: revision - 1 }));
   await f.command('mark-source-unavailable', { workId: '11', revision });
   fs.renameSync(f.file, f.file + '.saved');
-  await f.command('cover-display', { workId: '11', failed: true });
+  await f.command('cover-display', { workId: '11', failed: true, identity });
   assert.ok(
     (await f.query('work-diagnostic', { workId: '11' })).stages.some((i) => i.code === 'COVER_DISPLAY_FAILED')
   );
@@ -248,7 +255,25 @@ test('manual status and cover reports stay per-work and stale manual confirmatio
   assert.equal(page.items[0].repairable, false);
   assert.equal(page.items[0].fileStatus, 'pending');
   assert.ok(page.items[0].issues.some((i) => i.stage === 'cover'));
-  await f.command('cover-display', { workId: '11', failed: false });
+  const fresh = (await f.query('list-works', { source: 'all' })).items.find((w) => w.id === '11');
+  assert.equal(fresh.coverFailed, true);
+  await assert.rejects(
+    f.command('cover-display', {
+      workId: '11',
+      failed: false,
+      identity: { ...identity, version: 'obsolete' }
+    })
+  );
+  f.library.write((db) =>
+    db
+      .prepare("UPDATE works SET body=json_set(body,'$.coverUrls',json(?)) WHERE id='11'")
+      .run(JSON.stringify(['https://p3.douyinpic.com/fixture/replaced']))
+  );
+  const replacement = (await f.query('work-detail', { id: '11' })).mediaCover;
+  assert.notEqual(replacement.version, identity.version);
+  await f.command('cover-display', { workId: '11', failed: true, identity: replacement });
+  await assert.rejects(f.command('cover-display', { workId: '11', failed: false, identity }));
+  await f.command('cover-display', { workId: '11', failed: false, identity: replacement });
   assert.ok(!(await f.query('work-diagnostic', { workId: '11' })).stages.some((i) => i.stage === 'cover'));
 });
 test('audio-only removal preview never selects registered video and cannot confirm an empty audio scope', async (t) => {
@@ -475,4 +500,260 @@ test('whole-library maintenance includes retained media after record removal and
     }
   });
   assert.equal((await f.result(receipt.id)).items[0].workId, '11');
+});
+
+function addAlbum(f, id = '77') {
+  const work = {
+    id,
+    name: 'album',
+    type: 'images',
+    author: { nickname: 'test' },
+    images: [{ index: 0, urls: ['https://p3.douyinpic.com/picture-' + id] }],
+    music: { id: '100' }
+  };
+  f.library.write((db) => {
+    db.prepare('INSERT INTO works VALUES(?,?,?)').run(id, work.name, JSON.stringify(work));
+    db.prepare('INSERT INTO source_audio_hints(work_id,body) VALUES(?,?)').run(
+      id,
+      JSON.stringify({
+        workId: id,
+        music: work.music,
+        sources: [{ kind: 'music', urls: ['https://p3.douyinpic.com/sound-' + id] }]
+      })
+    );
+  });
+}
+async function repairWork(f, id) {
+  const scan = await f.result((await f.start('files', [id])).id);
+  return f.command('retry-repair', {
+    selection: { id: scan.id, revision: scan.revision, version: scan.version, all: false, ids: [id] }
+  });
+}
+test('maintenance retries the failed audio scope and preserves individual outcomes for a multi-scope repair', async (t) => {
+  const f = await fixture(t, { fetchAsset: async () => new Response(null, { status: 503 }) });
+  addAlbum(f);
+  await f.command('enqueue-download', { workIds: ['77'], selection: 'audio' });
+  await f.downloads.run();
+  await f.command('control-download', { action: 'pause', ids: null });
+  const single = await f.result((await repairWork(f, '77')).id);
+  assert.deepEqual(single.items[0].jobs, [{ id: 'audio:77', scope: 'audio', state: 'queued' }]);
+  assert.deepEqual(
+    (await f.query('download-page', { tab: 'all' })).jobs.map((j) => j.id),
+    ['audio:77']
+  );
+  await f.command('control-download', { action: 'resume', ids: null });
+  await f.downloads.run();
+  await f.command('enqueue-download', { workIds: ['77'], selection: 'missing' });
+  await f.downloads.run();
+  await f.command('control-download', { action: 'pause', ids: null });
+  const multi = await f.result((await repairWork(f, '77')).id);
+  assert.deepEqual(multi.items[0].jobs.map((j) => j.id).sort(), ['77', 'audio:77']);
+  assert.equal(multi.pendingJobs, 2);
+  await f.command('control-download', { action: 'cancel', ids: ['audio:77'] });
+  await f.downloads.run();
+  const partial = await f.result(multi.id);
+  assert.equal(partial.pendingJobs, 1);
+  assert.equal(partial.items[0].jobs.find((j) => j.id === 'audio:77').state, 'cancelled');
+  await f.command('control-download', { action: 'resume', ids: null });
+  await f.downloads.run();
+  const end = await f.result(multi.id);
+  assert.equal(end.pendingJobs, 0);
+  assert.equal(end.items[0].fileStatus, 'failed');
+  const exported = await f.query('work-diagnostic', { workId: '77' });
+  assert.deepEqual(exported.checks.find((r) => r.kind === 'repair').jobs, end.items[0].jobs);
+});
+test('selected registration-only repair reconciles metadata without admitting a download', async (t) => {
+  let requests = 0;
+  const f = await fixture(t, {
+    fetchAsset: async () => {
+      requests++;
+      throw Error('unexpected transfer');
+    }
+  });
+  f.library.write((db) =>
+    db.exec(
+      "INSERT INTO archive_state(work_id,revision,error) VALUES('11',3,'interrupted') ON CONFLICT(work_id) DO UPDATE SET revision=revision+1,error='interrupted'"
+    )
+  );
+  const run = await f.result((await repairWork(f, '11')).id);
+  assert.equal(run.items[0].registration, 'complete');
+  assert.equal(run.items[0].fileStatus, 'complete');
+  assert.equal((await f.query('check-history')).pendingArchive, 0);
+  assert.equal((await f.query('download-page', { tab: 'all' })).total, 0);
+  assert.equal(requests, 0);
+});
+test('confirmed unavailability fences active I/O and paused work; later verified availability allows exact-job retry', async (t) => {
+  const transfers = [],
+    inFlight = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  const f = await fixture(t, {
+    fetchAsset: async (url) => {
+      transfers.push(url);
+      inFlight.resolve();
+      await release.promise;
+      return new Response(null, { status: 503 });
+    }
+  });
+  addAlbum(f);
+  addAlbum(f, '78');
+  addAlbum(f, '79');
+  await f.command('control-download', { action: 'pause', ids: null });
+  await f.command('enqueue-download', { workIds: ['77', '78', '79'], selection: 'missing' });
+  await f.command('control-download', { action: 'pause', ids: ['79'] });
+  await f.command('set-tags', { id: '78', tags: ['test'] });
+  f.observed.set('79', 'unavailable');
+  await f.result((await f.start('source', ['79'])).id);
+  await f.command('control-download', { action: 'resume', ids: null });
+  await inFlight.promise;
+  const view = await f.query('list-works', { source: 'all' });
+  await f.command('mark-source-unavailable', { workId: '77', revision: view.revision });
+  const before = await f.query('download-page', { tab: 'all' });
+  release.resolve();
+  await f.downloads.run();
+  assert.equal(before.jobs.find((j) => j.id === '77').downloadState, 'unavailable');
+  assert.ok(!transfers.some((url) => url.endsWith('-79')));
+  assert.equal(f.downloads.store.resources('77').length, 0);
+  assert.equal(
+    (await f.query('download-page', { tab: 'all' })).jobs.find((j) => j.id === '78').downloadState,
+    'failed'
+  );
+  assert.equal((await f.command('control-download', { action: 'retry', ids: ['77', '79'] })).queued, 0);
+  f.observed.set('77', 'available');
+  await f.result((await f.start('source', ['77'])).id);
+  assert.equal((await f.command('control-download', { action: 'retry', ids: ['77', '79'] })).queued, 1);
+});
+
+test('interrupted download registration is retried without fetching the primary resource again', async (t) => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+    'base64'
+  );
+  let fail = true,
+    transfers = 0;
+  const f = await fixture(t, {
+    fileHook(name, info) {
+      if (fail && name === 'beforeFileWrite' && info.kind === 'metadata')
+        throw Object.assign(Error('storage'), { code: 'EIO' });
+    },
+    fetchAsset: async () => {
+      transfers++;
+      return new Response(png, {
+        headers: { 'Content-Type': 'image/png', 'Content-Length': String(png.length) }
+      });
+    }
+  });
+  addAlbum(f);
+  await f.command('enqueue-download', { selection: 'missing', workIds: ['77'] });
+  await f.downloads.run();
+  assert.equal(
+    (await f.query('download-page', { tab: 'all' })).jobs[0].downloadState,
+    'finalization-pending'
+  );
+  const bytes = f.downloads.store.resources('77').find((i) => i.key === 'image-0'),
+    count = transfers;
+  fail = false;
+  const { id } = await repairWork(f, '77');
+  await f.result(id);
+  await f.downloads.run();
+  assert.equal((await f.result(id)).items[0].fileStatus, 'complete');
+  assert.equal(transfers, count);
+  assert.equal(f.downloads.store.resources('77').find((i) => i.key === 'image-0').revision, bytes.revision);
+});
+test('a fresh source observation at file placement blocks registration and other paused scopes of the same work', async (t) => {
+  const { saveWorks } = await import('../../server/read-store.mjs');
+  let f,
+    marked = false;
+  f = await fixture(t, {
+    fileHook(name, info) {
+      if (marked || name !== 'afterFilePlacement' || info.workId !== '77') return;
+      marked = true;
+      try {
+        f.library.write((db) =>
+          saveWorks(db, {
+            works: [
+              {
+                id: '77',
+                name: 'album',
+                type: 'images',
+                images: [],
+                coverUrls: [],
+                coverVariants: [],
+                videoUrls: [],
+                observedFields: [],
+                remoteState: 'unavailable',
+                sourceStatus: { state: 'unavailable', method: 'platform' }
+              }
+            ],
+            aux: { creatorProfiles: [], audioSourceHints: [] }
+          })
+        );
+      } catch (e) {
+        t.diagnostic(e.stack);
+        throw e;
+      }
+    }
+  });
+  addAlbum(f);
+  await f.command('control-download', { action: 'pause', ids: null });
+  await f.command('enqueue-download', { selection: 'audio', workIds: ['77'] });
+  await f.command('control-download', { action: 'pause', ids: ['audio:77'] });
+  // An individual job may stay paused even when the global worker is enabled.
+  f.library.write((db) => db.exec('UPDATE download_options SET paused=0'));
+  await f.command('enqueue-download', { selection: 'missing', workIds: ['77'] });
+  await f.downloads.run();
+  assert.ok(marked);
+  assert.equal((await f.query('work-detail', { id: '77' })).remoteState, 'unavailable');
+  assert.equal(f.downloads.store.resources('77').length, 0);
+  assert.deepEqual(
+    (await f.query('download-page', { tab: 'all' })).jobs.map((j) => j.downloadState),
+    ['unavailable', 'unavailable']
+  );
+  f.observed.set('77', 'available');
+  await f.result((await f.start('source', ['77'])).id);
+  await f.command('control-download', { action: 'retry', ids: ['77'] });
+  await f.downloads.run();
+  assert.equal(f.downloads.store.resources('77').filter((i) => i.key === 'image-0').length, 1);
+  assert.equal(
+    (await f.query('download-page', { tab: 'all' })).jobs.find((j) => j.id === 'audio:77').downloadState,
+    'unavailable'
+  );
+});
+
+test('a newly forbidden response chunk cannot extend the retained transfer prefix', async (t) => {
+  let controller, stage;
+  const f = await fixture(t, {
+    fileHook(name, info) {
+      if (name === 'beforeFileWrite' && info.kind === 'image') stage = info.file;
+    },
+    fetchAsset: async () =>
+      new Response(
+        new ReadableStream({
+          start(c) {
+            controller = c;
+            c.enqueue(new Uint8Array(32));
+          }
+        }),
+        { headers: { 'Content-Type': 'image/png', 'Content-Length': '256', etag: '"same-asset"' } }
+      )
+  });
+  addAlbum(f);
+  await f.command('enqueue-download', { workIds: ['77'], selection: 'missing' });
+  let partial;
+  for (let i = 0; i < 150; i++) {
+    const name = stage && fs.readdirSync(stage).find((n) => n.endsWith('.part'));
+    if (name) {
+      partial = path.join(stage, name);
+      if (fs.statSync(partial).size === 32) break;
+    }
+    await delay(10);
+  }
+  assert.equal(fs.statSync(partial).size, 32);
+  f.library.write((db) =>
+    db.exec("UPDATE works SET body=json_set(body,'$.remoteState','unavailable') WHERE id='77'")
+  );
+  controller.enqueue(new Uint8Array(32));
+  controller.close();
+  await f.downloads.run();
+  assert.equal(fs.statSync(partial).size, 32);
+  assert.equal(f.downloads.store.resources('77').length, 0);
 });

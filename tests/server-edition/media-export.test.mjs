@@ -312,6 +312,7 @@ test(
     const [code] = await once(ui, 'exit');
     assert.equal(code, 0, output);
     assert.match(output, /MEDIA_DESKTOP_VERIFIED/);
+    assert.equal(f.library.read(db=>db.prepare("SELECT count(*) n FROM command_receipts WHERE json_extract(result,'$.kind')='cover-display' AND json_extract(result,'$.workId')='41'").get().n),2,'one synthetic failure and one actual recovery');
     assert.deepEqual(
       f.count().filter((r) => !r.id.startsWith('audio:')),
       prior
@@ -1483,4 +1484,47 @@ test('verified cancellation on an offline recycle mount refreshes a registered v
   const response=await stream(current);assert.equal(response.status,206);assert.deepEqual(Buffer.from(await response.arrayBuffer()),mp4.subarray(100,123));
   assert.notEqual(current.version,before.version);assert.equal((await stream(before)).status,409);
   assert.equal(saved().registeredChangeNs,String(fs.statSync(original,{bigint:true}).ctimeNs));
+});
+
+test('repairing an HD-only failure retries its original cover job without touching the completed ordinary download', async (t) => {
+  let fail = false;
+  const f = await fixture(t, {
+    removalHook(name, info) {
+      if (fail && name === 'beforeResourceVerify' && info.work_id === '41')
+        throw Object.assign(Error('simulated I/O'), { code: 'EIO' });
+    }
+  });
+  await f.connect();
+  const command = (kind, payload) =>
+    f.client.command({ kind, payload, operationId: randomUUID(), entityVersion: 0 });
+  fail = true;
+  await command('enqueue-download', { workIds: ['41'], selection: 'repair-cover' });
+  await f.downloads.run();
+  fail = false;
+  const jobs = () => f.client.query('download-page', { tab: 'all' });
+  assert.equal((await jobs()).jobs.find((j) => j.id === '41').downloadState, 'complete');
+  assert.ok(['failed', 'review'].includes((await jobs()).jobs.find((j) => j.id === 'hd:41').downloadState));
+  await command('control-download', { action: 'pause', ids: null });
+  const view = await f.client.query('list-works', { source: 'all' }),
+    selection = {
+      source: 'all',
+      revision: view.revision,
+      scope: view.scope,
+      all: false,
+      ids: ['41'],
+      confirmedCount: 1
+    };
+  async function result(id) {
+    for (let i = 0; i < 100; i++) {
+      const page = await f.client.query('check-page', { id });
+      if (page.state === 'complete') return page;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.fail('check did not finish');
+  }
+  const scan = await result((await command('start-check', { kind: 'files', selection })).id);
+  const selected = { id: scan.id, version: scan.version, revision: scan.revision, ids: ['41'], all: false };
+  const repair = await result((await command('retry-repair', { selection: selected })).id);
+  assert.deepEqual(repair.items[0].jobs, [{ id: 'hd:41', scope: 'cover-hd', state: 'queued' }]);
+  assert.equal((await jobs()).jobs.find((j) => j.id === '41').downloadState, 'complete');
 });

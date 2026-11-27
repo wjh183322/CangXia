@@ -95,11 +95,19 @@ export function ServerMaintenancePanel({ api, initialId, initialState, onDetail,
           setReport(null);
           return;
         }
-        const next = await api.defectPage({ id: current, page, fileStatus, sourceStatus, stage });
+        const next = await api.defectPage({
+          id: current,
+          page,
+          fileStatus,
+          sourceStatus,
+          stage,
+          follow: true
+        });
         if (!live) return;
+        if (next.page !== page) setPage(next.page);
         setReport(next);
         setError('');
-        if (next.state === 'running') timer = setTimeout(load, 450);
+        if (next.state === 'running' || next.pendingJobs > 0) timer = setTimeout(load, 450);
       } catch (e) {
         if (live) setError(e.message);
       }
@@ -342,13 +350,44 @@ export function ServerMaintenancePanel({ api, initialId, initialState, onDetail,
                     </button>
                     <p>
                       {fileStates[item.fileStatus]}
-                      {item.downloadState && ' · 下载状态 ' + item.downloadState} · 来源
+                      {!item.jobs && item.downloadState && ' · 下载状态 ' + item.downloadState} · 来源
                       {sourceStates[item.sourceStatus]}{' '}
                       {item.verified !== undefined &&
                         ' · 已验证 ' + item.verified + ' 个文件，' + item.bytes + ' 字节'}
                     </p>
+                    {item.jobs?.map((j) => (
+                      <p key={j.id} data-repair-job={j.id} data-job-state={j.state}>
+                        {{ audio: '配乐', 'cover-hd': '高清封面', media: '作品媒体' }[j.scope]} ·{' '}
+                        {
+                          {
+                            queued: '已入队',
+                            running: '处理中',
+                            complete: '已完成',
+                            cancelled: '已取消',
+                            failed: '失败',
+                            review: '待核对',
+                            paused: '已暂停',
+                            pausing: '正在暂停',
+                            cancelling: '正在取消',
+                            unavailable: '来源不可用',
+                            'waiting-rate': '等待限流解除',
+                            'waiting-auth': '等待登录',
+                            'finalization-pending': '等待登记'
+                          }[j.state]
+                        }
+                      </p>
+                    ))}
+                    {item.registration && (
+                      <p>
+                        归档登记 · {item.registration === 'complete' ? '已完成' : '失败，请核对文件后重试'}
+                      </p>
+                    )}
                     {item.issues.map((i, n) => (
                       <p key={n}>
+                        {i.scope &&
+                          { audio: '配乐', 'cover-hd': '高清封面', media: '作品媒体', archive: '归档登记' }[
+                            i.scope
+                          ] + ' · '}
                         {i.key && i.key + ' · '}
                         {i.reason}
                       </p>

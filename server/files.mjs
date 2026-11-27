@@ -421,7 +421,8 @@ export function assertWorkFiles(store, workId) {
   return work;
 }
 
-export async function ensureHome({ store, layout, workId }) {
+export async function ensureHome({ store, layout, workId,guard }) {
+  guard?.();
   const work = assertWorkFiles(store, workId);
   const existing = savedHome(store, workId);
   if (existing) {
@@ -431,11 +432,12 @@ export async function ensureHome({ store, layout, workId }) {
   }
   // Filename allocation is shared by different works with the same title and author.
   return withWorkFiles(layout, '\0home-allocation', async () => {
-    const { home, media, collectionName: name } = await chooseHome({ store, layout, work });
+    const { home, media, collectionName: name } = await chooseHome({ store, layout, work,guard });
     const file = path.join(media, ...components(homePath(home)));
     if (process.platform === 'win32' && file.length > 32760)
       throw problem('NAS_PATH_TOO_LONG', 'The archive path is too long for the portable download layout.');
     try {
+      guard?.();
       await fs.mkdir(file, { mode: 0o700 });
     } catch (error) {
       if (error.code === 'EEXIST') throw review();
@@ -445,6 +447,7 @@ export async function ensureHome({ store, layout, workId }) {
     await syncDirectory(path.dirname(file));
     const value = { home, identity: idOf(owned.stat), collectionName: name };
     store.withWrite((db) => {
+      guard?.();
       assertWorkFiles(store, workId);
       saveHome(db, workId, value, store.nextRevision());
     });
@@ -801,6 +804,7 @@ export async function verifyAndPlace({
 async function registerFile(store, commit, hdGuard) {
   const { workId, resourceId, body } = commit;
   return store.withWrite((db) => {
+    store.assertDownloadSource?.(db,workId,body.jobId);
     assertWorkFiles(store, workId);
     hdGuard?.();
     const previous = store.resources(workId).find((asset) => asset.key === body.key);
@@ -897,6 +901,7 @@ async function placeMetadataReplacement({ store, commit, dir, destination, stage
 
 async function settlePlacement({ store, commit, destination, dir, staged, hdGuard }) {
   const { body } = commit;
+  store.assertDownloadSource?.(store.db,commit.workId,body.jobId);
   destination.stat = await status(destination.file);
   const stagingAlias = staged && (await status(staged.file));
   if (destination.stat?.nlink === 2n && (!same(stagingAlias, body.identity) || stagingAlias.nlink !== 2n))
@@ -907,6 +912,7 @@ async function settlePlacement({ store, commit, destination, dir, staged, hdGuar
   if (stagingAlias) {
     await retry(async () => {
       if (!same(await status(staged.file), body.identity)) throw review();
+      store.assertDownloadSource?.(store.db,commit.workId,body.jobId);
       await fs.unlink(staged.file);
     });
     await syncDirectory(dir);

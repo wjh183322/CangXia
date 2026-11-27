@@ -1,4 +1,5 @@
 import { app, BrowserWindow, powerMonitor, shell } from 'electron';
+import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -128,6 +129,23 @@ app.whenReady().then(async () => {
     await click('.flat-path');
     await wait(() => opened === dir, 'open export folder');
     assert.ok(fs.existsSync(path.join(dir, '0001_样本_43_01.png')));
+    await escape();
+    await wait(()=>js("window.cangxia.downloadPage({tab:'all'}).then(r=>r.jobs.some(j=>j.id==='audio:42'&&j.downloadState==='complete'))"),'audio finalized');
+    const conn=new DatabaseSync(path.join(root,'volume','cangxia-server','library.sqlite'),{readOnly:true});
+    const audioFile=path.join(root,'volume','cangxia-server','media',conn.prepare("SELECT relative_path FROM archive_resources WHERE work_id='42' AND key='audio'").get().relative_path);
+    conn.close();
+    fs.renameSync(audioFile,audioFile+'.fixture');
+    await js('window.cangxia.pause()');
+    await button('检查与补齐');await button('检查全部文件');
+    const marked='input[aria-label="选择作品 42"]';
+    await wait(()=>js("document.querySelector('[data-check-state]')?.dataset.checkState==='complete'"),'check complete');
+    await click(marked);await button('复查并补齐所选缺失文件');
+    await wait(()=>js("!!document.querySelector('[data-repair-job][data-job-state=queued]')"),'repair queued');
+    await js("window.cangxia.cancelDownloads(['audio:42'])");
+    await wait(()=>js("!!document.querySelector('[data-repair-job][data-job-state=cancelled]')"),'visible result follows queued repair cancellation');
+    await escape();fs.renameSync(audioFile+'.fixture',audioFile);await js('window.cangxia.resume()');
+    await js("window.cangxia.workDetail('41').then(w=>window.cangxia.reportCoverStatus('41',true,{resourceId:w.mediaCover.resourceId,version:w.mediaCover.version}))");
+    assert.equal(await js("window.cangxia.defectOverview({}).then(r=>r.problems.cover)"),1);
     const old = win;
     powerMonitor.emit('resume');
     assert.ok(old.isDestroyed());
@@ -138,6 +156,9 @@ app.whenReady().then(async () => {
       () => js('document.querySelector(\'[data-work-id="41"] img\')?.naturalWidth===1'),
       'cache after reconnect'
     );
+    await wait(()=>js("window.cangxia.defectOverview({}).then(r=>!r.problems.cover)"),'successful cover on new renderer clears its recorded failure');
+    await js(`for(let i=0;i<12;i++)document.querySelector('[data-work-id="41"] img').dispatchEvent(new Event('load'));`);
+    await delay(150);
     console.log('MEDIA_DESKTOP_VERIFIED');
     app.exit(0);
   } catch (e) {

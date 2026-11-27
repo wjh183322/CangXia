@@ -38,7 +38,7 @@ async function readCheckpoint(dir,name,url,signal,checkpoints,verifyDigests){
   return verifyDigests?{...value,offset:0,hash:createHash('sha256'),partial}:null;
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null,sealPartial=null,verifyDigests=false}){
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null,sealPartial=null,verifyDigests=false,beforeWrite}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
  let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints,verifyDigests);
@@ -105,7 +105,7 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
    signal?.throwIfAborted();const {done,value}=await reader.read();if(done)break;signal?.throwIfAborted();
    if((total!==null&&offset+value.byteLength>total)||offset+value.byteLength>maxBytes||(target.kind==='image'&&offset+value.byteLength>50000000))throw new Error('资源长度异常，未标记为完整');
    if(total===null)await reserve(offset+value.byteLength);
-   let used=0;while(used<value.byteLength){const write=await handle.write(value,used,value.byteLength-used,offset+used);if(!write.bytesWritten)throw new Error('文件写入未完成');used+=write.bytesWritten;}
+   let used=0;while(used<value.byteLength){beforeWrite?.();const write=await handle.write(value,used,value.byteLength-used,offset+used);if(!write.bytesWritten)throw new Error('文件写入未完成');used+=write.bytesWritten;}
    hash.update(value);rangeDigest?.hash.update(value);offset+=value.byteLength;progress(offset,total);
    if(offset-lastSaved>=checkpointBytes||Date.now()-lastTime>=2000)await checkpoint();
   }

@@ -172,6 +172,7 @@ function summary(db, id) {
   const author = withCreatorProfile(detail.author, index),
     coAuthors = (detail.coAuthors ?? []).map((p) => withCreatorProfile(p, index));
   const { images, ...fields } = detail;
+  const coverFailure=db.prepare('SELECT version FROM maintenance_cover_failures WHERE work_id=?').get(id);
   const recordSources = db
     .prepare(
       "SELECT source_id FROM source_members WHERE work_id=? ORDER BY (source_id='total') DESC,source_id"
@@ -183,6 +184,7 @@ function summary(db, id) {
   return {
     ...fields,
     mediaCover:displayCover(mediaList(db,id)),
+    coverFailed:!!coverFailure,coverFailureVersion:coverFailure?.version??null,
     author,
     coAuthors,
     recordSources,

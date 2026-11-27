@@ -4,6 +4,7 @@ import { sourceKey, publishMemberships } from './memberships.mjs';
 import { mergeAudioCandidates, mergeObservedWork } from './source-work-merge.mjs';
 import { creatorKey, sameCreator, mergeCreator } from '../shared/creators.mjs';
 import { contentHash } from '../shared/backup-protocol.mjs';
+import {fenceUnavailable} from './download-records.mjs';
 
 const stale = () => failure(409, 'STALE_SOURCE_READ', '读取身份、代际或断点已变化。');
 const conflict = () => failure(409, 'OPERATION_CONFLICT', '分页操作与已保存的请求不一致。');
@@ -65,6 +66,7 @@ export function saveWorks(db, page) {
     const merged = { ...work, ...mergeObservedWork(previous, work) };
     titles.set(work.id, merged.name);
     put.run(work.id, merged.name, JSON.stringify(merged));
+    if (merged.remoteState==='unavailable')fenceUnavailable(db,work.id);
     const incoming = hints.get(work.id);
     const prior = JSON.parse(audio.get(work.id)?.body ?? 'null');
     if (!prior && !incoming) continue;

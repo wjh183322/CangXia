@@ -425,6 +425,7 @@ export function createSessionService({
         return save(db, who.accountId, operationId, digest, { ...value, operationId, kind });
       });
       removal.wake(receipt);
+      if(command.kind==='mark-source-unavailable')downloads?.stopUnavailable(receipt.workId);
       if(['start-check','retry-repair','control-check'].includes(command.kind))maintenance.wake(receipt,service.sourceSession(who,grant));
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);

@@ -1,3 +1,4 @@
+import {getJob,putJob as put,fenceUnavailable} from './download-records.mjs';
 import {removalOwnsFiles} from './removal.mjs';
 import { planDownloads } from '../electron/download-selection.mjs';
 import { createArchive } from './archive.mjs';
@@ -424,28 +425,6 @@ function binding(db) {
   if (!value?.profile_id) throw authRequired();
   return { uid: value.uid, sessionKey: value.session_key, authEpoch: value.auth_epoch };
 }
-function getJob(db, id) {
-  const row = db.prepare('SELECT body FROM download_manifests WHERE id=?').get(id);
-  return row ? JSON.parse(row.body) : null;
-}
-function put(db, job) {
-  db.prepare(
-    'INSERT INTO download_jobs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state WHERE state<>excluded.state'
-  ).run(job.id, job.workId, job.state);
-  db.prepare(
-    'INSERT INTO download_manifests(id,work_id,body) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,hidden=0'
-  ).run(job.id, job.workId, JSON.stringify(job));
-  if(job.state==='complete'&&job.id===job.workId)db.prepare('DELETE FROM maintenance_file_state WHERE work_id=?').run(job.workId);
-  for(const link of db.prepare('SELECT run,work_id FROM maintenance_queue_links WHERE job=?').all(job.id)){
-    const complete=job.state==='complete',failed=retryStates.has(job.state)||['cancelled','unavailable'].includes(job.state);
-    const fileStatus=complete?'complete':failed?'failed':'queued';
-    const changed=db.prepare("UPDATE maintenance_items SET result=json_set(result,'$.downloadState',?,'$.fileStatus',?,'$.repairable',json(?)) WHERE run=? AND work_id=? AND json_extract(result,'$.downloadState') IS NOT ?")
-      .run(job.state,fileStatus,JSON.stringify(failed&&job.state!=='unavailable'),link.run,link.work_id,job.state);
-    if(changed.changes)db.prepare('UPDATE maintenance_runs SET version=version+1 WHERE id=?').run(link.run);
-    if(complete||failed)db.prepare('DELETE FROM maintenance_queue_links WHERE run=? AND work_id=?').run(link.run,link.work_id);
-  }
-  db.exec('UPDATE download_options SET revision=revision+1');
-}
 function publicJob(job) {
   const state = ['queued', 'paused', 'pausing'].includes(job.state)
     ? 'waiting'
@@ -597,6 +576,30 @@ export function createDownloads({
   const store = openDownloadStore({ library, root, fileHook }),
     { db, layout } = store;
   const archive = createArchive(store);
+  const unavailable = () =>
+    failure('NAS_SOURCE_UNAVAILABLE', '原作品已失效，已保留现有文件。核验来源可访问后可手动重试。');
+  const sourceState = (conn, id) =>
+    conn.prepare("SELECT json_extract(body,'$.remoteState') AS state FROM works WHERE id=?").get(id)?.state;
+  function assertSource(conn, id) {
+    if (sourceState(conn, id) === 'unavailable') throw unavailable();
+  }
+  store.assertDownloadSource = (conn, workId, jobId) => {
+    if (!jobId) return;
+    const row = conn
+      .prepare(
+        "SELECT coalesce(json_extract(body,'$.sourceFence'),0) fence FROM download_manifests WHERE id=? AND work_id=?"
+      )
+      .get(jobId, workId);
+    if (!row) return;
+    assertSource(conn, workId);
+    const slot = active.get(jobId);
+    if (slot && slot.fence !== row.fence) throw unavailable();
+  };
+  function stopUnavailable(workId) {
+    for (const slot of active.values())
+      if (slot.workId === workId && sourceState(db, workId) === 'unavailable')
+        slot.controller.abort(unavailable());
+  }
   function validateHDSource(workId, expected) {
     const current = hdSourceProof(db, workId);
     if (
@@ -622,6 +625,7 @@ export function createDownloads({
     let current;
     try {
       current = binding(db);
+      store.assertDownloadSource(db,job.workId,id);
     } catch {
       return false;
     }
@@ -663,6 +667,7 @@ export function createDownloads({
             : scope === 'repair-cover'
               ? [...new Set(ids)].filter(
                   (id) =>
+                    !groups.unavailable.includes(id) &&
                     recordedWork(conn, id).type === 'video' &&
                     conn.prepare("SELECT 1 FROM archive_resources WHERE work_id=? AND key='video'").get(id)
                 )
@@ -704,6 +709,7 @@ export function createDownloads({
       put(conn, {
         id: jobId,
         workId,
+        sourceFence:old?.sourceFence??0,
         title: work.name,
         ...frozen,
         auth,
@@ -759,6 +765,9 @@ export function createDownloads({
         continue;
       }
       if (state && publicJob(job).state !== state) continue;
+      if(['resume','retry'].includes(action)&&sourceState(conn,job.workId)==='unavailable'){
+        fenceUnavailable(conn,job.workId);continue;
+      }
       if(['resume','retry','cancel'].includes(action)&&removalOwnsFiles(conn,job.workId))throw failure('NAS_REMOVAL_BUSY','请先处理此作品的删除或恢复回执。');
       if (action === 'clear' && job.state === 'complete') {
         conn.prepare('UPDATE download_manifests SET hidden=1 WHERE id=?').run(id);
@@ -770,6 +779,7 @@ export function createDownloads({
         job.state = job.state === 'running' ? 'pausing' : 'paused';
       else if (
         (action === 'resume' && job.state === 'paused') ||
+        (action==='retry'&&job.state==='unavailable'&&sourceState(conn,job.workId)==='available') ||
         (['resume', 'retry'].includes(action) && retryStates.has(job.state) && (!all || action === 'retry'))
       ) {
         const auth = binding(conn);
@@ -789,6 +799,7 @@ export function createDownloads({
     return { queued: changed, cancelled: changed, changed };
   }
   function requireWriter(job, signal) {
+    store.assertDownloadSource(db,job.workId,job.id);
     signal.throwIfAborted();
     if (closing || db.prepare('SELECT state FROM download_jobs WHERE id=?').get(job.id)?.state !== 'running')
       throw failure('NAS_DOWNLOAD_STOP', '下载任务已停止。');
@@ -845,7 +856,22 @@ export function createDownloads({
     const observed = await source.readDownloadDetail({ workId: job.workId, ...job.auth, signal });
     requireWriter(job, signal);
     if (observed?.id !== job.workId) throw needsReview();
-    if (observed.remoteState === 'unavailable') throw failure('NAS_SOURCE_UNAVAILABLE', '原作品已失效。');
+    if (observed.remoteState === 'unavailable') {
+      store.withWrite((conn) => {
+        requireWriter(job, signal);
+        conn
+          .prepare(
+            "UPDATE works SET body=json_set(body,'$.remoteState','unavailable','$.sourceStatus',json(?)) WHERE id=?"
+          )
+          .run(
+            JSON.stringify(observed.sourceStatus ?? { state: 'unavailable', method: 'platform' }),
+            job.workId
+          );
+        fenceUnavailable(conn, job.workId);
+      });
+      stopUnavailable(job.workId);
+      throw unavailable();
+    }
     if (observed.statusOnly) throw notAvailable();
     if (job.hdInputs) assertHDSources(freeze(observed, false), validateHDSource(job.workId, job));
     const candidates = refreshCandidates(job, observed);
@@ -897,7 +923,7 @@ export function createDownloads({
         resourceIdentity: target.identity,
         observationIdentity,
         urlHash,
-        group
+        group,guard:()=>requireWriter(job,signal)
       });
       try {
         store.fileHook('beforeFileWrite', { workId: job.workId, kind: target.kind, file: stage.dir });
@@ -931,7 +957,8 @@ export function createDownloads({
                 guard: () => requireWriter(job, signal)
               }),
             verifyDigests: true,
-            openPartial: (file) => openStagedPartial(stage, file, layout),
+            beforeWrite:()=>store.assertDownloadSource(db,job.workId,job.id),
+            openPartial: (file) => {requireWriter(job,signal);return openStagedPartial(stage, file, layout);},
             checkpoints: stageCheckpoints(store, stage),
             maxBytes: target.kind === 'audio' ? 256 * 1024 * 1024 : Infinity,
             progress(bytes, totalBytes) {
@@ -1220,17 +1247,17 @@ export function createDownloads({
     if (store.fileCommits(workId).some((commit) => commit.stage === 'review')) {
       throw failure('NAS_FILE_REVIEW', 'A file commit for this work needs review.');
     }
-    const home = await ensureHome({ store, layout, workId });
+    const home = await ensureHome({ store, layout, workId,guard:()=>requireWriter(job,signal) });
 
     let refreshed = false;
-    if (job.hdInputs) {
+    if (job.hdInputs && !job.finalizationPending) {
       change(job.id, (current) => {
         current.phase = 'matching';
       });
       await withWorkFiles(layout, '\0hd-matching', () => repairCover(job, home, signal));
       for (const item of job.expected) saveProgress(job.id, item);
     }
-    for (const target of job.hdInputs ? [] : job.expected) {
+    for (const target of job.hdInputs || job.finalizationPending ? [] : job.expected) {
       requireWriter(job, signal);
       try {
         await downloadOne(job, target, home, signal);
@@ -1252,6 +1279,7 @@ export function createDownloads({
       signal,
       guard: () => requireWriter(job, signal)
     });
+    requireWriter(job,signal);
     const cleanupPending = await cleanFileStages({ store, layout, workId, jobId: job.id });
     change(job.id, (current) => {
       if (current.state !== 'running' || closing) return;
@@ -1269,12 +1297,18 @@ export function createDownloads({
   async function execute(id, controller) {
     const { workId } = getJob(db, id);
     try {
+      const before=getJob(db,id);
+      const guardRecovery=()=>{
+        controller.signal.throwIfAborted();
+        if(!stopping.has(before.state))store.assertDownloadSource(db,workId,id);
+      };
+      guardRecovery();
       const recovered = await recoverFileCommits({
         store,
         layout,
         workId,
         jobId: id,
-        guard: () => controller.signal.throwIfAborted()
+        guard: guardRecovery
       });
       await withWorkFiles(layout, workId, async () => {
         const current = getJob(db, id);
@@ -1292,7 +1326,7 @@ export function createDownloads({
     } catch (e) {
       if (!closing)
         change(id, (job) => {
-          if (stopping.has(job.state)) return;
+          if (stopping.has(job.state)||job.state==='unavailable'||active.get(id)?.fence!==(job.sourceFence??0)) return;
           job.reason =
             e.code === 'ENOSPC'
               ? { code: e.code, message: 'NAS 空间不足，腾出空间后可重试。' }
@@ -1360,9 +1394,23 @@ export function createDownloads({
           if (active.size >= opts.concurrency) break;
           if (active.has(row.id) || [...active.values()].some((a) => a.workId === row.work_id)) continue;
           const controller = new AbortController(),
-            slot = { workId: row.work_id, controller };
+            slot = { workId: row.work_id, controller, fence: getJob(db,row.id).sourceFence ?? 0 };
           active.set(row.id, slot);
-          slot.task = execute(row.id, controller).finally(() => active.delete(row.id));
+          // A catalogue reader may revoke the source while this socket is waiting for a response.
+          const monitor = setInterval(() => {
+            if (controller.signal.aborted) return;
+            try {
+              const state = db.prepare('SELECT state FROM download_jobs WHERE id=?').get(row.id)?.state;
+              if (!stopping.has(state)) store.assertDownloadSource(db, row.work_id, row.id);
+            } catch (error) {
+              controller.abort(error);
+            }
+          }, 350);
+          monitor.unref();
+          slot.task = execute(row.id, controller).finally(() => {
+            clearInterval(monitor);
+            active.delete(row.id);
+          });
         }
         if (!active.size) break;
         await Promise.race(
@@ -1386,6 +1434,7 @@ export function createDownloads({
   }
   return {
     enqueue,
+    fenceUnavailable,stopUnavailable,
     fetchSourceMedia,
     sourceAuthorization: () => binding(db),
     readMediaDetail:(workId,auth,signal)=>source.readDownloadDetail({workId,...auth,signal}),

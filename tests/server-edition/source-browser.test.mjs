@@ -412,7 +412,7 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
     const {
@@ -424,7 +424,7 @@ for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
       upgradeV3,
       upgradeV4,
       upgradeV5,
-      upgradeV6,upgradeV7,upgradeV8,upgradeV9,upgradeV10,upgradeV11,upgradeV12,upgradeV13
+      upgradeV6,upgradeV7,upgradeV8,upgradeV9,upgradeV10,upgradeV11,upgradeV12,upgradeV13,upgradeV14
     } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -455,6 +455,10 @@ for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     if(version>=12)db.exec(upgradeV11);
     if(version>=13)db.exec(upgradeV12);
     if(version>=14)db.exec(upgradeV13);
+    if(version===15){
+      db.exec(upgradeV14);
+      db.exec("INSERT INTO works VALUES('77','old','{}'); INSERT INTO maintenance_cover_failures VALUES('77'); INSERT INTO maintenance_runs(id,account,kind,state,created) VALUES('old-run','test','repair','complete',1); INSERT INTO maintenance_items VALUES('old-run',0,'77',json_object('downloadState','queued')); INSERT INTO maintenance_queue_links VALUES('old-run','77','audio:77')");
+    }
     if (version === 7) {
       db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
       db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();
@@ -520,6 +524,14 @@ for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     snapshot.close();
     const upgraded = openLibrary({ root, expectedId });
     t.after(() => upgraded.close());
+    if(version===15){
+      upgraded.write(db=>{
+        assert.equal(db.prepare("SELECT version FROM maintenance_cover_failures WHERE work_id='77'").get().version,null);
+        assert.equal(db.prepare("SELECT job FROM maintenance_queue_links WHERE run='old-run'").get().job,'audio:77');
+        db.exec("INSERT INTO maintenance_queue_links VALUES('old-run','77','77')");
+      });
+    }
+
     if (version===10) {
       assert.equal(upgraded.read(db=>db.prepare("SELECT revision=completed AS clean FROM archive_state WHERE work_id='29'").get().clean),1);
       assert.equal(upgraded.read(db=>JSON.parse(db.prepare("SELECT body FROM archive_homes WHERE work_id='29'").get().body).home.folder),'旧夹');
