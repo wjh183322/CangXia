@@ -215,6 +215,7 @@ function detectPrefix(bytes, kind) {
     for (let i = 16; i + 4 <= Math.min(size, bytes.length); i += 4) brands.push(tag(i, i + 4));
     if (kind === 'image' && brands.some((b) => ['avif', 'avis'].includes(b))) return 'image/avif';
     if (kind === 'audio' && brands.some((b) => ['M4A ', 'M4B ', 'F4A '].includes(b))) return 'audio/mp4';
+    if (kind === 'audio' && brands.some((b) => /^(isom|iso[2-9]|mp4[12])$/.test(b))) return 'generic-mp4';
     if (
       kind === 'video' &&
       brands.some((b) => /^(isom|iso[2-9]|mp4[12]|avc1|M4V )$/.test(b)) &&
@@ -243,6 +244,17 @@ async function sniff(result, kind) {
       await reader.cancel();
       reader.releaseLock();
       return null;
+    }
+    if (mime === 'generic-mp4') {
+      const parts = [];
+      let remaining = 8192;
+      for (const chunk of held) {
+        const part = Buffer.from(chunk.subarray(0, remaining));
+        parts.push(part);
+        remaining -= part.length;
+        if (!remaining) break;
+      }
+      result.isoPrefix = Buffer.concat(parts);
     }
     result.body = new ReadableStream(
       {
@@ -282,7 +294,11 @@ function proofCache(store) {
 }
 function responseSpan(result, range) {
   if (result.status === 200)
-    return { total: Number(result.headers.get('content-length')), start: 0, end: Infinity };
+    return {
+      total: result.headers.has('content-length') ? Number(result.headers.get('content-length')) : null,
+      start: 0,
+      end: Infinity
+    };
   if (result.status !== 206 || !range) return null;
   const part = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(result.headers.get('content-range') || '');
   if (!part) return null;
@@ -301,7 +317,107 @@ function responseSpan(result, range) {
     return null;
   return { ...expected, total };
 }
-async function sourceMime({ result, item, range, head, fetchPrefix, proofs }) {
+function matchingObject(result, probe, span, requested) {
+  const part = responseSpan(probe, requested);
+  if (
+    !part ||
+    part.total == null ||
+    (span.total != null && part.total !== span.total) ||
+    probe.url !== result.url
+  )
+    return null;
+  for (const header of ['etag', 'last-modified', 'repr-digest']) {
+    if (result.headers.get(header) !== probe.headers.get(header)) return null;
+  }
+  return part;
+}
+async function boundedBytes(body, limit) {
+  const reader = body.getReader(),
+    buf = Buffer.alloc(limit);
+  let filled = 0;
+  try {
+    while (filled < limit) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const count = Math.min(value.length, limit - filled);
+      buf.set(value.subarray(0, count), filled);
+      filled += count;
+    }
+    return buf.subarray(0, filled);
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+// ISO generic brands are shared by audio and video. Inspect mdia/hdlr from the
+// actual movie index. Jump over mdat using its box length, even if moov is at EOF.
+async function genericAudio(result, span, fetchRange) {
+  let total = span.total,
+    window = result.isoPrefix,
+    offset = 0,
+    reads = 0,
+    boxes = 0,
+    hasAudio = false,
+    hasVideo = false;
+  async function at(pos, n) {
+    if (!window || pos < offset || pos + n > offset + window.length) {
+      if (++reads > 16) return null;
+      const range = 'bytes=' + pos + '-' + Math.min(pos + 8191, total == null ? Infinity : total - 1);
+      const probe = await fetchRange(range);
+      try {
+        const match = matchingObject(result, probe, span, range);
+        if (!match || match.start !== pos || !probe.body) return null;
+        total = match.total;
+        window = await boundedBytes(probe.body, Math.min(8192, total - pos));
+        offset = pos;
+      } finally {
+        await probe.body?.cancel().catch(() => {});
+      }
+    }
+    return pos + n <= offset + window.length ? window.subarray(pos - offset, pos - offset + n) : null;
+  }
+  async function scan(begin, end, parent) {
+    for (let pos = begin; pos < end; ) {
+      if (++boxes > 256 || end - pos < 8) return false;
+      const h = await at(pos, 8);
+      if (!h) return false;
+      let length = h.readUInt32BE(),
+        header = 8;
+      if (length === 1) {
+        const ext = await at(pos + 8, 8);
+        if (!ext) return false;
+        length = Number(ext.readBigUInt64BE());
+        header = 16;
+      }
+      if (length === 0) length = end - pos;
+      if (!Number.isSafeInteger(length) || length < header || length > end - pos) return false;
+      const type = h.toString('latin1', 4, 8),
+        child = { root: 'moov', moov: 'trak', trak: 'mdia' }[parent];
+      if (type === child && !(await scan(pos + header, pos + length, type))) return false;
+      if (parent === 'mdia' && type === 'hdlr') {
+        if (length < header + 12) return false;
+        const name = (await at(pos + header + 8, 4))?.toString('latin1');
+        if (name === 'soun') hasAudio = true;
+        if (name === 'vide') hasVideo = true;
+      }
+      pos += length;
+    }
+    return true;
+  }
+  if (total == null && window) {
+    for (let pos = 0; pos + 8 <= window.length; ) {
+      const size = window.readUInt32BE(pos);
+      if (size < 8 || pos + size > window.length) break;
+      if (window.toString('latin1', pos + 4, pos + 8) === 'moov')
+        return (await scan(pos + 8, pos + size, 'moov')) && hasAudio && !hasVideo;
+      pos += size;
+    }
+    window = null;
+  }
+  if (!(await at(0, 8)) || !Number.isSafeInteger(total)) return false;
+  return (await scan(0, total, 'root')) && hasAudio && !hasVideo;
+}
+async function sourceMime({ result, item, range, head, fetchRange, sourceIdentity, proofs }) {
   const declared = (result.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (declared && declared !== 'application/octet-stream' && !mimeTypes[item.kind].test(declared))
     return null;
@@ -316,23 +432,38 @@ async function sourceMime({ result, item, range, head, fetchPrefix, proofs }) {
   if (!head && span.start === 0 && (span.end >= prefixLimit - 1 || span.end === span.total - 1)) {
     mime = await sniff(result, item.kind);
   } else {
-    const probe = await fetchPrefix();
+    // A corroborating source/version is sufficient to inspect the format for playback.
+    // A resumable export still needs a strong byte-level validator.
+    const evidence =
+      strong ||
+      sourceIdentity ||
+      /^W\/"[^"]+"$/.test(etag || '') ||
+      result.headers.get('repr-digest') ||
+      result.headers.get('last-modified');
+    const anonymous = (!declared || declared === 'application/octet-stream') && !evidence && !head;
+    if (anonymous && span.end >= 64 * 1024) return null;
+    const count = anonymous ? Math.min(span.total, Math.max(prefixLimit, span.end + 1)) : prefixLimit;
+    const request = `bytes=0-${count - 1}`,
+      probe = await fetchRange(request);
     try {
-      const prefix = responseSpan(probe, `bytes=0-${prefixLimit - 1}`);
-      if (
-        !prefix ||
-        prefix.start !== 0 ||
-        probe.url !== result.url ||
-        prefix.total !== span.total ||
-        (etag && probe.headers.get('etag') !== etag)
-      )
-        return null;
-      if ((!declared || declared === 'application/octet-stream') && !strong) return null;
-      mime = await sniff(probe, item.kind);
+      const prefix = matchingObject(result, probe, span, request);
+      if (!prefix || prefix.start !== 0 || !probe.body) return null;
+      if (anonymous) {
+        // Without an object identity or validator, take BOTH the format and the bytes
+        // from one bounded HTTP representation. Never splice two anonymous replies.
+        const bytes = await boundedBytes(probe.body, count);
+        if (bytes.length !== count) return null;
+        mime = detectPrefix(bytes, item.kind);
+        if (!mime) return null;
+        result.isoPrefix = bytes;
+        await result.body?.cancel();
+        result.body = new Response(bytes.subarray(span.start, span.end + 1)).body;
+      } else mime = await sniff(probe, item.kind);
     } finally {
       await probe.body?.cancel().catch(() => {});
     }
   }
+  if (mime === 'generic-mp4') mime = (await genericAudio(result, span, fetchRange)) ? 'audio/mp4' : null;
   if (mime && key) {
     if (proofs.size >= 256) proofs.delete(proofs.keys().next().value);
     proofs.set(key, mime);
@@ -350,9 +481,14 @@ export async function serveMedia(req, res, { downloads, session, body }) {
   const close = () => disconnected.abort();
   res.once('close', close);
   const cancel = addAbortListener(signal, () => res.destroy());
+  const revision = req.headers['x-cangxia-export-revision'];
+  const revisionQuery =
+    revision !== undefined ? store.db.prepare('SELECT revision FROM catalogue_version WHERE id=1') : null;
   const readCurrent = () => {
     signal.throwIfAborted();
     session.guard(store.db);
+    if (revisionQuery && String(revisionQuery.get().revision) !== revision)
+      throw failure(412, 'STALE_SELECTION', '导出清单已变化，请重新确认选择。');
     const current = snapshots(store);
     let saved = current.get(workId);
     if (!saved) {
@@ -491,12 +627,9 @@ export async function serveMedia(req, res, { downloads, session, body }) {
               range,
               head,
               proofs: proofCache(store),
-              fetchPrefix: () =>
-                downloads.fetchSourceMedia(
-                  url,
-                  { signal, headers: { Range: `bytes=0-${prefixLimit - 1}` } },
-                  guard
-                )
+              sourceIdentity: candidate.sourceIdentity,
+              fetchRange: (range) =>
+                downloads.fetchSourceMedia(url, { signal, headers: { Range: range } }, guard)
             });
             if (mime) {
               result.mime = mime;

@@ -291,7 +291,7 @@ export function catalogueChoices(db, input, owner) {
 }
 // Called inside the downstream command's write transaction. Materialize NAS-side only,
 // before mutating anything, because the command may change its own filter or revision.
-export function confirmedSelection(db, input, owner, { collect = false } = {}) {
+export function confirmedSelection(db, input, owner, { collect = false, paged = false } = {}) {
   const { from, args, order, scope, revision } = context(db, input, owner);
   if (input.scope !== scope || input.revision !== revision || typeof input.all !== 'boolean') throw expired();
   const ids = strings(input.ids, 10000);
@@ -304,12 +304,19 @@ export function confirmedSelection(db, input, owner, { collect = false } = {}) {
   const selection = from + ' AND ' + (input.all ? 'NOT ' : '') + membership,
     params = [...args, JSON.stringify(ids)];
   const count = db.prepare('SELECT count(*) AS n' + selection).get(...params).n;
-  if (collect && (!Number.isSafeInteger(input.confirmedCount) || input.confirmedCount !== count))
+  if ((collect || paged) && (!Number.isSafeInteger(input.confirmedCount) || input.confirmedCount !== count))
     throw expired();
+  if(paged)return {count,revision,sql:'SELECT w.id'+selection+' ORDER BY '+order,params};
   return collect
     ? db
         .prepare('SELECT w.id' + selection + ' ORDER BY ' + order)
         .all(...params)
         .map((r) => r.id)
     : { count, revision, scope };
+}
+
+export function confirmedPage(db,query,offset) {
+  if(catalogueRevision(db)!==query.revision)throw failure(409,'STALE_SELECTION','导出清单已变化，请重新确认选择。');
+  installFunctions(db);
+  return db.prepare(query.sql+' LIMIT 64 OFFSET ?').all(...query.params,offset);
 }

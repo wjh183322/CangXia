@@ -1,4 +1,4 @@
-import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection} from './catalogue.mjs';
+import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection,confirmedPage} from './catalogue.mjs';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
@@ -94,13 +94,12 @@ export function createSessionService({
     const positions=new Set(work.images.map((image,i)=>image.index??i));
     for(const asset of work.media)if(/^image-\d+$/.test(asset.key))positions.add(Number(asset.key.slice(6)));
     const images=[...positions].sort((a,b)=>a-b).map(index=>({index}));
-    return {id,name:work.name,type:work.type,author:work.author,images,media:work.media};
+    return {id,name:work.name,type:work.type,author:work.author,images,media:work.media.filter(m=>/^(video|cover|image-\d+)$/.test(m.key))};
   }
-  function confirmExport(db,ids,{grant,selection}) {
+  function confirmExport(db,query,{grant}) {
     const token=randomUUID();
-    const entries=ids.map(id=>({id,digest:contentHash(exportWork(db,id))}));
-    exportsByGrant.set(token,{generation:grant.generation,revision:selection.revision,entries});
-    return {token,count:ids.length,revision:selection.revision};
+    exportsByGrant.set(token,{generation:grant.generation,query});
+    return {token,count:query.count,revision:query.revision};
   }
   if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
     'flat-download':confirmExport, 'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
@@ -146,6 +145,10 @@ export function createSessionService({
       'archive-author':archiveAuthor,
       'catalogue-action': (db,command,owner)=>{
         const {action,selection}=command.payload;
+        if(catalogueActions[action]===confirmExport){
+          const query=confirmedSelection(db,selection,owner,{paged:true});
+          return confirmExport(db,query,owner);
+        }
         const ids=confirmedSelection(db,selection,owner,{collect:true});
         if(!Object.hasOwn(catalogueActions,action))throw failure(409,'ACTION_UNAVAILABLE','当前服务尚未启用此操作，未处理任何作品。');
         return catalogueActions[action](db,ids,{...owner,selection,operationId:command.operationId});
@@ -168,14 +171,8 @@ export function createSessionService({
       'export-page': (db,{token,offset},{grant})=>{
         const batch=exportsByGrant.get(token);
         if(!batch || batch.generation!==grant.generation || !Number.isSafeInteger(offset) || offset<0) throw invalid();
-        const stale=()=>failure(409,'STALE_SELECTION','导出清单已变化，请重新确认选择。');
-        if(batch.revision!==catalogueRevision(db))throw stale();
-        const page=batch.entries.slice(offset,offset+64).map(entry=>{
-          const work=exportWork(db,entry.id);
-          if(contentHash(work)!==entry.digest)throw stale();
-          return work;
-        });
-        if(offset+page.length>=batch.entries.length)exportsByGrant.delete(token);
+        const page=confirmedPage(db,batch.query,offset).map(({id})=>exportWork(db,id));
+        if(offset+page.length>=batch.query.count)exportsByGrant.delete(token);
         return page;
       },
       'work-detail': catalogueDetail,

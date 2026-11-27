@@ -800,3 +800,273 @@ test('many remote chunks share a parsed work until a committed source identity c
   assert.ok(iterations >= 35);
   assert.ok(lookups <= 3, `expected reuse across ${iterations} chunks, observed ${lookups} decoded works`);
 });
+test('generic ISO audio and untagged or weakly tagged byte seeks retain the real track and reject conflicting evidence', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const bytes = fs.readFileSync(new URL('./fixtures/generic-audio.m4a', import.meta.url));
+  assert.equal(bytes.toString('ascii', 8, 12), 'isom');
+  f.library.write((db) =>
+    db.prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?').run(
+      JSON.stringify({
+        music: { id: '77' },
+        sources: [{ kind: 'music', urls: [base + 'remote-iso'] }]
+      }),
+      '42'
+    )
+  );
+  const item = (await f.client.query('work-detail', { id: '42' })).media.find((m) => m.key === 'audio');
+  let buffer = bytes,
+    mime = 'audio/mp4',
+    tag = null,
+    conflict = false;
+  f.setRemote(({ headers }) => {
+    const range = new Headers(headers).get('range'),
+      r = parseRange(range, buffer.length);
+    return new Response(buffer.subarray(r.start, r.end + 1), {
+      status: r.status,
+      headers: {
+        'content-type': mime,
+        'content-length': String(r.length),
+        ...(tag ? { etag: conflict && r.start === 0 ? 'W/"different"' : tag } : {}),
+        ...(r.status === 206 ? { 'content-range': `bytes ${r.start}-${r.end}/${buffer.length}` } : {})
+      }
+    });
+  });
+  const get = (range) =>
+    pinnedMedia(f.client.config, f.client.grant, item, { range, signal: f.client.signal() });
+  let res = await get();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['content-type'], 'audio/mp4');
+  assert.deepEqual(await contents(res), bytes);
+  mime = 'application/octet-stream';
+  for (tag of [null, 'W/"track"', '"track"']) {
+    res = await get('bytes=400-464');
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.headers['content-type'], 'audio/mp4');
+    assert.deepEqual(await contents(res), bytes.subarray(400, 465));
+  }
+  tag = 'W/"track"';
+  conflict = true;
+  res = await get('bytes=400-464');
+  assert.equal(res.statusCode, 404);
+  res.resume();
+  conflict = false;
+  mime = 'audio/mp4';
+  tag = null;
+  buffer = mp4;
+  res = await get();
+  assert.equal(res.statusCode, 404);
+  res.resume();
+  buffer = Buffer.from('<html>invalid</html>');
+  res = await get();
+  assert.equal(res.statusCode, 404);
+  res.resume();
+});
+test('large select-all confirmation leaves descriptor reads to bounded pages and allows heartbeat within the command budget', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const add = 5000;
+  f.library.write((db) => {
+    const put = db.prepare('INSERT INTO works VALUES(?,?,?)'),
+      member = db.prepare("INSERT INTO source_members VALUES('total',?,?,0)");
+    const work = JSON.stringify({
+      type: 'images',
+      author: { uid: '42', nickname: '样本' },
+      images: Array.from({ length: 18 }, (_, index) => ({ index, urls: [base + 'image' + index] }))
+    });
+    for (let i = 0; i < add; i++) {
+      const id = String(1000 + i);
+      put.run(id, '图集' + id, work);
+      member.run(id, i + 3);
+    }
+  });
+  const list = await f.client.query('list-works', { source: 'total' }),
+    start = performance.now();
+  const [receipt] = await Promise.all([
+    f.client.command({
+      kind: 'catalogue-action',
+      entityVersion: 0,
+      operationId: randomUUID(),
+      payload: {
+        action: 'flat-download',
+        selection: {
+          source: 'total',
+          scope: list.scope,
+          revision: list.revision,
+          all: true,
+          ids: ['43'],
+          confirmedCount: list.total - 1
+        }
+      }
+    }),
+    f.client.renew()
+  ]);
+  const elapsed = Math.round(performance.now() - start);
+  assert.ok(elapsed < 4500, `command and renewal took ${elapsed} ms`);
+  t.diagnostic(`${receipt.count} works confirmed plus concurrent renewal in ${elapsed} ms`);
+  const page = await f.client.query('export-page', { token: receipt.token, offset: 64 });
+  assert.equal(page.length, 64);
+  assert.equal(page[0].id, '1062');
+  assert.equal(page.at(-1).id, '1125');
+  f.library.write((db) => db.exec("UPDATE archive_assets SET revision=revision+1 WHERE id='41:video'"));
+  await assert.rejects(f.client.query('export-page', { token: receipt.token, offset: 128 }), /重新确认/);
+});
+test('after a pause a changed export scope stops the remaining batch and retains already published files', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  let started;
+  const entered = new Promise((r) => (started = r));
+  f.setRemote(
+    ({ signal }) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(png.subarray(0, 20));
+            started();
+            signal.addEventListener('abort', () => controller.error(Error('paused')), { once: true });
+          }
+        }),
+        { headers: { 'content-type': 'image/png', 'content-length': String(png.length), etag: '"prefix"' } }
+      )
+  );
+  const list = await f.client.query('list-works', { source: 'total' }),
+    selection = {
+      source: 'total',
+      scope: list.scope,
+      revision: list.revision,
+      all: false,
+      ids: ['41', '43'],
+      confirmedCount: 2
+    };
+  const { id } = await f.manager.start(f.manager.prepare(f.directory, selection, false).token, true);
+  await entered;
+  const batch = f.manager.queue.get(id);
+  f.manager.queue.pause(id);
+  await f.manager.queue.waitForIdle();
+  assert.equal(batch.jobs[0].state, 'complete');
+  f.library.write((db) => db.exec("INSERT INTO work_tags VALUES('43','changed')"));
+  f.manager.queue.resume(id);
+  await f.manager.queue.waitForIdle();
+  assert.match(batch.stale, /重新确认/);
+  assert.equal(batch.jobs[1].state, 'failed');
+  assert.throws(() => f.manager.queue.retry(id), /重新确认/);
+  assert.equal(fs.readdirSync(f.directory).filter((n) => n.endsWith('.mp4') || n.endsWith('.png')).length, 1);
+});
+test('large cached, streamed and unknown-length playback bounds authorization checks by elapsed time and reuses pinned TLS', async (t) => {
+  const bytes = wav(8 * 1048576),
+    f = await fixture(t, { audioBytes: bytes });
+  await f.connect();
+  await f.client.command({
+    kind: 'enqueue-download',
+    entityVersion: 0,
+    operationId: randomUUID(),
+    payload: { workIds: ['42'], selection: 'audio' }
+  });
+  await f.downloads.run();
+  const sockets = new Set();
+  let checks = 0;
+  f.server.on('request', (req) => {
+    if (req.headers['x-cangxia-media-check']) {
+      checks++;
+      sockets.add(req.socket);
+    }
+  });
+  async function measure(url, name, pause) {
+    const initial = checks,
+      start = performance.now(),
+      res = await f.manager.protocol(new Request(url), f.client.epoch);
+    assert.equal(res.status, 200);
+    const reader = res.body.getReader();
+    let size = 0,
+      chunks = 0;
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) break;
+      size += r.value.length;
+      chunks++;
+      if (pause && chunks === 1) await new Promise((r) => setTimeout(r, 850));
+    }
+    assert.equal(size, bytes.length);
+    const count = checks - initial,
+      duration = performance.now() - start;
+    assert.ok(count <= Math.ceil(duration / 500) + 3, `${name}: ${chunks} chunks required ${count} checks`);
+    assert.ok(chunks > count);
+    t.diagnostic(
+      `${name}: ${chunks} renderer blocks, ${count} authorization requests in ${Math.round(duration)} ms`
+    );
+  }
+  const prepared = await f.manager.prepareAudio('42', randomUUID());
+  await measure(prepared.url, 'NAS archive', true);
+  await measure(prepared.url, 'Windows cache', true);
+  assert.equal(sockets.size,1,'archive and cache playback reuse the same pinned check socket');
+  const paused = (await f.manager.protocol(new Request(prepared.url), f.client.epoch)).body.getReader();
+  await paused.read();
+  await new Promise((r) => setTimeout(r, 850));
+  f.library.write((db) => db.exec("UPDATE archive_assets SET revision=revision+1 WHERE id='42:audio'"));
+  await assert.rejects(
+    paused.read(),
+    'a resumed buffered reader must revalidate even just after the idle monitor checked'
+  );
+
+  f.library.write((db) => {
+    db.prepare("UPDATE works SET body=json_set(body,'$.music.id','88') WHERE id='42'").run();
+    db.prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?').run(
+      JSON.stringify({
+        music: { id: '88' },
+        sources: [{ kind: 'music', urls: [base + 'remote-no-length'] }]
+      }),
+      '42'
+    );
+  });
+  f.setRemote(() => {
+    let pos = 0;
+    return new Response(
+      new ReadableStream({
+        pull(controller) {
+          if (pos === bytes.length) return controller.close();
+          const end = Math.min(bytes.length, pos + 8192);
+          controller.enqueue(bytes.subarray(pos, end));
+          pos = end;
+        }
+      }),
+      { headers: { 'content-type': 'audio/wav' } }
+    );
+  });
+  const remote = await f.manager.prepareAudio('42', randomUUID());
+  // Revoking the preceding reader can retire its in-flight socket. Measure reuse on the next reader independently.
+  sockets.clear();
+  await measure(remote.url, 'unknown-length source', true);
+  assert.equal(sockets.size, 1, 'unknown-length playback reuses its pinned TLS check socket');
+});
+test('an anonymous untagged octet-stream short seek derives the type and returned bytes from one bounded reply', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  f.library.write((db) =>
+    db
+      .prepare("UPDATE works SET body=? WHERE id='43'")
+      .run(JSON.stringify({ type: 'video', author: { uid: '42' }, videoUrls: [base + 'remote-anonymous'] }))
+  );
+  const ranges = [];
+  f.setRemote(({ headers }) => {
+    const range = new Headers(headers).get('range');
+    ranges.push(range);
+    const part = parseRange(range, mp4.length);
+    return new Response(part.start ? Buffer.alloc(part.length, 0) : mp4.subarray(part.start, part.end + 1), {
+      status: 206,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-range': `bytes ${part.start}-${part.end}/${mp4.length}`,
+        'content-length': String(part.length)
+      }
+    });
+  });
+  const item = (await f.client.query('work-detail', { id: '43' })).media.find((m) => m.key === 'video');
+  const res = await pinnedMedia(f.client.config, f.client.grant, item, {
+    range: 'bytes=400-464',
+    signal: f.client.signal()
+  });
+  assert.equal(res.statusCode, 206);
+  assert.equal(res.headers['content-type'], 'video/mp4');
+  assert.deepEqual(await contents(res), mp4.subarray(400, 465));
+  assert.deepEqual(ranges, ['bytes=400-464', 'bytes=0-464']);
+});

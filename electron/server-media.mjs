@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { addAbortListener } from 'node:events';
 import { Readable } from 'node:stream';
-import { pinnedMedia } from './server-client.mjs';
+import { pinnedMedia, mediaCheckAgent } from './server-client.mjs';
 import { ServerMediaCache } from './server-media-cache.mjs';
 import { FlatDownloadQueue } from './flat-downloads.mjs';
 import { parseRange } from '../shared/media-range.mjs';
@@ -54,7 +54,7 @@ export function attachMedia(work, library) {
 function guardedStream(stream, signal, validate, groupBytes = 0) {
   const reader = stream.getReader();
   let watch,
-    delivered = false,
+    lastDelivery = -Infinity,
     timer,
     closed = false;
   const dispose = () => {
@@ -85,7 +85,7 @@ function guardedStream(stream, signal, validate, groupBytes = 0) {
           }
           const chunks = [first.value];
           let bytes = first.value.byteLength;
-          while (delivered && bytes < groupBytes) {
+          while (Number.isFinite(lastDelivery) && bytes < groupBytes) {
             const next = await reader.read();
             if (next.done) break;
             bytes += next.value.byteLength;
@@ -93,10 +93,10 @@ function guardedStream(stream, signal, validate, groupBytes = 0) {
           }
           // The NAS may already have finished writing every byte to the transport.
           // Reauthorize at the last handoff before the consumer can see these bytes.
-          await validate();
+          await validate(performance.now() - lastDelivery >= 500);
           signal.throwIfAborted();
           if (closed) return;
-          delivered = true;
+          lastDelivery = performance.now();
           controller.enqueue(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, bytes));
         } catch (e) {
           if (!closed) {
@@ -177,13 +177,22 @@ export class ServerMedia {
       throw e;
     }
   }
-  async raw(item, { signal, range, head = false, guard = false }) {
+  async raw(item, { signal, range, head = false, guard = false, selectionRevision }) {
     const c = this.client,
       epoch = c.epoch;
     c.assert(epoch);
     let res;
     try {
-      res = await pinnedMedia(c.config, c.grant, item, { signal, range, head, guard });
+      if (head && this.pool?.epoch !== epoch)
+        this.pool = { epoch, agent: mediaCheckAgent(c.config, c.signal()) };
+      res = await pinnedMedia(c.config, c.grant, item, {
+        signal,
+        range,
+        head,
+        guard,
+        selectionRevision,
+        checkAgent: head ? this.pool.agent : undefined
+      });
       c.assert(epoch);
     } catch (e) {
       res?.destroy();
@@ -265,15 +274,23 @@ export class ServerMedia {
           throw Error('媒体版本已更换。');
         return true;
       } finally {
-        response.destroy();
+        if (!response.complete) response.destroy();
       }
     };
-    let checking;
-    const validate = () => {
+    const epoch = this.client.epoch;
+    let checking,
+      checked = -Infinity;
+    const validate = async (force = false) => {
+      this.client.assert(epoch);
       signal.throwIfAborted();
-      checking ??= probe().finally(() => {
-        checking = null;
-      });
+      if (!force && !checking && performance.now() - checked < 500) return Promise.resolve();
+      checking ??= probe()
+        .then(() => {
+          checked = performance.now();
+        })
+        .finally(() => {
+          checking = null;
+        });
       return checking;
     };
     if (present && (await probe(present))) {
@@ -397,7 +414,7 @@ export class ServerMedia {
     while (works.length < receipt.count) {
       const page = await this.client.query('export-page', { token: receipt.token, offset: works.length });
       if (!page.length) throw Error('导出清单已变化。');
-      works.push(...page);
+      for (const work of page) works.push({ ...work, exportRevision: receipt.revision });
     }
     check();
     const plan = queue.prepareWorks(intent.target, works, intent.includeCover),
@@ -445,7 +462,15 @@ export class ServerMedia {
         }
         delete job.partial;
       }
-      res = await this.raw(item, { signal, range: part ? 'bytes=' + size + '-' : undefined });
+      res = await this.raw(item, {
+        signal,
+        range: part ? 'bytes=' + size + '-' : undefined,
+        selectionRevision: job.work.exportRevision
+      });
+      if (res.statusCode === 412) {
+        batch.stale = '导出清单已变化，请重新确认选择。';
+        throw Error(batch.stale);
+      }
       mime = res.headers['content-type'];
       etag = res.headers.etag;
       if (res.statusCode === 206) {

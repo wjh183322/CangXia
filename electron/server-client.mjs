@@ -33,8 +33,8 @@ function validated(input) {
     libraryId: input.libraryId ?? null
   };
 }
-function pinnedAgent(config,stop) {
-  const agent=new https.Agent({keepAlive:false});
+function pinnedAgent(config,stop,keepAlive=false) {
+  const agent=new https.Agent(keepAlive?{keepAlive:true,maxSockets:8,maxFreeSockets:4}:{keepAlive:false});
   agent.createConnection = (options, ready) => {
     const socket = tls.connect({
       ...options,
@@ -55,8 +55,13 @@ function pinnedAgent(config,stop) {
   };
   return agent;
 }
-export async function pinnedMedia(config, grant, resource, {range,head=false,guard=false,signal}={}) {
-  const agent=pinnedAgent(config,signal),url=new URL('/v1/media',config.url);
+export function mediaCheckAgent(config,leaseSignal) {
+  const agent=pinnedAgent(config,leaseSignal,true);
+  leaseSignal.addEventListener('abort',()=>agent.destroy(),{once:true});
+  return agent;
+}
+export async function pinnedMedia(config, grant, resource, {range,head=false,guard=false,signal,checkAgent,selectionRevision}={}) {
+  const agent=checkAgent??pinnedAgent(config,signal),url=new URL('/v1/media',config.url);
   url.searchParams.set('id',resource.resourceId);
   url.searchParams.set('version',resource.version);
   return new Promise((resolve,reject)=>{
@@ -65,12 +70,19 @@ export async function pinnedMedia(config, grant, resource, {range,head=false,gua
       'x-cangxia-protocol':String(serverIdentity.protocolVersion),
       'x-cangxia-grant':Buffer.from(JSON.stringify(grant)).toString('base64url'),
       ...(guard?{'x-cangxia-media-check':'1'}:{}),
+      ...(selectionRevision!==undefined?{'x-cangxia-export-revision':String(selectionRevision)}:{}),
       ...(range?{range}:{})
     }},res=>{
-      res.once('close',()=>agent.destroy());
-      resolve(res);
+      if(checkAgent){
+        res.once('error',reject);
+        res.once('end',()=>resolve(res));
+        res.resume();
+      }else{
+        res.once('close',()=>agent.destroy());
+        resolve(res);
+      }
     });
-    req.on('error',error=>{agent.destroy();reject(error);});
+    req.on('error',error=>{if(!checkAgent)agent.destroy();reject(error);});
     req.end();
   });
 }

@@ -46,7 +46,7 @@ export class FlatDownloadQueue{
  waitForBatch(b){return b.activePromise||Promise.resolve();}
  async networkBatchIds(){const ids=[];for(const b of this.batches){if(b.canceled||b.paused)continue;let network=false;for(const j of b.jobs.filter(j=>['waiting','running'].includes(j.state))){const targets=j.targets||targetsFor(j.work,b.includeCover);if(!targets.length){network=true;break;}for(const t of targets){if(j.results.has(t.key))continue;const d=j.local,a=d?.assets?.find(a=>a.key===t.key);try{if(!a||!mediaExt.test(path.extname(a.file)))throw new Error();const source=requireInside(d.path,path.join(d.path,a.file));if(!regular(source)||fs.statSync(source).size!==a.size||a.size<=0||(a.sha256&&await hashFile(source)!==a.sha256))throw new Error();}catch{network=true;break;}}if(network)break;}if(network)ids.push(b.id);}return ids;}
  resume(id){const b=this.get(id);if(b.canceled)throw new Error('已取消的任务不能继续');b.paused=false;this.emit();void this.run();}
- retry(id){const b=this.get(id);if(b.canceled)return;for(const j of b.jobs)if(j.state==='failed')j.state='waiting';this.resume(id);}
+ retry(id){const b=this.get(id);if(b.canceled)return;if(b.stale)throw Error(b.stale);for(const j of b.jobs)if(j.state==='failed')j.state='waiting';this.resume(id);}
  waitForIdle(){return this.running?new Promise(r=>(this.waiters??=[]).push(r)):Promise.resolve();}
  async cancel(id){const b=this.get(id);b.canceled=true;b.paused=true;if(this.current===b){this.controller?.abort();await this.waitForBatch(b);}for(const j of b.jobs)if(unfinished(j))j.state='canceled';await this.cleanup(b);this.emit();}
  async clear(id){const b=this.get(id);if(b.jobs.some(unfinished)&&!b.canceled)throw new Error('请先取消剩余任务');await this.cleanup(b);this.batches=this.batches.filter(x=>x!==b);this.emit();}
@@ -65,6 +65,7 @@ export class FlatDownloadQueue{
   try{for(;;){const b=this.batches.find(b=>!b.paused&&!b.canceled&&b.jobs.some(j=>j.state==='waiting'));if(!b)break;const j=b.jobs.find(j=>j.state==='waiting');this.current=b;this.controller=new AbortController();let finish;b.activePromise=new Promise(r=>{finish=r;});j.state='running';this.emit();
    try{await this.save(b,j,this.controller.signal);j.state='complete';j.message='媒体已保存';}
    catch(e){j.state=b.canceled?'canceled':b.paused?'waiting':'failed';j.message=b.canceled?'已取消，完整文件保留':b.paused?'已暂停，可在本次运行中继续':e.message;}
+   if(b.stale)for(const job of b.jobs)if(job.state==='waiting'){job.state='failed';job.message=b.stale;}
    this.controller=null;this.current=null;finish();b.activePromise=null;this.emit();if(b.jobs.every(j=>j.state==='complete'))try{await this.cleanup(b);}catch{b.cleanupMessage='媒体已完整保存，临时文件夹未能清理；可关闭软件后删除 .cangxia-flat- 开头的临时文件夹。';this.emit();}
   }}catch(e){if(this.current){this.current.paused=true;for(const j of this.current.jobs)if(j.state==='running'){j.state='failed';j.message=e.message;}}}
   finally{this.current=null;this.controller=null;this.running=false;this.emit();for(const r of this.waiters||[])r();this.waiters=[];}
@@ -115,7 +116,7 @@ export class FlatDownloadQueue{
     signal.throwIfAborted();const prefix=`${String(j.index+1).padStart(4,'0')}_${safeName(j.work.author?.nickname||'未知作者',32)}_${j.id}`;
     const base=prefix+(t.key==='cover'?'_封面':t.kind==='image'?'_'+String(t.number||i+1).padStart(2,'0'):'');
     const result=await this.publish(b,asset,base,signal);j.results.set(t.key,{...result,size:asset.size,sha256:asset.sha256});if(!this.acquireAsset)await fs.promises.unlink(asset.file);this.emit();
-   }catch(e){if(signal.aborted)throw e;errors.push(`${i+1}：${e.message}`);if(e.httpStatus===429)break;}finally{if(asset?.handle){await asset.handle.close();this.removeOwned(b,asset.file);}}
+   }catch(e){if(signal.aborted||b.stale)throw e;errors.push(`${i+1}：${e.message}`);if(e.httpStatus===429)break;}finally{if(asset?.handle){await asset.handle.close();this.removeOwned(b,asset.file);}}
   }
   if(errors.length||j.results.size!==j.targets.length)throw new Error(`部分文件未完成（${j.results.size}/${j.targets.length}）：${errors.join('；')}`);
  }
