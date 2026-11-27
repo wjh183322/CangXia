@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { openLibrary } from '../../server/library.mjs';
+import { discoveryReads } from '../../server/read-sources.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { selectWorks } from '../../electron/filter.mjs';
 import { creatorIndex } from '../../shared/creators.mjs';
@@ -366,4 +367,93 @@ test('archiving an author fences live reads and old confirmations, and re-add re
   await add();
   assert.deepEqual(query('list-works', { source: 'author:' + sec }).ids, before);
   assert.throws(() => archive(v), /重新/);
+});
+
+test('a sparse raw author response keeps verified names in the shared profile and entry, and a later observed name replaces them', async (t) => {
+  const sec = 'MS4wLjABrawlookup001',
+    id = String(first),
+    epoch = randomUUID();
+  let response = { uid: '71', sec_uid: sec };
+  const source = {
+    ...discoveryReads(async (_input, request, parse) => {
+      assert.equal(new URL(request.url).searchParams.get('sec_user_id'), sec);
+      return parse({ status: 200, text: JSON.stringify({ status_code: 0, user: response }) });
+    }),
+    account: () => ({ uid: '101', authEpoch: epoch }),
+    readDetail: async () => ({ id, statusOnly: true })
+  };
+  const { library, sessions, who, grant, query, works } = fixture(t, 55, {}, source);
+  library.write((db) => {
+    db.prepare('INSERT INTO source_account VALUES(1,?,?,?)').run('101', 'fixture', randomUUID());
+    db.prepare("UPDATE works SET body=json_set(body,'$.author.secUid',?,'$.coAuthors',json('[]'))").run(sec);
+  });
+  const operation = (action, input) => sessions.sourceOperation(who, grant, action, input);
+  const add = () => operation('author', { text: 'https://www.douyin.com/user/' + sec });
+  const refresh = () => operation('creator-profiles', { id });
+  await add();
+  assert.equal(query('state', {}).authors[0].name, '未命名作者');
+  response = { ...response, nickname: '已核实昵称', unique_id: 'durable' };
+  await add();
+  await refresh();
+  delete response.nickname;
+  delete response.unique_id;
+  await refresh();
+  await add();
+  const profile = () =>
+    library.read((db) =>
+      JSON.parse(db.prepare("SELECT body FROM source_creator_profiles WHERE id='uid:71'").get().body)
+    );
+  assert.equal(profile().nickname, '已核实昵称');
+  assert.equal(query('state', {}).authors[0].name, '已核实昵称');
+  assert.equal(query('work-detail', { id: works[1].id }).author.nickname, '已核实昵称');
+  response.nickname = '五月';
+  await refresh();
+  assert.equal(profile().nickname, '五月');
+  assert.equal(profile().uniqueId, 'durable');
+});
+
+test('UID-only retained creators use verified shared secUid on detail failure and conflicting identity pairs stay isolated', async (t) => {
+  const id = String(first),
+    sec = 'MS4wLjABshared0001',
+    wrong = 'MS4wLjABother0001',
+    calls = [];
+  const source = {
+    account: () => ({ uid: '101', authEpoch: 'fixture' }),
+    readDetail: async () => {
+      throw Error('offline');
+    },
+    ...discoveryReads(async (_input, request, parse) => {
+      const lookup = new URL(request.url).searchParams.get('sec_user_id');
+      calls.push(lookup);
+      return parse({
+        status: 200,
+        text: JSON.stringify({
+          status_code: 0,
+          user: { uid: '71', sec_uid: lookup, nickname: '实测名称', unique_id: 'verified' }
+        })
+      });
+    })
+  };
+  const { library, sessions, who, grant } = fixture(t, 55, {}, source);
+  library.write((db) => {
+    db.prepare('INSERT INTO source_account VALUES(1,?,?,?)').run('101', 'fixture', randomUUID());
+    db.prepare('INSERT INTO source_creator_profiles VALUES(?,?)').run(
+      'uid:71',
+      JSON.stringify({ uid: '71', secUid: sec, nickname: '历史名称' })
+    );
+    db.prepare("UPDATE works SET body=json_set(body,'$.coAuthors',json('[]')) WHERE id=?").run(id);
+  });
+  const refresh = () => sessions.sourceOperation(who, grant, 'creator-profiles', { id });
+  assert.equal((await refresh()).updated, 1);
+  assert.deepEqual(calls, [sec]);
+  library.write((db) =>
+    db.prepare("UPDATE works SET body=json_set(body,'$.author.secUid',?) WHERE id=?").run(wrong, id)
+  );
+  assert.equal((await refresh()).updated, 0);
+  assert.deepEqual(calls, [sec]);
+  library.read((db) => {
+    const p = JSON.parse(db.prepare("SELECT body FROM source_creator_profiles WHERE id='uid:71'").get().body);
+    assert.equal(p.secUid, sec);
+    assert.equal(p.nickname, '实测名称');
+  });
 });

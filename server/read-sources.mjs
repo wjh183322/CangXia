@@ -1,5 +1,5 @@
 import {mergeCreatorFields} from './source-work-merge.mjs';
-import {workCreators,sameCreator} from '../shared/creators.mjs';
+import {workCreators,sameCreator,mergeCreator} from '../shared/creators.mjs';
 import {saveWorks} from './read-store.mjs';
 import { randomUUID } from 'node:crypto';
 import { isUuid } from './library.mjs';
@@ -194,8 +194,8 @@ export function discoveryReads(read) {
           return {
             id,
             uid: String(u.uid),
-            name: String(u.nickname || '未命名作者').slice(0, 120),
-            uniqueId: String(u.unique_id || '').slice(0, 120)
+            ...(typeof u.nickname==='string'&&u.nickname.trim()?{name:u.nickname.trim().slice(0,120)}:{}),
+            ...(typeof u.unique_id==='string'&&u.unique_id.trim()?{uniqueId:u.unique_id.trim().slice(0,120)}:{})
           };
         }
       );
@@ -265,6 +265,14 @@ export function createSourceOperations() {
     }
   };
 }
+// A stored account identity can fill a missing secUid, but two conflicting
+// UID/secUid pairs must never rekey or replace one another's shared profile.
+function knownCreator(db,person){
+  const rows=db.prepare("SELECT body FROM source_creator_profiles WHERE id=? OR json_extract(body,'$.secUid')=nullif(?,'')").all(person.uid?'uid:'+person.uid:'',person.secUid??'');
+  const matches=rows.map(row=>JSON.parse(row.body));
+  if(matches.some(known=>!sameCreator(person,known)))return null;
+  return matches.reduce((resolved,known)=>sameCreator(resolved,known)?mergeCreator(resolved,known):resolved,person);
+}
 async function sourceAction(source, session, kind, payload) {
   const account = session.read((db) => boundIdentity(db, source)),
     input = { authEpoch: account.authEpoch, signal: session.signal };
@@ -291,9 +299,10 @@ async function sourceAction(source, session, kind, payload) {
     const fields=new Set(observation?.observedFields?.filter(key=>['author','coAuthors'].includes(key)));
     const updated={...work};
     if(observation)mergeCreatorFields(updated,work,observation,fields);
-    const profiles=[],people=workCreators(updated);
+    const profiles=[],people=session.read(db=>workCreators(updated).map(person=>knownCreator(db,person)));
     let attempted=0,unconfirmed=0;
     for(const person of people){
+      if(!person){unconfirmed++;continue;}
       if(!/^MS4wLjAB[A-Za-z0-9_-]{8,240}$/.test(person.secUid))continue;
       if(attempted++)await delay(1100,undefined,{signal:session.signal});
       try{
@@ -314,7 +323,7 @@ async function sourceAction(source, session, kind, payload) {
         next.observedFields=[...new Set([...(current.observedFields??[]),...fields])];
         db.prepare('UPDATE works SET body=? WHERE id=?').run(JSON.stringify(next),work.id);
       }
-      const accepted=profiles.filter(p=>workCreators(next).some(a=>sameCreator(a,p)));
+      const accepted=profiles.filter(p=>knownCreator(db,p)&&workCreators(next).some(a=>sameCreator(a,p)));
       saveWorks(db,{works:[],aux:{audioSourceHints:[],creatorProfiles:accepted}});
       return {updated:accepted.length,message:'已核对 '+accepted.length+' 位作者'+(detailMissing?'；详情暂不可用，已沿用现有作者记录':'')+(unconfirmed?'；未核实的主页资料已保留原值':'')};
     });
@@ -336,12 +345,14 @@ async function sourceAction(source, session, kind, payload) {
     return commit((db) => {
       const key = 'author:' + row.id,
         old = db.prepare('SELECT body,added FROM read_sources WHERE source_id=?').get(key);
-      if (old && JSON.parse(old.body).uid !== row.uid)
+      const previous=old&&JSON.parse(old.body);
+      if (previous && previous.uid !== row.uid)
         throw failure(409, 'AUTHOR_MISMATCH', '作者身份已变化。');
+      const entry={...previous,...row,name:row.name||previous?.name||'未命名作者',uniqueId:row.uniqueId||previous?.uniqueId||''};
       db.prepare(
         `INSERT INTO read_sources VALUES(?,?,?,?,1,0) ON CONFLICT(source_id)
         DO UPDATE SET body=excluded.body,name=excluded.name,added=1`
-      ).run(key, account.uid, row.name, JSON.stringify(row));
+      ).run(key, account.uid, entry.name, JSON.stringify(entry));
       if(!old?.added)advanceAuthorEntry(db,key);
       return { id: row.id };
     });
