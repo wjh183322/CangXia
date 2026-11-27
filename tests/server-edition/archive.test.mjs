@@ -688,6 +688,8 @@ test(
         })
       });
     for (const [hook, mutation] of [
+      ['afterFilePlacement', 'withdraw-swap'],
+      ['afterStagingUnlink', 'withdraw-crash'],
       ['beforeFormalPlacement', 'external-video'],
       ['beforeFormalPlacement', 'external-cover'],
       ['afterFilePlacement', 'source'],
@@ -699,8 +701,10 @@ test(
     ]) {
       const work = observation('reference'),
         fresh = observation('reference', true);
+      let recoveryHook;
       const f = fixture(t, work, {
         coverPython: python,
+        fileHook: (name, args) => recoveryHook?.(name, args),
         source: {
           account: () => ({ uid: '42', authEpoch: 'fixture' }),
           readDownloadDetail: async () => fresh
@@ -761,7 +765,7 @@ test(
       assert.equal(fs.existsSync(destination), hook !== 'beforeFormalPlacement');
       if (fs.existsSync(destination)) assert.equal(digest(fs.readFileSync(destination)), record.sha256);
       const previous = path.join(media, '原始输入');
-      if (['source', 'foreign-target'].includes(mutation))
+      if (['source', 'foreign-target', 'withdraw-swap', 'withdraw-crash'].includes(mutation))
         f.library.write((db) =>
           saveWorks(db, { works: [observation('other')], aux: { audioSourceHints: [], creatorProfiles: [] } })
         );
@@ -785,6 +789,52 @@ test(
         assert.deepEqual([after.ino, after.size, after.mtimeNs], [before.ino, before.size, before.mtimeNs]);
       }
       let foreignIdentity;
+      const replacement = path.join(media, '外部替换'),
+        withheld = path.join(path.dirname(stage), 'withheld-hd');
+      if (mutation.startsWith('withdraw-')) {
+        fs.copyFileSync(path.join(files, 'hd.png'), replacement);
+        foreignIdentity = fs.statSync(replacement, { bigint: true }).ino;
+        if (mutation === 'withdraw-swap') {
+          recoveryHook = (name, { file }) => {
+            if (name !== 'beforeHDWithdrawal') return;
+            fs.unlinkSync(file);
+            fs.renameSync(replacement, file);
+            recoveryHook = null;
+          };
+        } else {
+          const crashed = spawnSync(
+            process.execPath,
+            [
+              '--input-type=module',
+              '-e',
+              `import fs from 'node:fs';
+               import { openLibrary } from './server/library.mjs';
+               import { createDownloads } from './server/downloads.mjs';
+               const [root, replacement] = process.argv.slice(1);
+               const downloads = createDownloads({
+                 root,
+                 library: openLibrary({ root }),
+                 source: { account: () => ({ uid: '42' }) },
+                 fileHook(name, { file }) {
+                   if (name === 'beforeHDWithdrawal') {
+                     fs.unlinkSync(file);
+                     fs.renameSync(replacement, file);
+                   }
+                   if (name === 'afterHDWithdrawal') process.kill(process.pid, 'SIGKILL');
+                 }
+               });
+               await downloads.run();`,
+              f.root,
+              replacement
+            ],
+            { cwd: repo, windowsHide: true, encoding: 'utf8' }
+          );
+          assert.notEqual(crashed.status, 0, crashed.stderr);
+          assert.equal(fs.statSync(withheld, { bigint: true }).ino, foreignIdentity);
+          assert.equal(fs.existsSync(destination), false);
+          fs.writeFileSync(destination, '另一份用户文件', { flag: 'wx' });
+        }
+      }
       if (mutation === 'foreign-target') {
         fs.unlinkSync(destination);
         fs.copyFileSync(path.join(files, 'hd.png'), destination);
@@ -804,7 +854,19 @@ test(
         f.info().assets.some((row) => row.key === 'cover-hd'),
         false
       );
-      if (mutation === 'foreign-target')
+      if (mutation === 'withdraw-crash') {
+        const checkConflict = () => {
+          assert.equal(fs.readFileSync(destination, 'utf8'), '另一份用户文件');
+          assert.equal(fs.statSync(withheld, { bigint: true }).ino, foreignIdentity);
+          assert.ok(f.state('hd:72').message.includes(`.cangxia-staging/commits/${saved.id}/withheld-hd`));
+        };
+        checkConflict();
+        f.command('control-download', { action: 'cancel', jobId: 'hd:72' });
+        await f.d.run();
+        assert.equal(f.state('hd:72').cleanupPending, true);
+        checkConflict();
+        fs.renameSync(destination, replacement);
+      } else if (mutation === 'foreign-target' || mutation === 'withdraw-swap')
         assert.equal(fs.statSync(destination, { bigint: true }).ino, foreignIdentity);
       else assert.equal(fs.existsSync(destination), false);
       if (mutation === 'external-video')
@@ -815,8 +877,10 @@ test(
       await f.d.run();
       assert.equal(f.state('hd:72').downloadState, 'cancelled');
       assert.equal(f.state('hd:72').cleanupPending, false);
-      if (mutation === 'foreign-target')
+      if (mutation === 'foreign-target' || mutation.startsWith('withdraw-'))
         assert.equal(fs.statSync(destination, { bigint: true }).ino, foreignIdentity);
+      if (mutation.startsWith('withdraw-')) assert.equal(fs.existsSync(withheld), false);
+      if (mutation === 'withdraw-crash') assert.equal(fs.readFileSync(replacement, 'utf8'), '另一份用户文件');
       if (mutation === 'source') {
         f.library.write((db) =>
           saveWorks(db, { works: [work], aux: { audioSourceHints: [], creatorProfiles: [] } })

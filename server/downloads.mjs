@@ -1296,14 +1296,23 @@ export function createDownloads({
           j.state = 'paused';
         });
       if (job.state === 'cancelling') {
+        let reviewReason;
         const pending = await withWorkFiles(layout, workId, () =>
-          cleanFileStages({ store, layout, workId, jobId: id })
+          cleanFileStages({
+            store,
+            layout,
+            workId,
+            jobId: id,
+            onReview(reason) {
+              reviewReason = reason;
+            }
+          })
         );
         change(id, (j) => {
           j.state = 'cancelled';
           j.cleanupPending = pending;
           j.reason = pending
-            ? { code: 'CLEANUP_PENDING', message: '临时文件清理未完成，可再次取消重试。' }
+            ? reviewReason ?? { code: 'CLEANUP_PENDING', message: '临时文件清理未完成，可再次取消重试。' }
             : null;
         });
       }

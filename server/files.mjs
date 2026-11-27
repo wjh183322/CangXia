@@ -958,22 +958,46 @@ async function withholdHD({ store, layout, commit }) {
   const formal = path.join(parent.file, leaf);
   const formalStat = await status(formal),
     stagedStat = await status(staged);
-  if (formalStat?.isFile() && same(formalStat, body.identity)) {
-    // A foreign file at either name stays in place, including equal bytes under a different inode.
-    if (await status(withheld)) throw review();
+  let quarantine = await status(withheld);
+  if (!quarantine && formalStat?.isFile() && same(formalStat, body.identity)) {
     const alias = stagedStat?.isFile() && same(stagedStat, body.identity);
     if (formalStat.nlink !== BigInt(alias ? 2 : 1)) throw review();
     await assertDigest({ file: formal, stat: formalStat }, body, alias ? 2 : 1);
     if (!same(await status(formal), body.identity) || !same(await status(parent.file), body.homeIdentity))
       throw review();
+    // An old journal may contain an unrelated file in staging. Only attempt
+    // automatic return for a move armed while its recovery name was vacant.
+    body.hdWithdrawalArmed = true;
+    updateCommit(store, commit);
+    store.fileHook('beforeHDWithdrawal', { file: formal });
     await moveExclusive(formal, withheld);
+    store.fileHook('afterHDWithdrawal', { file: formal });
+    await syncDirectory(parent.file);
+    await syncDirectory(dir);
+    quarantine = await status(withheld);
+  }
+  if (quarantine && !same(quarantine, body.identity)) {
+    const location = portable('.cangxia-staging', 'commits', commit.id, withheldName);
+    const retained = problem('NAS_FILE_REVIEW', `请核对外部文件。保留位置为媒体目录下的 ${location}。`);
+    if (!body.hdWithdrawalArmed || !same(await status(parent.file), body.homeIdentity)) throw retained;
+    // The source name was replaced after validation. Returning by exclusive
+    // rename leaves both entries intact if another writer now owns that name.
+    try {
+      await moveExclusive(withheld, formal);
+    } catch {
+      throw retained;
+    }
+    quarantine = null;
+  }
+  // A prior process may have returned the foreign entry and exited before
+  // syncing its directories. Make that rename durable before closing the journal.
+  if (!quarantine && body.hdWithdrawalArmed) {
     await syncDirectory(parent.file);
     await syncDirectory(dir);
   }
-  const quarantine = await status(withheld),
-    alias = await status(staged);
   if (quarantine) {
-    if (!quarantine.isFile() || !same(quarantine, body.identity)) throw review();
+    if (!quarantine.isFile()) throw review();
+    const alias = await status(staged);
     const linked = alias?.isFile() && same(alias, body.identity);
     if (quarantine.nlink !== BigInt(linked ? 2 : 1)) throw review();
     await assertDigest({ file: withheld, stat: quarantine }, body, linked ? 2 : 1);
@@ -1161,7 +1185,7 @@ export async function resolveResource({
   return asset;
 }
 
-export async function cleanFileStages({ store, layout, workId, jobId, key }) {
+export async function cleanFileStages({ store, layout, workId, jobId, key, onReview }) {
   let pending = false;
   for (const commit of store.fileCommits(workId)) {
     if (
@@ -1201,7 +1225,8 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
     ) {
       try {
         await withholdHD({ store, layout, commit });
-      } catch {
+      } catch (error) {
+        if (error.code === 'NAS_FILE_REVIEW') onReview?.(fileReason(error));
         pending = true;
         continue;
       }
