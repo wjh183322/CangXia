@@ -152,7 +152,7 @@ async function launchContext(saved) {
 export async function openOfficialProvider(
   saved,
   signal,
-  { createContext = launchContext, now = Date.now } = {}
+  { createContext = launchContext, now = Date.now, forLogin = false } = {}
 ) {
   let context;
   try {
@@ -164,7 +164,7 @@ export async function openOfficialProvider(
       manualPanel,
       login,
       pendingRead;
-    let startup = true,
+    let startup = !forLogin,
       clicked = false;
     let startupNav;
     const protocol = await context.newCDPSession(page);
@@ -412,7 +412,8 @@ export async function openOfficialProvider(
         } catch {}
       await (allowed ? route.fallback() : route.abort(preserveBlank ? 'aborted' : undefined)).catch(() => {});
     });
-    await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    // beginLogin starts its own navigation with the holder and reload checks in place.
+    if (!forLogin) await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
     async function fixed(fn, observeBootstrap = false, opening = false) {
       const initial = key,
         view = login;

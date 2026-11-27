@@ -140,7 +140,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
     current.end.abort();
     return current.provider?.close().catch(() => {});
   }
-  async function browser(session, { recoveryOnly = false } = {}) {
+  async function browser(session, { recoveryOnly = false, forLogin = false } = {}) {
     guard(session);
     if (slot?.session.signal === session.signal) return slot;
     await retire(slot);
@@ -154,7 +154,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
     slot = current;
     session.signal.addEventListener('abort', current.stop, { once: true });
     try {
-      current.provider = await openProvider(saved, current.end.signal);
+      current.provider = await openProvider(saved, current.end.signal, { forLogin });
       guard(session);
       if (slot !== current) throw stale();
       return current;
@@ -257,7 +257,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
   async function login(session, id, action, value) {
     return serial(async () => {
       guard(session);
-      const current = action === 'open' ? await browser(session) : slot;
+      const current = action === 'open' ? await browser(session, { forLogin: true }) : slot;
       if (!current || current.session.signal !== session.signal) throw stale();
       if (Date.now() < resumeAt && action !== 'close') throw limited();
       if (action === 'open') {

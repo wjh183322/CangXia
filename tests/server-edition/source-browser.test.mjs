@@ -215,6 +215,30 @@ test('lost holder cannot deliver a QR or bind the result of an in-flight verific
   await assert.rejects(source.openLogin(session));
 });
 
+test('first login navigates only after the holder opens it and handles an immediate self reload', async (t) => {
+  const {createRequire} = await import('node:module');
+  const {chromium} = createRequire(new URL('../../server/package.json', import.meta.url))('playwright-core');
+  const {openOfficialProvider} = await import('../../server/source-provider.mjs');
+  const engine = await chromium.launch({headless:true, chromiumSandbox:process.platform === 'linux'});
+  t.after(() => engine.close());
+  const context = await engine.newContext();
+  let documents = 0;
+  await context.route('**/*', route => {
+    assert.equal(route.request().url(), 'https://www.douyin.com/user/self');
+    return route.fulfill({contentType:'text/html', body:++documents === 1
+      ? '<script>location.reload()</script>' : '<body>fixture</body>'});
+  });
+  const provider = await openOfficialProvider(null, new AbortController().signal, {
+    forLogin:true, createContext:async () => context
+  });
+  t.after(() => provider.close());
+  assert.equal(documents, 0);
+  await provider.beginLogin(() => {});
+  await context.pages()[0].waitForSelector('body:text("fixture")');
+  assert.equal(documents, 2);
+  assert.equal((await provider.loginView()).phase, 'loading');
+});
+
 test('bundled Chromium handles late official 4.0.8 dialog, repaint, expiry and explicit human OTP offline', async (t) => {
   const { exerciseProvider } = await import('./source-provider-fixture.mjs');
   const provider = await import('../../server/source-provider.mjs').catch(() => ({}));
