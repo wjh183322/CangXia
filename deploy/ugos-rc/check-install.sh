@@ -14,7 +14,12 @@ if docker compose run --rm --no-deps prepare; then exit 1; fi
 test "$(cat library/sentinel)" = untouched
 test -f install/first-install
 rm library/sentinel
-docker compose up -d --wait --wait-timeout 180
+# Exercise the supported update from the first public candidate with its own
+# database, certificate and device identity already on disk.
+previous='ghcr.io/wjh183322/cangxia-server@sha256:aedc12ea59861c7d36b10686719cff2c0fe05df8ca5b595814469bd43642e4a4'
+printf 'services:\n  prepare:\n    image: %s\n  server:\n    image: %s\n' "$previous" "$previous" > previous.yaml
+docker compose -f compose.yaml -f previous.yaml up -d --wait --wait-timeout 180
+test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q server)")" = "$previous"
 test "$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps -aq prepare)")" = 0
 test "$(docker compose exec -T server id -u)" = 1000
 pin=$(sudo openssl x509 -in config/identity/server.crt -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | openssl base64 -A)
@@ -27,6 +32,7 @@ if docker compose exec -T server touch /approved/unapproved; then exit 1; fi
 before=$(sudo sha256sum config/identity/library-id config/identity/server.crt config/identity/windows-1.json)
 docker compose down
 docker compose up -d --wait --wait-timeout 180
+test "$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q server)")" = "$(docker compose config --images | head -n1)"
 test "$before" = "$(sudo sha256sum config/identity/library-id config/identity/server.crt config/identity/windows-1.json)"
 docker compose exec -T server node /opt/cangxia/server/health.mjs
 echo 'UGOS_KIT_CHECK_PASSED'

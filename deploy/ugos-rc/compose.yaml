@@ -1,5 +1,5 @@
 name: cangxia-server
-x-image: &image ghcr.io/wjh183322/cangxia-server@sha256:aedc12ea59861c7d36b10686719cff2c0fe05df8ca5b595814469bd43642e4a4
+x-image: &image ghcr.io/wjh183322/cangxia-server@sha256:cdcb11681ecee1f08c18e5a6d2de95995eee99918d1791b1d2e19593e1533d92
 
 services:
   prepare:
