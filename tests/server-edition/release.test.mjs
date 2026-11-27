@@ -40,3 +40,18 @@ test('Docker context only accepts named repository inputs, excluding private run
   assert.ok(rules.includes('!server/cover-helper.py'));
   assert.ok(!rules.some(x=>/\.(sqlite|pem|key|mp4)$|\.evidence|node_modules|backup-server\//.test(x)));
 });
+
+test('ordinary verification only uploads exact JSON records and owner approval separates public distribution from stable',()=>{
+  const read=(f)=>readFileSync(new URL('../../'+f,import.meta.url),'utf8');
+  const normal=read('.github/workflows/server-edition-full.yml');
+  assert.deepEqual([...normal.matchAll(/^          path: (.+)$/gm)].map(m=>m[1].trim()),
+    ['release/server/candidate.json','release/server-linux/candidate.json']);
+  assert.doesNotMatch(normal,/packages: write|promote-server-image|windows-.*\.exe/);
+  const approval=read('.github/workflows/server-edition-approval.yml');
+  assert.match(approval,/github\.actor == 'wjh183322'/);
+  assert.match(approval,/if: needs\.approval\.outputs\.action == 'candidate' && needs\.approval\.outputs\.visibility == 'public'/);
+  assert.doesNotMatch(approval,/path: .*image\.tar/);
+  const promote=read('scripts/promote-server-image.sh');
+  assert.doesNotMatch(promote,/gh run download/);
+  assert.ok(promote.includes('check "docker://$registry:$version"')&&promote.includes('check "docker://$registry:latest"'));
+});

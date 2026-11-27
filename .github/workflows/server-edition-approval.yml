@@ -1,0 +1,74 @@
+name: Owner-approved server distribution
+on:
+  push:
+    tags: ['server-candidate-*', 'server-stable-*']
+permissions:
+  contents: read
+concurrency:
+  group: owner-approved-server-distribution
+  cancel-in-progress: false
+jobs:
+  approval:
+    if: >-
+      github.repository == 'wjh183322/CangXia' && github.actor == 'wjh183322' &&
+      github.triggering_actor == 'wjh183322' && github.event.created && !github.event.deleted
+    runs-on: ubuntu-24.04
+    permissions: {contents: read, actions: read, statuses: read}
+    outputs:
+      action: ${{ steps.authorize.outputs.action }}
+      visibility: ${{ steps.authorize.outputs.visibility }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - id: authorize
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: bash scripts/promote-server-image.sh authorize
+  registry:
+    needs: approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions: {contents: read, actions: read, packages: write, statuses: write}
+    env:
+      IMAGE: ghcr.io/wjh183322/cangxia-server:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - if: needs.approval.outputs.action == 'candidate'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with: {node-version: '24.21.0', package-manager-cache: false}
+      - if: needs.approval.outputs.action == 'candidate'
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - if: needs.approval.outputs.action == 'candidate'
+        run: bash scripts/verify-server-image.sh
+      - name: Verify approval, package visibility and tested identity before writing
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: bash scripts/promote-server-image.sh publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-distribution-record-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/server-linux/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+  public-windows:
+    if: needs.approval.outputs.action == 'candidate' && needs.approval.outputs.visibility == 'public'
+    needs: [approval, registry]
+    runs-on: windows-2025
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with: {node-version: '24.21.0', package-manager-cache: false}
+      - run: npm ci
+      - run: npm run dist
+      - shell: pwsh
+        run: ./scripts/smoke-server-install.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owner-approved-public-windows-${{ github.sha }}
+          path: |
+            release/server/*.exe
+            release/server/*.zip
+            release/server/candidate.json
+          if-no-files-found: error
+          retention-days: 7

@@ -11,11 +11,11 @@ const files=await build({targets:Platform.WINDOWS.createTarget(['nsis','portable
   config:{extraMetadata:{sourceRevision,protocolVersion:info.protocolVersion}}});
 const executables=files.filter(p=>p.endsWith('.exe'));
 if (executables.length!==2) throw Error('Both Windows x64 executables are required.');
-writeFileSync('release/server/candidate.json',JSON.stringify({...info,files:Object.fromEntries(executables.map(p=>
-  [path.basename(p),createHash('sha256').update(readFileSync(p)).digest('hex')]))},null,2)+'\n');
-
 const kit = 'release/server/CangXia-Server-0.4.1-NAS.zip';
 execFileSync('tar.exe',['-a','-cf',kit,
   '-C',path.resolve('server'),'compose.yaml',
   '-C',path.resolve('feasibility/nas-b'),'chromium-seccomp.json','chromium-seccomp.LICENSE',
   '-C',path.resolve('docs/server-edition'),'release-acceptance.md','migration-rehearsal.md'],{windowsHide:true});
+
+writeFileSync('release/server/candidate.json',JSON.stringify({...info,files:Object.fromEntries([...executables,kit].map(p=>
+  [path.basename(p),createHash('sha256').update(readFileSync(p)).digest('hex')]))},null,2)+'\n');
