@@ -382,3 +382,24 @@ test('handoff while page two is in flight retains the committed page receipt and
   assert.deepEqual(f.members(total), ['15', '17']);
   assert.equal(next.checkpoint(job.jobId).pendingOperationId, null);
 });
+
+test('a fresh recovery uses its accepted page position after an earlier in-flight observation was suppressed', (t) => {
+  const f = fixture(t);
+  f.commit(f.start(folder), [A]);
+  const job = f.start(folder),
+    first = f.prepare(job);
+  f.remove(folder, A);
+  const stale = f.store.commitSourcePage({ ...first, page: page(first, [A, '11'], '20') });
+  assert.deepEqual(stale.restoredIds, []);
+  assert.deepEqual(f.members(folder), ['11']);
+  const accepted = f.commit(job, ['12', A]);
+  assert.deepEqual(accepted.restoredIds, [A]);
+  assert.deepEqual(f.members(folder), ['11', '12', A]);
+  assert.equal(
+    f.library.read(
+      (db) =>
+        db.prepare('SELECT position FROM membership_restorations WHERE job_id=?').get(job.jobId).position
+    ),
+    3
+  );
+});
