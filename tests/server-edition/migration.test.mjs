@@ -14,8 +14,10 @@ import { createRehearsals } from '../../server/rehearsal-service.mjs';
 import { ServerClient, pinnedRequest } from '../../electron/server-client.mjs';
 import { registerCatalogueHandlers } from '../../electron/server-ipc.mjs';
 import { DatabaseSync } from 'node:sqlite';
+import { gzipSync } from 'node:zlib';
 import { Store } from '../../electron/store.mjs';
 import { DownloadQueue } from '../../electron/downloads.mjs';
+import { HDCover } from '../../electron/hd-cover.mjs';
 import { listWorks } from '../../server/catalogue.mjs';
 import { historyRuns, historyItems } from '../../server/read-history.mjs';
 import * as recovery from '../../server/recovery.mjs';
@@ -864,7 +866,9 @@ test('native NAS deletion tombstones yield only to a later proved restore of tha
     local.db.run('INSERT INTO members VALUES(?,?,?)', ['__all__', '6', 2]);
     put('members', '__all__:8', null); // Ordinary old NULL, without a deletion generation or matching receipt.
     put('collections', '77', { id: '77', name: '另一夹', folder: '另一夹' });
-    put('members', '77:5', null);
+    put('members', '77:5', { collectionId: '77', workId: '5', rank: 4 });
+    put('collections', '99', { id: '99', name: '未知归属', folder: '未知' });
+    put('members', '99:5', null);
     const account = (id) => ({ workId: id, kind: 'account', sourceId: '__all__' });
     const authorScope = { workId: '5', kind: 'author', sourceId: author };
     const cmd = (items, generation) => ({
@@ -872,19 +876,34 @@ test('native NAS deletion tombstones yield only to a later proved restore of tha
       libraryId,
       items: items.map((scope) => ({ scope, expectedGeneration: generation }))
     });
-    const deleted = scopes.delete(cmd([account('5'), authorScope, account('6')], 0), device);
+    const firstCommand = cmd([account('5'), authorScope, account('6')], 0);
+    const deleted = scopes.delete(firstCommand, device);
     assert.equal(
       n.db
         .prepare("SELECT revision FROM records WHERE kind='members' AND id='__all__:5' AND body IS NULL")
         .get().revision,
       deleted.dataRevision
     );
-    n.db.prepare('VACUUM INTO ?').run(path.join(old, 'library.sqlite'));
     const grant = scopes.prepareRestore(cmd([account('5'), authorScope], 1), device);
-    const restored = scopes.finishRestore(grant.grantId, [member('5', 0), authorMember], device);
-    assert.equal(restored.items[0].generation, 2);
+    const firstRestore = scopes.finishRestore(grant.grantId, [member('5', 0), authorMember], device);
+    assert.equal(firstRestore.items[0].generation, 2);
+    scopes.delete(cmd([account('5'), authorScope], 2), device);
+    n.db.prepare('VACUUM INTO ?').run(path.join(old, 'library.sqlite'));
+    const oldDatabase = path.join(old, 'library.sqlite'),
+      historical = new DatabaseSync(oldDatabase);
+    const packed = historical
+      .prepare('SELECT result FROM scope_receipts WHERE operation_id=?')
+      .get(firstCommand.operationId);
+    historical
+      .prepare('UPDATE scope_receipts SET result=? WHERE operation_id=?')
+      .run('gz1:' + gzipSync(packed.result).toString('base64'), firstCommand.operationId);
+    historical.close();
+    const next = scopes.prepareRestore(cmd([account('5'), authorScope], 3), device);
+    const folder = { table: 'members', key: '77:5', body: { collectionId: '77', workId: '5', rank: 4 } };
+    const restored = scopes.finishRestore(next.grantId, [member('5', 0), folder, authorMember], device);
+    assert.equal(restored.items[0].generation, 4);
     put('members', '__all__:8', member('8', 3).body, restored.dataRevision);
-    put('members', '77:5', { collectionId: '77', workId: '5', rank: 4 }, restored.dataRevision);
+    put('members', '99:5', { collectionId: '99', workId: '5', rank: 4 }, restored.dataRevision);
     const sources = [];
     for (const [directory, kind] of [
       [nas, 'nas'],
@@ -905,14 +924,176 @@ test('native NAS deletion tombstones yield only to a later proved restore of tha
         const owner = { grant: { proof: 'test' } };
         assert.deepEqual(listWorks(db, { source: 'total' }, owner).ids, ['5']);
         assert.deepEqual(listWorks(db, { source: 'author:' + author }, owner).ids, ['5']);
-        assert.deepEqual(listWorks(db, { source: 'folder:77' }, owner).ids, []);
+        assert.deepEqual(listWorks(db, { source: 'folder:77' }, owner).ids, ['5']);
+        assert.deepEqual(listWorks(db, { source: 'folder:99' }, owner).ids, []);
       });
     } finally {
       lib.close();
     }
     assert.ok(preview.conflicts.some((x) => x.key === '__all__:8' && x.reason.includes('删除')));
+    const pruned = new DatabaseSync(oldDatabase);
+    pruned.prepare('DELETE FROM scope_receipts WHERE operation_id=?').run(firstCommand.operationId);
+    pruned.close();
+    n.db.prepare('DELETE FROM scope_receipts WHERE operation_id=?').run(firstCommand.operationId);
+    const again = async (name) =>
+      previewImport({
+        ...args,
+        target: path.join(root, name),
+        sources: await Promise.all(sources.map((s) => sealSource(s)))
+      });
+    const noCommand = await again('compact-unproved');
+    assert.ok(
+      noCommand.conflicts.some((x) => x.type === 'members' && x.key === '77:5' && x.reason.includes('未核实'))
+    );
+    local.deviceScopes.db.exec(
+      'CREATE TABLE IF NOT EXISTS local_deletion_commands(local_id TEXT,library_id TEXT,operation_id TEXT,position INTEGER,body TEXT,receipt TEXT,PRIMARY KEY(local_id,library_id,operation_id,position))'
+    );
+    local.deviceScopes.db
+      .prepare('INSERT INTO local_deletion_commands VALUES(?,?,?,?,?,NULL)')
+      .run(local.localIdentity, libraryId, randomUUID(), 0, JSON.stringify(firstCommand));
+    const withCommand = await again('compact-proved');
+    assert.ok(
+      withCommand.conflicts.some(
+        (x) => x.type === 'scopeHistory' && x.key === '77:5' && x.reason.includes('已核实')
+      )
+    );
+    assert.ok(
+      !withCommand.conflicts.some(
+        (x) => x.type === 'members' && x.key === '77:5' && x.reason.includes('未核实')
+      )
+    );
   } finally {
     local.close();
     await n.close();
+  }
+});
+
+test('native cover-only failure retains archived video and projects safe diagnostic metadata', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-old-cover-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const win = path.join(root, 'windows');
+  fs.mkdirSync(win);
+  const media = path.join(win, 'archive'),
+    store = await Store.open(path.join(win, 'library.sqlite'), media);
+  const uid = '111',
+    target = path.join(root, 'detached'),
+    queue = new DownloadQueue(store, {}, undefined, () => {});
+  store.setSetting('account', { uid });
+  const video = fs.readFileSync(new URL('./fixtures/media-preview.mp4', import.meta.url));
+  const cover = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+    'base64'
+  );
+  const diagnostic = {
+    11: 'No matching frame',
+    12: 'Matcher failed at /private/real-library/frames',
+    13: 'Authorization: Basic concealed-value',
+    14: null
+  };
+  try {
+    for (const [id, message] of Object.entries(diagnostic)) {
+      const home = { kind: 'collection', id: '__all__', folder: '收藏', workFolder: '旧作品' + id };
+      const homeDir = path.join(media, home.folder, home.workFolder);
+      fs.mkdirSync(homeDir, { recursive: true });
+      const w = { ...work(id), coverUrls: ['https://example.com/cover.jpg'] };
+      store.put('works', id, w);
+      const assets = [];
+      for (const [key, file, bytes] of [
+        ['video', '原件.mp4', video],
+        ['cover', '单图.png', cover]
+      ]) {
+        fs.writeFileSync(path.join(homeDir, file), bytes);
+        assets.push({
+          key,
+          file,
+          size: bytes.length,
+          kind: key === 'video' ? 'video' : 'image',
+          sha256: hash(bytes)
+        });
+      }
+      store.put('downloads', id, {
+        id,
+        home,
+        path: homeDir,
+        collectionId: '__all__',
+        state: 'complete',
+        assets
+      });
+      queue.hdCovers = new HDCover({
+        store,
+        extract: async () => {
+          if (message) throw Error(message);
+          return { width: 1, height: 1 };
+        }
+      });
+      const save = queue.saveWork({ id, coverOnly: true }, new AbortController().signal);
+      if (message) await assert.rejects(save, /未取得/);
+      else await save;
+      assert.equal(store.download(id).state, 'complete');
+      const native = JSON.parse(fs.readFileSync(path.join(homeDir, '作品信息.json')));
+      if (message) assert.equal(native.hdCover.message, message);
+      else assert.equal(native.hdCover.status, 'ready');
+    }
+    const args = {
+      uid,
+      target,
+      imageDigest,
+      sources: [await sealSource({ directory: win, kind: 'windows', database: 'library.sqlite' })]
+    };
+    const pre = await previewImport(args);
+    const result = await importApproved({
+      ...args,
+      previewId: pre.previewId,
+      approval: { confirmed: true, uid, target, previewId: pre.previewId }
+    });
+    const lib = openLibrary({ root: target, expectedId: result.libraryId });
+    try {
+      lib.read((db) =>
+        assert.deepEqual(
+          listWorks(
+            db,
+            { source: 'all', filter: { downloaded: 'complete' } },
+            { grant: { proof: 'test' } }
+          ).ids.sort(),
+          ['11', '12', '13', '14']
+        )
+      );
+      const info = (id) =>
+        fs.readFileSync(path.join(result.mediaRoot, '收藏', '旧作品' + id, '作品信息.json'), 'utf8');
+      assert.equal(JSON.parse(info('11')).hdCover.message, 'No matching frame');
+      assert.equal(
+        info('11'),
+        fs.readFileSync(path.join(media, '收藏', '旧作品11', '作品信息.json'), 'utf8')
+      );
+      const sensitive = info('12');
+      assert.equal(JSON.parse(sensitive).hdCover.status, 'failed');
+      assert.ok(!sensitive.includes('/private/') && !info('13').includes('concealed-value'));
+      assert.deepEqual(JSON.parse(info('14')).hdCover, {
+        status: 'ready',
+        source: 'platform',
+        key: 'cover',
+        width: 1,
+        height: 1,
+        videoWidth: 1,
+        videoHeight: 1
+      });
+      assert.ok(!JSON.stringify(pre).includes('concealed-value'));
+      assert.ok(pre.conflicts.some((c) => c.reason.includes('hdCover.message') && c.reason.includes('隐去')));
+      const restored = await recovery.restoreApproved({
+        snapshot: result.snapshot,
+        mediaRoot: result.mediaRoot,
+        manifestSha256: result.manifestSha256,
+        libraryId: result.libraryId,
+        uid,
+        confirmed: true,
+        target: path.join(root, 'playable')
+      });
+      assert.equal(restored.verifiedPlayback, 8);
+      assert.ok(!fs.readFileSync(path.join(result.snapshot, 'library.sqlite')).includes('concealed-value'));
+    } finally {
+      lib.close();
+    }
+  } finally {
+    store.close();
   }
 });

@@ -425,11 +425,17 @@ export async function importApproved(input) {
             if (!st.isFile() || st.nlink !== 1) throw Error('暂存文件身份不符。');
             fs.unlinkSync(pending);
           }
-          await fs.promises.copyFile(
-            child(from.directory, asset.from.relative),
-            pending,
-            fs.constants.COPYFILE_EXCL
-          );
+          const original = child(from.directory, asset.from.relative);
+          if (asset.metadataJSON !== undefined) {
+            const verified = await fileProof(original);
+            if (verified.sha256 !== asset.from.sha256 || verified.size !== asset.from.size)
+              throw Error('旧作品信息 JSON 与批准的原始摘要不符。');
+            await fs.promises.writeFile(pending, asset.metadataJSON, {
+              flag: 'wx',
+              mode: 0o600,
+              flush: true
+            });
+          } else await fs.promises.copyFile(original, pending, fs.constants.COPYFILE_EXCL);
           if ((await fileProof(pending)).sha256 !== asset.sha256) throw Error('暂存传输校验失败。');
           guard();
           await moveExclusive(pending, out);

@@ -9,8 +9,9 @@ import {
   authorPublic
 } from '../shared/backup-protocol.mjs';
 import { readLegacyOrder } from './legacy-order.mjs';
-import { normalizeScope } from '../shared/backup-scopes.mjs';
-import { child, readCopy, segment } from './rehearsal-files.mjs';
+import { normalizeScope, validateScopeCommand } from '../shared/backup-scopes.mjs';
+import { memberScopeKey, pastMemberDeletes, earlierMemberDelete } from './legacy-deletion-evidence.mjs';
+import { child, readCopy, segment, digest } from './rehearsal-files.mjs';
 
 const pick = (value, fields) =>
   Object.fromEntries(
@@ -30,13 +31,26 @@ const allowedNested = new Set(
     ' '
   )
 );
+const withheldDiagnostic = '旧端诊断明细已隐去';
+function privateDiagnostic(text) {
+  return (
+    Buffer.byteLength(text, 'utf8') > 512 ||
+    /[\x00-\x08\x0b-\x1f\\/]/.test(text) ||
+    /(?:\b(?:bearer|basic)\s+[a-z0-9+._~=:-]+|\b(?:authorization|proxy-authorization|cookie|set-cookie|passw(?:or)?d|token|api[-_ ]?key|session[-_ ]?(?:id|key))\s*[:=]\s*\S|(?:令牌|口令|密码|凭据)\s*[:：=]\s*\S)/i.test(
+      text
+    )
+  );
+}
 function safe(value) {
   if (Array.isArray(value)) return value.map(safe);
   if (value && typeof value === 'object')
     return Object.fromEntries(
       Object.entries(value)
         .filter(([k]) => allowedNested.has(k))
-        .map(([k, v]) => [k, safe(v)])
+        .map(([k, v]) => [
+          k,
+          k === 'reason' && typeof v === 'string' && privateDiagnostic(v) ? withheldDiagnostic : safe(v)
+        ])
     );
   if (typeof value === 'string' && /^https?:/i.test(value)) {
     try {
@@ -66,15 +80,34 @@ const nestedMetadata = new Set([
     ' '
   )
 ]);
-function metadataIssue(source, proof, workId) {
-  if (proof.size > 8 * 1024 * 1024) return '作品信息 JSON 超过核验上限';
+function projectMetadata(source, proof, workId) {
+  if (proof.size > 8 * 1024 * 1024) return { why: '作品信息 JSON 超过核验上限' };
   let value;
+  const bytes = fs.readFileSync(child(source.directory, proof.relative));
+  if (bytes.length !== proof.size || digest(bytes) !== proof.sha256)
+    throw Error('旧作品信息 JSON 与封存摘要不符。');
   try {
-    value = JSON.parse(fs.readFileSync(child(source.directory, proof.relative), 'utf8'));
+    value = JSON.parse(bytes.toString('utf8'));
   } catch {
-    return '作品信息 JSON 无法解析';
+    return { why: '作品信息 JSON 无法解析' };
   }
-  if (value?.schemaVersion !== 1 || value.workId !== workId) return '作品信息 JSON 的格式版本或作品身份不符';
+  if (value?.schemaVersion !== 1 || value.workId !== workId)
+    return { why: '作品信息 JSON 的格式版本或作品身份不符' };
+  const redacted = [];
+  for (const [parent, leaf] of [
+    ['hdCover', 'message'],
+    ['sourceStatus', 'reason'],
+    ['sourceAttempt', 'reason']
+  ]) {
+    const object = value[parent];
+    if (!object || !Object.hasOwn(object, leaf)) continue;
+    if (typeof object[leaf] !== 'string')
+      return { why: '作品信息 JSON 诊断字段类型无效 ' + parent + '.' + leaf };
+    if (privateDiagnostic(object[leaf])) {
+      object[leaf] = withheldDiagnostic;
+      redacted.push(parent + '.' + leaf);
+    }
+  }
   function inspect(v, field, allowed) {
     if (Array.isArray(v)) {
       for (const item of v) {
@@ -85,7 +118,8 @@ function metadataIssue(source, proof, workId) {
       for (const [key, x] of Object.entries(v)) {
         const label =
           (field ? field + '.' : '') + (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) ? key : '[未知字段]');
-        if (!allowed.has(key)) return '作品信息 JSON 未支持字段 ' + label;
+        if (!allowed.has(key) && !(label === 'hdCover.message' && value.hdCover.status === 'failed'))
+          return '作品信息 JSON 未支持字段 ' + label;
         const why = inspect(x, label, nestedMetadata);
         if (why) return why;
       }
@@ -100,18 +134,18 @@ function metadataIssue(source, proof, workId) {
     return null;
   }
   const why = inspect(value, '', metadataFields);
-  if (why) return why;
+  if (why) return { why };
   if (value.assets !== undefined) {
-    if (!Array.isArray(value.assets)) return '作品信息 JSON 的 assets 清单无效';
+    if (!Array.isArray(value.assets)) return { why: '作品信息 JSON 的 assets 清单无效' };
     for (const row of value.assets) {
       try {
         segment(row.file);
       } catch {
-        return '作品信息 JSON 的 assets[].file 文件名不安全';
+        return { why: '作品信息 JSON 的 assets[].file 文件名不安全' };
       }
     }
   }
-  return null;
+  return redacted.length ? { redacted, body: JSON.stringify(value, null, 2) } : {};
 }
 
 export async function reconcile(sources, uid) {
@@ -125,7 +159,8 @@ export async function reconcile(sources, uid) {
     versions = new Map(),
     legacyFlags = [],
     membershipMarkers = [],
-    positiveMemberships = new Map();
+    positiveMemberships = new Map(),
+    localCommands = new Map();
   function issue(source, type, key, reason) {
     conflicts.push({ source, type, key: String(key), reason });
   }
@@ -494,6 +529,29 @@ export async function reconcile(sources, uid) {
         if (!binding) throw Error('设备删除范围与 Windows 库身份不符。');
         identities.at(-1).boundLibrary = binding.library_id;
         const params = [sourceId, binding.library_id];
+        if (
+          db
+            .prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_deletion_commands'")
+            .get()
+        ) {
+          for (const row of db
+            .prepare(
+              'SELECT operation_id,body FROM local_deletion_commands WHERE local_id=? AND library_id=?'
+            )
+            .iterate(...params)) {
+            try {
+              const c = validateScopeCommand(JSON.parse(row.body));
+              if (c.libraryId === binding.library_id) localCommands.set(contentHash(c), c);
+            } catch {
+              issue(
+                origin,
+                'deletionCommand',
+                row.operation_id,
+                '旧设备删除命令无法核实，未用作摘要回执的证明'
+              );
+            }
+          }
+        }
         for (const t of ['scope_versions', 'pending_deletions']) {
           for (const r of db
             .prepare('SELECT body FROM ' + t + ' WHERE local_id=? AND library_id=?')
@@ -581,22 +639,24 @@ export async function reconcile(sources, uid) {
           '已按同库较新的范围版本 ' + latest.revision + ' 判定'
         );
   }
+  const pastDeletes = await pastMemberDeletes({
+    sources,
+    identities,
+    markers: membershipMarkers,
+    versions,
+    restored,
+    localCommands,
+    issue
+  });
   for (const marker of membershipMarkers) {
     const { table, key, origin, lineage, recordRevision } = marker;
-    const split = key.lastIndexOf(':'),
-      source = key.slice(0, split),
-      workId = key.slice(split + 1);
-    const scopeId = JSON.stringify([
-      lineage,
-      workId,
-      table === 'members' ? 'account' : 'author',
-      table === 'members' ? '__all__' : source
-    ]);
+    const scopeId = memberScopeKey(marker);
     const observations = versions.get(scopeId) ?? [];
     const deletion =
       marker.historical &&
       Number.isSafeInteger(recordRevision) &&
-      observations.find((v) => v.origin === origin && v.deleted && v.dataRevision === recordRevision);
+      (observations.find((v) => v.origin === origin && v.deleted && v.dataRevision === recordRevision) ??
+        earlierMemberDelete(pastDeletes, marker));
     const replacement =
       deletion &&
       restored.has(scopeId) &&
@@ -816,12 +876,25 @@ export async function reconcile(sources, uid) {
       issue(origin, 'asset', key, '文件缺失、大小或哈希不匹配');
       continue;
     }
+    let projection;
     if (a.key === 'metadata') {
-      const why = metadataIssue(sources[proof.index], proof, id);
-      if (why) {
-        issue(origin, 'asset', key, why);
+      projection = projectMetadata(sources[proof.index], proof, id);
+      if (projection.why) {
+        issue(origin, 'asset', key, projection.why);
         continue;
       }
+      if (projection.redacted)
+        issue(
+          origin,
+          'metadataProjection',
+          key,
+          '已隐去 ' +
+            projection.redacted.join('、') +
+            '。原始 SHA-256 ' +
+            proof.sha256 +
+            '，移交 SHA-256 ' +
+            digest(projection.body)
+        );
     }
     hashes.add(proof.sha256);
     unlinked.delete(proof.index + '/' + proof.relative);
@@ -830,8 +903,9 @@ export async function reconcile(sources, uid) {
       work: id,
       kind: ['audio', 'video', 'metadata'].includes(a.key) ? a.key : 'image',
       relative,
-      size: proof.size,
-      sha256: proof.sha256,
+      size: projection?.redacted ? Buffer.byteLength(projection.body) : proof.size,
+      sha256: projection?.redacted ? digest(projection.body) : proof.sha256,
+      ...(projection?.redacted ? { metadataJSON: projection.body } : {}),
       ...(musicId ? { musicId } : {}),
       from: proof
     };
