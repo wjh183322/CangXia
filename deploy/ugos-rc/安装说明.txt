@@ -1,0 +1,12 @@
+藏匣服务版 0.4.1 公开候选 · 绿联 NAS 首次安装
+项目名  cangxia-server-041-rc
+项目目录  共享文件夹/docker/cangxia-server-041-rc
+Windows 连接地址  https://NAS_HOST:24448
+
+1. 在绿联「文件管理」进入「共享文件夹 → docker」，上传 ZIP，选择「解压到当前目录」。压缩包自带 cangxia-server-041-rc 顶层目录。进入该目录应直接看到 compose.yaml、prepare.mjs 和 chromium-seccomp.json。此目录应仅由可信管理员管理。若已存在同名项目或已存有业务数据，请保留原目录，先核对。
+2. 打开绿联「Docker → 项目 → 创建」。项目名称填 cangxia-server-041-rc；「配置文件保存路径」选择上面的解压目录。若默认路径正确，直接使用。若系统多套了一层目录，选择实际包含 compose.yaml 的那层。
+3. 在 Compose 配置处选已有 compose.yaml；若界面只提供文本编辑框，打开包内的 compose.yaml，复制全文粘贴。保持配置保存路径指向同一目录。环境变量和额外挂载留空，点「立即部署」。此前的试验项目可继续保留。
+4. 等 Docker 拉取镜像。进入「Docker → 容器」查看此项目。prepare 运行一次并以 0 退出属于正常；server 应持续运行，健康状态为 healthy。若界面未显示健康状态，进入 server 的日志查看 serving。prepare 失败优先看它的日志。常规停止、重启或重建请保留解压目录中的 install、config、library、approved 和 rehearsal。
+5. 在 Windows 打开同一候选版本的藏匣服务版。用 NAS 管理员账号在项目的 config/identity/ 打开 windows-1.json，将 url、deviceId、fingerprint、token 填入客户端。第二台取 windows-2.json。连接凭据只在自己的设备上使用。浏览器直接访问服务地址可能显示 401；日常操作使用 Windows 客户端。
+
+首次部署会生成 library（资料和媒体）、config（证书与设备凭据）、rehearsal（彩排输出）、approved（管理员输入）。程序以非 root 身份运行，approved 对服务只读。初始化如发现任一目标目录非空，将停止并保留原文件；不要清空目录强行重试。

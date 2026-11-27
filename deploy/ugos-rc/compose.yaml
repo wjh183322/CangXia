@@ -1,0 +1,51 @@
+name: cangxia-server-041-rc
+x-image: &image ghcr.io/wjh183322/cangxia-server@sha256:aedc12ea59861c7d36b10686719cff2c0fe05df8ca5b595814469bd43642e4a4
+
+services:
+  prepare:
+    image: *image
+    platform: linux/amd64
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    read_only: true
+    healthcheck:
+      disable: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    entrypoint: ["node", "/opt/setup.mjs"]
+    volumes:
+      - ./prepare.mjs:/opt/setup.mjs:ro
+      - ./install:/install
+      - ./library:/library
+      - ./config:/config
+      - ./rehearsal:/rehearsal
+      - ./approved:/approved
+  server:
+    image: *image
+    platform: linux/amd64
+    depends_on:
+      prepare:
+        condition: service_completed_successfully
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./chromium-seccomp.json
+    shm_size: 512m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    ports:
+      - "24448:9443"
+    environment:
+      CANGXIA_URL: "https://NAS_HOST:24448"
+      CANGXIA_REHEARSAL_ROOT: /rehearsal
+    volumes:
+      - ./library:/library
+      - ./config:/config
+      - ./rehearsal:/rehearsal
+      - ./approved:/approved:ro
