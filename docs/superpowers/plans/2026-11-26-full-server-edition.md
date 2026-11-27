@@ -10,6 +10,9 @@
 
 **Spec:** [已确认的完整版设计](../specs/2026-11-26-full-server-edition-design.md)
 
+
+开发实绩：任务 01–04 已通过逐项独立审查。Windows 安装并存与连接门验证见[运行 45920990422](https://github.com/wjh183322/CangXia/actions/runs/45920990422)，SQLite 与会话验证见[运行 45920990514](https://github.com/wjh183322/CangXia/actions/runs/45920990514)，来源导航及解析回归见[运行 45924550123](https://github.com/wjh183322/CangXia/actions/runs/45924550123)。正式来源链路目前使用隔离的 Chromium、Electron 和合成响应验证；真实账号和实机适配仍属发布验收。
+
 ## Global Constraints
 
 - 在 `codex/server-edition-full` 开发，业务和界面对照提交 `08e6436522a3828211e9c32b51f90d7d830b4fa8`。保留 main、备份版、既有 NAS 版、试验分支及试验镜像。
@@ -40,7 +43,7 @@
 
 **文件与接口**　package.json、package-lock.json、electron/main.mjs、electron/preload.cjs；新增 shared/server-identity.mjs、docs/server-edition/compatibility.md。测试文件 `tests/server-edition/product-identity.test.mjs`。从 0.3.46 的 preload、页面及动态注册的主进程处理器生成逐入口清单；输出 serverIdentity（productName、version、appId、protocolVersion）及独立 userData 根。
 
-- [ ] 在测试文件加入 `product-identity` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `product-identity` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(info.version,'0.4.1');
@@ -48,16 +51,16 @@ assert.notEqual(serverProfile,backupProfile);
 assert.deepEqual(unmappedBaselineEntries,[]);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/product-identity.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。每个入口写明原动作、正式版 Windows 或 NAS 的落点、已批准变化、验收用例；含事件、批选、取消、旧同步入口和平台原生操作。冻结旧版对照环境与截图；以新 appId、安装名、快捷方式和目录启动，验证旧版与新版可并存。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: product-identity`）。
+- [x] 运行 `node --test tests/server-edition/product-identity.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。每个入口写明原动作、正式版 Windows 或 NAS 的落点、已批准变化、验收用例；含事件、批选、取消、旧同步入口和平台原生操作。冻结旧版对照环境与截图；以新 appId、安装名、快捷方式和目录启动，验证旧版与新版可并存。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: product-identity`）。
 
 ### 02．首次建库、已有库与安全更新
 
 **文件与接口**　新增 server/package.json、server/package-lock.json、server/start.mjs、server/library.mjs、server/upgrade.mjs；参考 feasibility/nas-b/src/config.mjs、store.mjs。测试文件 `tests/server-edition/library-upgrade.test.mjs`。openLibrary({root,expectedId,mode})；inspectUpgrade(root) → {state,from,to,spaceRequired}；applyUpgrade({approval,expectedId,from,to}) → receipt。
 
-- [ ] 在测试文件加入 `library-upgrade` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `library-upgrade` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(unapproved.state,'migration-required');
@@ -65,16 +68,16 @@ assert.deepEqual(afterHash,beforeHash);
 assert.equal(failedSnapshot.schemaVersion,oldVersion);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/library-upgrade.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。正式 schema 加专用应用标识、库 UUID 和版本。空目录须显式初始化，拒绝误挂旧库、试验卷、缺失 WAL 或陌生文件；同版本更新只做兼容性检查。需迁移时阻止作业写入，绑定确认到库及目标版本，使用 SQLite 一致性快照，独立打开并核对完整性、关键计数及清单后执行事务。快照失败保留原状；迁移若动媒体则需另有可校验文件副本。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: library-upgrade`）。
+- [x] 运行 `node --test tests/server-edition/library-upgrade.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。正式 schema 加专用应用标识、库 UUID 和版本。空目录须显式初始化，拒绝误挂旧库、试验卷、缺失 WAL 或陌生文件；同版本更新只做兼容性检查。需迁移时阻止作业写入，绑定确认到库及目标版本，使用 SQLite 一致性快照，独立打开并核对完整性、关键计数及清单后执行事务。快照失败保留原状；迁移若动媒体则需另有可校验文件副本。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: library-upgrade`）。
 
 ### 03．HTTPS、独占、操作回执与失联锁屏
 
 **文件与接口**　新增 server/http.mjs、server/session.mjs、electron/server-client.mjs；修改 electron/main.mjs、src/session-ui.jsx；复用 feasibility/nas-b/src/lease.mjs 的互斥规则。测试文件 `tests/server-edition/session.test.mjs`。connect({url,fingerprint,deviceId})；acquire()/renew()/release()；command({operationId,kind,payload,entityVersion}) 与 receipt(operationId)。服务端校验库、账号、持有者及代际。
 
-- [ ] 在测试文件加入 `session` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `session` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(winners.length,1);
@@ -83,16 +86,16 @@ assert.equal(replayed.jobId,original.jobId);
 assert.equal(staleResponseVisible,false);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/session.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。以原型已验证的 20 秒 NAS 端租期为起点。证书钉扎、Windows 系统凭据存储、非持有者最小占用状态。失去租期或唤醒先锁内容并停止媒体请求，旧异步响应不可解锁。丢确认先查回执，同 ID 不同命令拒绝；收集旧同步入口在退出/交接下的对应行为。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: session`）。
+- [x] 运行 `node --test tests/server-edition/session.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。以原型已验证的 20 秒 NAS 端租期为起点。证书钉扎、Windows 系统凭据存储、非持有者最小占用状态。失去租期或唤醒先锁内容并停止媒体请求，旧异步响应不可解锁。丢确认先查回执，同 ID 不同命令拒绝；收集旧同步入口在退出/交接下的对应行为。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: session`）。
 
 ### 04．NAS 登录、来源适配与账号身份
 
 **文件与接口**　新增 server/source-browser.mjs；修改 electron/main.mjs、src/inline-login.jsx；对照 feasibility/nas-b/src/browser.mjs、page-parser.mjs 和 electron/account-identity.mjs。测试文件 `tests/server-edition/source-browser.test.mjs`。openLogin(session)、verifyAccount(session) → {uid,nickname}、readSourcePage({source,cursor,authEpoch,signal})；外部仅暴露受控的登录与作业动作。
 
-- [ ] 在测试文件加入 `source-browser` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `source-browser` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(afterRestart.uid,first.uid);
@@ -101,10 +104,10 @@ assert.equal(lateQr.clicks,1);
 assert.equal(reportContainsSecrets,false);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/source-browser.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。移植并回归 4.0.8 组件、慢二维码、失效及人工处理提示；仅当前持有者可查看。账号资料保存在 NAS。对照列表/详情字段、19 位 ID 和游标、共同作者与角色、配乐、音频提示和来源状态。复查试验目录的未提交解析器修复，同输入证明有必要后移植。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: source-browser`）。
+- [x] 运行 `node --test tests/server-edition/source-browser.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。移植并回归 4.0.8 组件、慢二维码、失效及人工处理提示；仅当前持有者可查看。账号资料保存在 NAS。对照列表/详情字段、19 位 ID 和游标、共同作者与角色、配乐、音频提示和来源状态。复查试验目录的未提交解析器修复，同输入证明有必要后移植。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: source-browser`）。
 
 ### 05．来源页事务与独立归属顺序
 
