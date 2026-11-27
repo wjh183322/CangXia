@@ -65,16 +65,17 @@ fi
 if [[ "$action" == candidate ]]; then
   archive="dir:$root/image"
   check "$archive"
-  # A new package has no visibility to inspect. Seed only an empty scratch image,
-  # never candidate bytes, then require the requested visibility from the API.
+  # Seed a new package with one empty marker file. Docker cannot export a
+  # zero-layer scratch image to skopeo. No product files enter this build context.
   code=$(curl -sS -o "$RUNNER_TEMP/package.json" -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/$pkg")
   if [[ "$code" == 404 ]]; then
     mkdir "$RUNNER_TEMP/visibility-bootstrap"
-    printf 'FROM scratch\nLABEL purpose="package-visibility-verification"\n' > "$RUNNER_TEMP/visibility-bootstrap/Dockerfile"
+    touch "$RUNNER_TEMP/visibility-bootstrap/marker"
+    printf 'FROM scratch\nCOPY marker /marker\nLABEL purpose="package-visibility-verification" org.opencontainers.image.source="https://github.com/wjh183322/CangXia"\n' > "$RUNNER_TEMP/visibility-bootstrap/Dockerfile"
     docker build -t cangxia-empty:visibility "$RUNNER_TEMP/visibility-bootstrap"
     skopeo copy docker-daemon:cangxia-empty:visibility "docker://$registry:visibility-bootstrap-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
   else [[ "$code" == 200 ]]; fi
-  check_visibility
+  check_visibility || { echo "Cannot verify $registry has the approved visibility ($visibility). Check the package settings before retrying." >&2; exit 1; }
   tags=$(skopeo list-tags "docker://$registry")
   if jq -e --arg t "$tag" '(.Tags // [])|index($t)!=null' <<< "$tags" >/dev/null; then
     check "docker://$registry:$tag"
