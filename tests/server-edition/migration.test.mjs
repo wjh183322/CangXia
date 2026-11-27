@@ -48,13 +48,14 @@ test('native matched-frame migration reproduces the selected pixels from the act
   {skip:!process.env.CANGXIA_TEST_COVER_PYTHON&&'requires pinned OpenCV runtime'}, async t=>{
     const temp=fs.mkdtempSync(path.join(os.tmpdir(),'cx-native-frames-'));
     t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
-    const golden=path.join(temp,'golden'),win=path.join(temp,'windows');
-    fs.mkdirSync(golden);fs.mkdirSync(win);
+    const golden=path.join(temp,'golden'),inputs=path.join(temp,'inputs'),out=path.join(temp,'outputs'),
+      win=path.join(inputs,'sources','desktop'),live=path.join(temp,'live'),scratch=path.join(temp,'matcher-temporary');
+    for(const dir of [golden,win,live,scratch,path.join(inputs,'manifests'),path.join(inputs,'restores'),path.join(out,'targets'),path.join(out,'reports')])fs.mkdirSync(dir,{recursive:true});
     execFileSync(process.env.CANGXIA_TEST_COVER_PYTHON,['-I',fileURLToPath(new URL('./fixtures/archive-cover.py',import.meta.url)),golden],{windowsHide:true});
     const {frame,seconds,correlation,crop,width,height,videoWidth,videoHeight}=JSON.parse(fs.readFileSync(path.join(golden,'golden.json')));
     const match={frame,seconds,correlation,crop,videoWidth,videoHeight};
     const store=await Store.open(path.join(win,'library.sqlite'),path.join(win,'archive'));
-    const target=path.join(temp,'imported'),uid='42';
+    const target=path.join(out,'targets','imported'),uid='42';
     try{
       const queue=new DownloadQueue(store,{},undefined,()=>{}),publisher=new HDCover({store});
       store.setSetting('account',{uid});
@@ -75,6 +76,34 @@ test('native matched-frame migration reproduces the selected pixels from the act
       const args={uid,target,imageDigest,sources:[await sealSource({kind:'windows',directory:win,database:'library.sqlite'})]};
       const pre=await previewImport(args);
       assert.ok(pre.conflicts.some(c=>c.type==='hdCover'&&c.key==='72'));
+      const {directory:original,...sealed}=args.sources[0],encoded=JSON.stringify(sealed);
+      fs.writeFileSync(path.join(inputs,'manifests','desktop.json'),encoded);
+      const online=openLibrary({root:live,mode:'init'}),sessions=createSessionService({library:online}),
+        service=createRehearsals({root:out,inputsRoot:inputs,liveRoot:live,configuration:{uid,imageDigest,accountId:'owner',sources:{desktop:hash(encoded)}}});
+      try{
+        const who={accountId:'owner',deviceId:'win'},grant=sessions.acquire(who,{...who,instanceId:randomUUID(),operationId:randomUUID()});
+        const call=input=>service.handle(sessions.sourceSession(who,grant),'owner',input);
+        const vars=['TMP','TEMP','TMPDIR'],before=vars.map(k=>process.env[k]);
+        let id;
+        try{
+          for(const key of vars)process.env[key]=scratch;
+          ({id}=call({action:'import',sources:['desktop'],uid,target:'imported',previewId:pre.previewId,confirmed:true}));
+        }finally{vars.forEach((k,i)=>{if(before[i]===undefined)delete process.env[k];else process.env[k]=before[i];});}
+        let cancelled=false,status;const helpers=new Set();
+        for(let i=0;i<2000;i++){
+          for(const entry of fs.readdirSync(scratch).filter(n=>n.startsWith('cangxia-hd-'))){
+            helpers.add(entry);
+            if(!cancelled&&fs.existsSync(path.join(scratch,entry,'match.json'))){call({action:'cancel',id});cancelled=true;}
+          }
+          status=call({action:'status',id});
+          if(status.state!=='running')break;
+          await wait(10);
+        }
+        assert.ok(cancelled,'cancel during the first native match');
+        assert.equal(status.state,'failed');assert.match(status.message,/取消|控制权/);
+        assert.equal(helpers.size,1,'no helper for a later native claim after cancellation');
+        assert.deepEqual(fs.readdirSync(path.join(out,'targets')),[]);
+      }finally{service.close();await sessions.close();online.close();}
       const imported=await importApproved({...args,previewId:pre.previewId,approval:{uid,target,previewId:pre.previewId,confirmed:true}});
       const lib=openLibrary({root:target,expectedId:imported.libraryId});
       try{

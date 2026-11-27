@@ -161,7 +161,8 @@ function projectMetadata(source, proof, workId) {
   return redacted.length ? { redacted, body: JSON.stringify(value, null, 2) } : {};
 }
 
-export async function reconcile(sources, uid) {
+export async function reconcile(sources, uid,{guard=()=>{},signal=new AbortController().signal}={}) {
+  const check=()=>{signal.throwIfAborted();guard();};
   const groups = new Map(),
     hdClaims = new Map(),
     denied = new Map(),
@@ -210,6 +211,7 @@ export async function reconcile(sources, uid) {
     versions.set(key, list);
   }
   for (const [index, source] of sources.entries()) {
+    check();
     const origin = source.kind + '#' + (index + 1),
       historical = source.kind === 'recovery';
     const files = new Map(source.files.map((f) => [f.relative, f]));
@@ -849,6 +851,7 @@ export async function reconcile(sources, uid) {
     historical,
     files
   } of fileClaims) {
+    check();
     const key = id + '/' + a.key,
       h = output.get(ident('home', id))?.value;
     const reason = denied.get(ident('files', id)) || denied.get(ident('downloads', id));
@@ -959,15 +962,18 @@ export async function reconcile(sources, uid) {
     group.set(a.key,a);byWork.set(a.work,group);
   }
   for(const [id,claims] of hdClaims){
+    check();
     const group=byWork.get(id);
     if(!group)continue;
     try{
-      const attested=await verifiedLegacyCover(group,claims,sources);
+      const attested=await verifiedLegacyCover(group,claims,sources,signal,check);
+      check();
       const asset=group.get(attested.nativeKey);
       asset.key=attested.nativeKey==='cover'?'cover':'cover-hd';
       asset.hdCover={accepted:true,status:'ready',key:asset.key,source:attested.source,width:attested.width,height:attested.height,
         videoWidth:attested.videoWidth,videoHeight:attested.videoHeight,sha256:asset.sha256};
     }catch{
+      check();
       issue('合并','hdCover',id,'旧端高清选择与同次归档的原视频、参考图、输出字节或作品信息不一致，保留原件供核对');
     }
   }
@@ -996,7 +1002,7 @@ export async function reconcile(sources, uid) {
   return { rows: [...output.values()], assets, conflicts, identities };
 }
 
-async function verifiedLegacyCover(assets,claims,sources){
+async function verifiedLegacyCover(assets,claims,sources,signal,guard){
   const check=value=>{if(!value)throw Error('unmatched native cover');};
   const pathOf=a=>child(sources[a.from.index].directory,a.from.relative);
   const video=assets.get('video'),reference=assets.get('cover'),meta=assets.get('metadata');
@@ -1004,7 +1010,6 @@ async function verifiedLegacyCover(assets,claims,sources){
   const json=JSON.parse(meta.metadataJSON??fs.readFileSync(pathOf(meta),'utf8'));
   const hd=claims[0].hd,chosen=assets.get(hd.key);
   check(chosen && (hd.key==='cover'||chosen.legacyCoverKey===hd.key));
-  const signal=new AbortController().signal;
   const mime={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.avif':'image/avif','.webp':'image/webp'};
   const verify=(a,type,options)=>verifyFormat({file:pathOf(a),size:a.size},type,signal,options);
   const resolution=await verify(video,'video/mp4',{measureVideo:true});
@@ -1026,7 +1031,7 @@ async function verifiedLegacyCover(assets,claims,sources){
   if(hd.source==='video_frame'){
     check(reference && hd.match?.videoWidth===resolution.width && hd.match.videoHeight===resolution.height);
     const descriptor=a=>({file:pathOf(a),size:a.size,sha256:a.sha256});
-    const reproduced=await assessSealedCover({video:descriptor(video),cover:descriptor(reference),signal,
+    const reproduced=await assessSealedCover({video:descriptor(video),cover:descriptor(reference),signal,guard,
       python:process.env.CANGXIA_TEST_COVER_PYTHON||undefined,publish:bytes=>({sha256:digest(bytes)})});
     check(reproduced.accepted && reproduced.source==='video_frame' && reproduced.sha256===chosen.sha256 &&
       reproduced.frame===hd.match.frame && contentHash(reproduced.crop)===contentHash(hd.match.crop));

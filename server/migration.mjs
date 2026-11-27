@@ -11,7 +11,7 @@ import { contentHash, validId } from '../shared/backup-protocol.mjs';
 import {freeze,legacyObservation} from './download-resources.mjs';
 export { sealSource } from './rehearsal-files.mjs';
 
-async function prepare({ sources, target, uid, imageDigest, guard = () => {} }) {
+async function prepare({ sources, target, uid, imageDigest, guard = () => {},signal=new AbortController().signal }) {
   if (
     !Array.isArray(sources) ||
     !sources.length ||
@@ -30,7 +30,8 @@ async function prepare({ sources, target, uid, imageDigest, guard = () => {} }) 
     checked.push(await validateSeal(s));
   }
   if (checked.every((s) => s.kind === 'recovery')) throw Error('需要当前活动来源以核对历史恢复候选。');
-  const plan = await reconcile(checked, uid);
+  const plan = await reconcile(checked, uid,{guard,signal});
+  signal.throwIfAborted();
   guard();
   const counts = {};
   for (const r of plan.rows) counts[r.type] = (counts[r.type] ?? 0) + 1;
@@ -366,7 +367,8 @@ export async function verifyImportedTarget(target, previewId, guard = () => {}) 
   }
 }
 export async function importApproved(input) {
-  const { target, approval, uid, imageDigest, previewId, guard = () => {} } = input;
+  const { target, approval, uid, imageDigest, previewId } = input;
+  const guard=()=>{input.signal?.throwIfAborted();input.guard?.();};
   if (
     approval?.confirmed !== true ||
     approval.uid !== uid ||

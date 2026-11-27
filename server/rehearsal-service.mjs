@@ -76,7 +76,7 @@ function filesFor(root, config, names) {
     return { ...JSON.parse(bytes), directory: directory(child(root, 'sources/' + n)) };
   });
 }
-async function run({ root, inputsRoot, liveRoot, input, config }, guard) {
+async function run({ root, inputsRoot, liveRoot, input, config }, guard, signal) {
   const action = input.action;
   if (['verify', 'restore'].includes(action)) {
     const restore = nameOf(input.restore),
@@ -148,7 +148,7 @@ async function run({ root, inputsRoot, liveRoot, input, config }, guard) {
     });
   }
   const sources = filesFor(inputsRoot, config, input.sources),
-    args = { sources, target, uid: config.uid, imageDigest: config.imageDigest, guard };
+    args = { sources, target, uid: config.uid, imageDigest: config.imageDigest, guard, signal };
   for (const s of sources) disjoint(liveRoot, s.directory);
   if (action === 'preview') return previewImport(args);
   if (action === 'import')
@@ -210,8 +210,13 @@ function saveResult(dir, result, checkDir) {
 }
 if (!isMainThread && workerData?.rehearsalWorker) {
   const { flag, dir } = workerData;
+  const cancellation=new AbortController(),shared=new Int32Array(flag);
+  const cancel=()=>cancellation.abort(Error('彩排已取消或控制权已失效。'));
+  const onMessage=message=>{if(message==='cancel')cancel();};
+  parentPort.on('message',onMessage);
   const guard = () => {
-    if (Atomics.load(new Int32Array(flag), 0)) throw Error('彩排已取消或控制权已失效。');
+    if (Atomics.load(shared,0))cancel();
+    cancellation.signal.throwIfAborted();
   };
   const checkDir = () => {
     directory(dir);
@@ -225,7 +230,7 @@ if (!isMainThread && workerData?.rehearsalWorker) {
   };
   try {
     validateOutput();
-    const result = await run(workerData, guard);
+    const result = await run(workerData, guard,cancellation.signal);
     guard();
     validateOutput();
     saveResult(dir, result, checkDir);
@@ -233,6 +238,8 @@ if (!isMainThread && workerData?.rehearsalWorker) {
   } catch (e) {
     validateOutput();
     finishReport(dir, 'error.json', { message: e.message });
+  } finally {
+    parentPort.off('message',onMessage);
   }
 }
 export function createRehearsals({ root, liveRoot, inputsRoot=root, configuration }) {
@@ -307,11 +314,13 @@ export function createRehearsals({ root, liveRoot, inputsRoot=root, configuratio
         target: input.target ?? null,
         started: new Date().toISOString()
       });
-      const flag = new SharedArrayBuffer(4),
-        abort = () => Atomics.store(new Int32Array(flag), 0, 1);
+      const flag = new SharedArrayBuffer(4);
       const worker = new Worker(fileURLToPath(import.meta.url), {
         workerData: { rehearsalWorker: true, root, inputsRoot, liveRoot, input, config, flag, dir, reportIdentity }
       });
+      const abort=()=>{
+        if(Atomics.exchange(new Int32Array(flag),0,1)===0)worker.postMessage('cancel');
+      };
       const check = setInterval(() => {
         try {
           owner(config, session, accountId);
