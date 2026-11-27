@@ -32,11 +32,8 @@ jobs:
         run: ./scripts/smoke-server-install.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: server-windows-${{ github.sha }}
-          path: |
-            release/server/*.exe
-            release/server/*.zip
-            release/server/candidate.json
+          name: server-windows-record-${{ github.sha }}
+          path: release/server/candidate.json
           if-no-files-found: error
           retention-days: 7
   linux:
@@ -86,8 +83,8 @@ jobs:
           sha256sum image.tar compose.yaml chromium-seccomp.json > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: server-linux-${{ github.sha }}
-          path: release/server-linux/
+          name: server-linux-record-${{ github.sha }}
+          path: release/server-linux/candidate.json
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
