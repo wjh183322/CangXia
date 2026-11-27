@@ -14,5 +14,8 @@ if (executables.length!==2) throw Error('Both Windows x64 executables are requir
 writeFileSync('release/server/candidate.json',JSON.stringify({...info,files:Object.fromEntries(executables.map(p=>
   [path.basename(p),createHash('sha256').update(readFileSync(p)).digest('hex')]))},null,2)+'\n');
 
-execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
-  "Compress-Archive -Force -LiteralPath 'server/compose.yaml','feasibility/nas-b/chromium-seccomp.json','feasibility/nas-b/chromium-seccomp.LICENSE','docs/server-edition/release-acceptance.md','docs/server-edition/migration-rehearsal.md' -DestinationPath 'release/server/CangXia-Server-0.4.1-NAS.zip'"],{windowsHide:true});
+const kit = 'release/server/CangXia-Server-0.4.1-NAS.zip';
+execFileSync('tar.exe',['-a','-cf',kit,
+  '-C',path.resolve('server'),'compose.yaml',
+  '-C',path.resolve('feasibility/nas-b'),'chromium-seccomp.json','chromium-seccomp.LICENSE',
+  '-C',path.resolve('docs/server-edition'),'release-acceptance.md','migration-rehearsal.md'],{windowsHide:true});

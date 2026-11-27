@@ -50,8 +50,17 @@ app.whenReady().then(async () => {
       )
     );
     const js = (win, script) => win.webContents.executeJavaScript(script);
+    async function capture(win,name) {
+      if(process.env.CANGXIA_RELEASE_SCREENS!=='1')return;
+      const dest=path.resolve('.evidence/14-formal-ui');
+      fs.mkdirSync(dest,{recursive:true});
+      win.setContentSize(1100,740);win.webContents.setZoomFactor(1);
+      await delay(160);
+      fs.writeFileSync(path.join(dest,name+'.png'),(await win.webContents.capturePage()).toPNG());
+    }
     assert.equal(await js(gate, 'window.cangxia.windowRole'), 'connection');
-    assert.ok(await js(gate, 'document.body.innerText.includes("连接 NAS 资料库")'));
+        await capture(gate,'connection');
+assert.ok(await js(gate, 'document.body.innerText.includes("连接 NAS 资料库")'));
     await assert.rejects(js(gate, 'window.cangxia.state()'), /无使用权/);
     // Deliver the native wake notification exactly after pinned status succeeds
     // and before the same user's click can request a lease.
@@ -90,9 +99,11 @@ app.whenReady().then(async () => {
     const audit=auditEntrypoints(channels,exposed);
     assert.equal(audit.rows,142);assert.equal(audit.migration,8);
     await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
+    await capture(win,'library');
     const buttonText=label=>waitFor(()=>js(win,`(()=>{const button=[...document.querySelectorAll('button')].find(b=>!b.disabled&&b.textContent.trim()===${JSON.stringify(label)});if(!button)return false;button.click();return true;})()`));
     await buttonText('检查与补齐');
     await waitFor(()=>js(win,"document.querySelector('[data-maintenance-history]')"));
+    await capture(win,'maintenance');
     await buttonText('检查全部文件');
     await waitFor(()=>js(win,"document.querySelector('[data-check-state]')?.dataset.checkState==='complete'"));
     assert.ok(await js(win,"document.querySelector('[role=dialog]').textContent.includes('登记')"));
@@ -109,6 +120,7 @@ app.whenReady().then(async () => {
     const clickText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.includes(${JSON.stringify(label)})).click()`);
     await clickText('全部结果全选');
     await waitFor(()=>js(win,"document.querySelector('.selection-dock')?.textContent.includes('42')"));
+    await capture(win,'selection');
     await js(win,"document.querySelector('[aria-label=顶部下一页]').click()");
     await waitFor(()=>js(win,"!!document.querySelector('[data-work-id=\"9007199254740993143\"]')"));
     await js(win,"document.querySelector('[data-work-id=\"9007199254740993143\"] .card-checkbox').click()");
@@ -170,6 +182,7 @@ app.whenReady().then(async () => {
     await waitFor(()=>js(win,"document.body.innerText.includes('回执保存作品')"));
     await clickText('确认移除作品记录');
     await waitFor(()=>js(win,"document.body.innerText.includes('删除与恢复记录') && document.body.innerText.includes('预览恢复')"));
+    await capture(win,'removal');
     await clickText('预览恢复');
     await waitFor(()=>js(win,"document.body.innerText.includes('确认恢复作品记录')"));
     await clickText('确认恢复作品记录');
@@ -182,6 +195,7 @@ app.whenReady().then(async () => {
     await waitFor(() => js(win, 'document.body.innerText.includes("查询 NAS 回执")'));
     assert.equal(await js(win,"typeof window.cangxia.importLoginConfig"),'undefined');
     assert.ok(await js(win,"document.querySelector('[role=dialog]').textContent.includes('在 NAS 官方登录并核验账号')"));
+    await capture(win,'settings');
     await buttonText('刷新存储占用');
     await waitFor(()=>js(win,"document.querySelector('[role=dialog]').textContent.includes('NAS 统计已完成')"));
     await js(
