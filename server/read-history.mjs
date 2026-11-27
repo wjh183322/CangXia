@@ -33,7 +33,11 @@ export function stepSummary(db, step, started) {
     .prepare('SELECT count(*) n FROM source_page_operations WHERE job_id=? AND result IS NOT NULL')
     .get(step.id).n;
   const scope =
-    step.source_id === 'total' ? '__all__' : step.source_id.slice(step.source_id.indexOf(':') + 1);
+    step.source_id === 'total'
+      ? '__all__'
+      : step.source_id.startsWith('author:')
+        ? step.source_id
+        : step.source_id.slice(step.source_id.indexOf(':') + 1);
   return {
     token: step.id,
     scope,
@@ -65,10 +69,10 @@ export function stepSummary(db, step, started) {
     filled: fill,
     initialAdded: added - front - fill,
     hasPrevious: counts.old > 0,
-    notReturned: step.outcome === 'end' ? counts.missing : null,
+    notReturned: ['end', 'end-warning'].includes(step.outcome) ? counts.missing : null,
     baselineKnown: !!step.baseline_known,
-    historyCount: db.prepare('SELECT count(*) n FROM source_members WHERE source_id=?').get(step.source_id).n,
-    warning: step.status === 'review',
+    historyCount: step.history_count,
+    warning: step.status === 'review' || step.outcome === 'end-warning',
     canResume: latest?.id === step.id && ['paused', 'failed', 'finalizing', 'review'].includes(step.status)
   };
 }
@@ -87,6 +91,7 @@ export function jobSummary(db, id, { steps = true } = {}) {
   const count = (s) => rows.filter((r) => s.includes(r.status)).length;
   return {
     jobId: id,
+    selectedStep: job.selected_step,
     token: id,
     name: rows[0].source_id === 'total' ? '总收藏与自建收藏夹' : '自建收藏夹',
     startedAt: job.started,

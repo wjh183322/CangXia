@@ -63,7 +63,22 @@ app.whenReady().then(async () => {
           `(()=>{const b=[...document.querySelectorAll('button')].find(x=>!x.disabled&&(x.textContent.trim()===${JSON.stringify(label)}||x.getAttribute('aria-label')===${JSON.stringify(label)}));if(!b)return false;b.click();return true;})()`
         )
       );
+    const scenario = (name) => fs.writeFileSync(path.join(root, 'scenario'), name);
+    const hits = (name, route) =>
+      fs
+        .readFileSync(path.join(root, 'requests'), 'utf8')
+        .split('\n')
+        .filter((line) => line.startsWith(name + ' ') && line.includes(route));
     await click('添加收藏夹');
+    scenario('stop-folders');
+    await click('读取账号里的收藏夹');
+    await waitFor(
+      () => fs.existsSync(path.join(root, 'requests')) && hits('stop-folders', 'collects/list/').length === 1
+    );
+    await click('停止读取');
+    await waitFor(() => js(win, "!document.querySelector('.read-progress')"));
+    assert.equal(await js(win, "window.cangxia.state().then(s=>s.collections.some(c=>c.id==='55'))"), false);
+    scenario('normal');
     await click('读取账号里的收藏夹');
     await waitFor(() =>
       js(
@@ -124,12 +139,93 @@ app.whenReady().then(async () => {
       js(win, "[...document.querySelectorAll('button')].some(b=>b.textContent.includes('打开抖音原作品'))")
     );
     await click('关闭弹窗');
+    for (const wasLinked of [true, false]) {
+      scenario('fail-total');
+      await js(win, `window.cangxia.sync({collectionId:'__all__',mode:'full',syncCollections:${wasLinked}})`);
+      scenario('restart-' + wasLinked);
+      await click('同步收藏');
+      if (!wasLinked) await js(win, "document.querySelector('[aria-label=同步自建收藏夹]').click()");
+      await js(win, "document.querySelector('.collection-read-full').open=true");
+      await click('从头完整核对');
+      await click('确认从头读取');
+      if (wasLinked) {
+        await waitFor(() => js(win, "!!document.querySelector('.read-result')"));
+        await click('完成');
+      } else {
+        await waitFor(() => js(win, "!!document.querySelector('.collection-batch-results')"));
+        await click('关闭');
+      }
+      assert.equal(hits('restart-' + wasLinked, 'collects/video/list/').length, wasLinked ? 0 : 1);
+    }
+    scenario('two-folders');
+    await click('添加收藏夹');
+    await click('读取账号里的收藏夹');
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const l=[...document.querySelectorAll('label')].find(l=>l.textContent.includes('第二夹'));if(!l)return false;l.querySelector('input').click();return true;})()"
+      )
+    );
+    await click('添加 1 个收藏夹');
+    scenario('bad-folders');
+    await js(win, "window.cangxia.sync({allAdded:true,mode:'full'})");
+    scenario('retry-second');
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const b=[...document.querySelectorAll('button.collection-nav')].find(b=>b.textContent.includes('第二夹'));if(!b)return false;b.click();return true;})()"
+      )
+    );
+    await click('同步收藏');
+    await click('继续完整核对');
+    await waitFor(() => js(win, "!!document.querySelector('.read-result')"));
+    await click('完成');
+    const retried = hits('retry-second', 'collects/video/list/');
+    assert.equal(retried.length, 1);
+    assert.match(retried[0], /collects_id=78/);
     await click('作者作品');
+    await click('添加作者');
+    await fill('#author-link', 'https://www.douyin.com/user/MS4wLjABsynthetic001');
+    scenario('stop-author');
+    await click('核对并添加作者');
+    await waitFor(() => hits('stop-author', 'profile/other/').length === 1);
+    await click('停止读取');
+    await waitFor(() => js(win, "!document.querySelector('.read-progress')"));
+    assert.equal(await js(win, 'window.cangxia.state().then(s=>s.authors.length)'), 0);
+    scenario('normal');
     await click('添加作者');
     await fill('#author-link', 'https://www.douyin.com/user/MS4wLjABsynthetic001');
     await click('核对并添加作者');
     await click('从头读取 20 条');
     await waitFor(() => js(win, "!!document.querySelector('.read-result')"));
+    assert.equal(await js(win, "document.querySelector('.read-result h3').textContent"), '本段读取完成');
+    await click('查看读取日志');
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const b=document.querySelector('.read-log-runs button');if(!b)return false;b.click();return true;})()"
+      )
+    );
+    await click('在列表里显示作品 9200');
+    await waitFor(() =>
+      js(
+        win,
+        "!document.querySelector('.read-history-dialog')||document.body.innerText.includes('此作品已不在原列表')"
+      )
+    );
+    if (await js(win, "!!document.querySelector('.read-history-dialog')")) await click('关闭');
+    await click('读取作者作品');
+    await click('继续读到末尾');
+    await waitFor(() => js(win, "document.querySelector('.read-result h3')?.textContent==='本轮读取完成'"));
+    await click('完成');
+    scenario('shrink-author');
+    await click('读取作者作品');
+    await click('从头全部读取');
+    await waitFor(() =>
+      js(win, "document.querySelector('.read-result')?.textContent.includes('本轮返回数量明显减少')")
+    );
+    assert.equal(await js(win, "document.querySelector('.read-result h3').textContent"), '本轮读取完成');
+    assert.equal(hits('stop-folders', 'collects/list/').length, 1);
     powerMonitor.emit('resume');
     await waitFor(() => win.isDestroyed() && gate.isVisible());
     assert.equal(await js(gate, '!!document.querySelector(".qr-image-box img")'), false);

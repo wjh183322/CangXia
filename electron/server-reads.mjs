@@ -2,6 +2,22 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export function registerReadHandlers({ ipc, client, notify, openExternal }) {
+  let activeSource;
+  async function sourceOperation(action, body = {}) {
+    const slot = { id: randomUUID(), epoch: client.epoch, stopped: false };
+    if (activeSource?.epoch === slot.epoch) throw Error('已有来源读取正在进行。');
+    activeSource = slot;
+    try {
+      await client.call('source/begin', { operationId: slot.id, action });
+      if (slot.stopped) {
+        await client.call('source/stop', { operationId: slot.id });
+        throw Error('来源读取已停止。');
+      }
+      return await client.call('source/' + action, { ...body, operationId: slot.id });
+    } finally {
+      if (activeSource === slot) activeSource = null;
+    }
+  }
   const handle = (name, fn) => ipc(name, 'workspace', fn);
   const command = (kind, payload, operationId = randomUUID()) =>
     client.command({ kind, payload, operationId, entityVersion: 0 });
@@ -17,6 +33,7 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     for (;;) {
       const job = await client.query('read-job', { jobId });
       const step =
+        job.steps.find((s) => s.token === job.selectedStep) ??
         job.steps.find((s) => ['running', 'waiting', 'paused', 'finalizing', 'review'].includes(s.status)) ??
         job.steps.at(-1);
       if (!job.running) {
@@ -65,18 +82,20 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
   handle('historyItems', (payload) => client.query('history-items', payload));
   handle('sync', async (options = {}) => {
     if (options.discoverOnly) {
-      await client.call('source/folders', {});
+      await sourceOperation('folders');
       return state();
     }
     const id = options.collectionId ?? '__all__',
       mode = options.mode ?? 'quick';
     const source = { kind: id === '__all__' ? 'total' : 'collection', id };
     if (options.resume || options.reset) {
-      const prior = (await client.query('state')).collectionReadInfo[id]?.[mode];
-      if (!prior?.batchId) throw Error('找不到可继续的读取进度。');
+      const prior = options.checkpoint;
+      if (!prior?.jobId || !prior.stepId) throw Error('找不到所选读取的 NAS 断点。');
       return waitRead(
         await controlRead({
-          jobId: prior.batchId,
+          jobId: prior.jobId,
+          stepId: prior.stepId,
+          source,
           action: options.reset ? 'reset' : 'resume',
           followFolders: options.syncCollections === true,
           confirmed: options.reset === true,
@@ -97,9 +116,21 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
   handle('confirmCollectionRead', async ({ collectionId, mode, token }) => {
     const run = (await client.query('state')).collectionReadInfo[collectionId]?.[mode];
     if (!run || run.token !== token) throw Error('读取记录已变化。');
-    return waitRead(await controlRead({ jobId: run.batchId, action: 'confirm' }));
+    return waitRead(
+      await controlRead({
+        jobId: run.batchId,
+        stepId: run.token,
+        source: { kind: collectionId === '__all__' ? 'total' : 'collection', id: collectionId },
+        action: 'confirm'
+      })
+    );
   });
   handle('stopSync', async () => {
+    if (activeSource?.epoch === client.epoch) {
+      activeSource.stopped = true;
+      await client.call('source/stop', { operationId: activeSource.id });
+      return state();
+    }
     const { collector } = await client.query('state');
     if (collector.jobId) await controlRead({ jobId: collector.jobId, action: 'stop' });
     return state();
@@ -109,16 +140,21 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     return state();
   });
   handle('addAuthor', async (text) => {
-    const result = await client.call('source/author', { text });
+    const result = await sourceOperation('author', { text });
     await state();
     return result;
   });
-  handle('readAuthor', async ({ id, limit = 20, readAll = false, resume = false }) => {
+  handle('readAuthor', async ({ id, limit = 20, readAll = false, resume = false, checkpoint }) => {
     let receipt;
     if (resume) {
-      const author = (await client.query('state')).authors.find((a) => a.id === id);
-      if (!author?.run?.batchId) throw Error('找不到作者的上次读取。');
-      receipt = await controlRead({ jobId: author.run.batchId, action: 'resume', limit, readAll });
+      if (!checkpoint?.jobId || !checkpoint.stepId) throw Error('找不到所选作者断点。');
+      receipt = await controlRead({
+        ...checkpoint,
+        source: { kind: 'author', id },
+        action: 'resume',
+        limit,
+        readAll
+      });
     } else
       receipt = await startRead({
         source: { kind: 'author', id },
@@ -129,7 +165,7 @@ export function registerReadHandlers({ ipc, client, notify, openExternal }) {
     return { id, readSummary: snapshot.readSummary };
   });
   handle('importLink', async (text) => {
-    const source = await client.call('source/resolve-work', { text });
+    const source = await sourceOperation('resolve-work', { text });
     const result = await waitRead(await startRead({ source, mode: 'full' }));
     if (result.readSummary.outcome !== 'imported') throw Error(result.collector.message);
     return source.id;

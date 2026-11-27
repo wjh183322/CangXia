@@ -3,7 +3,7 @@ import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
 import { createReadJobs, readState } from './read-jobs.mjs';
 import { historyRuns, historyItems, jobSummary } from './read-history.mjs';
-import { boundIdentity, readWorkDetail } from './read-sources.mjs';
+import { boundIdentity, readWorkDetail, createSourceOperations } from './read-sources.mjs';
 import { createReadStore } from './read-store.mjs';
 import { failure } from './service-error.mjs';
 import { removeMembership } from './memberships.mjs';
@@ -79,13 +79,16 @@ export function createSessionService({
 }) {
   const bootId = randomUUID(),
     libraryId = library.libraryId;
+  const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay });
   const mutations = new Map(
     Object.entries({
       'start-read': jobs.start,
       'control-read': jobs.control,
       'clear-read-history': (db) => {
-        db.exec("UPDATE read_batches SET hidden=1 WHERE status<>'running'; DELETE FROM read_legacy_runs");
+        db.exec(
+          "UPDATE read_batches SET hidden=1 WHERE status IN ('complete','stopped','continued'); DELETE FROM read_legacy_runs"
+        );
         return { cleared: true };
       },
       'add-folders': (db, { payload }) => {
@@ -288,6 +291,9 @@ export function createSessionService({
     readStore(who, grant) {
       return createReadStore({ session: service.sourceSession(who, grant), browser: source });
     },
+    sourceOperation(who, grant, action, payload) {
+      return discovery.call(source, service.sourceSession(who, grant), action, payload);
+    },
     sourceSession(who, grant) {
       const signal = service.signal(who, grant);
       return {
@@ -332,6 +338,8 @@ export function createSessionService({
         if (saved) return saved;
         const run = mutations.get(kind);
         if (!run) throw failure(404, 'UNKNOWN_COMMAND', '服务不支持此操作。');
+        if (kind === 'start-read' && discovery.busy(localGrant.controller.signal))
+          throw failure(409, 'READ_CONFLICT', '已有来源读取正在进行。');
         const value = run(db, command, { who, grant });
         if (!value || typeof value.then === 'function') throw Error('Commands must commit synchronously.');
         checked(db, who, grant);

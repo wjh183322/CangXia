@@ -8,7 +8,8 @@ export function CollectionReadSetup({info={},busy,onRead,followupFolders=null,re
   const [fullScan,setFullScan]=useState(null),[syncCollections,setSyncCollections]=useState(false);
   const linked=followupFolders!==null&&syncCollections;
   function read(options){
-    const request={...options,...(linked?{syncCollections:true}:{})};
+    const prior=info[options.mode];
+    const request={...options,...(prior?.batchId?{checkpoint:{jobId:prior.batchId,stepId:prior.token}}:{}),...(linked?{syncCollections:true}:{})};
     const missing=[];
     if(!(options.resume?info.quick?.baselineKnown:info.baselineKnown))missing.push('当前收藏');
     if(linked)for(const folder of followupFolders){const data=readInfo[folder.id]||{};if(!(options.resume&&data.quick?.canResume?data.quick.baselineKnown:data.baselineKnown))missing.push(folder.name+' · '+folder.id);}

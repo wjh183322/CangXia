@@ -8,7 +8,7 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
 export const APPLICATION_ID = 0x43585346;
-export const CURRENT_SCHEMA = 7;
+export const CURRENT_SCHEMA = 8;
 export const isUuid = (value) =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -26,6 +26,7 @@ export const upgradeV3 = fs.readFileSync(new URL('./schema/v4.sql', import.meta.
 export const upgradeV4 = 'ALTER TABLE source_account ADD COLUMN profile_id TEXT';
 export const upgradeV5 = fs.readFileSync(new URL('./schema/v6.sql', import.meta.url), 'utf8');
 export const upgradeV6 = fs.readFileSync(new URL('./schema/v7.sql', import.meta.url), 'utf8');
+export const upgradeV7 = fs.readFileSync(new URL('./schema/v8.sql', import.meta.url), 'utf8');
 const catalog = (db) =>
   db
     .prepare(
@@ -49,6 +50,8 @@ reference.exec(upgradeV5);
 schemas.set(6, JSON.stringify(catalog(reference)));
 reference.exec(upgradeV6);
 schemas.set(7, JSON.stringify(catalog(reference)));
+reference.exec(upgradeV7);
+schemas.set(8, JSON.stringify(catalog(reference)));
 reference.close();
 
 const foreign = () => Error('The mounted volume or database does not match the formal library.');
@@ -132,7 +135,8 @@ export function inspectLayout(root, expectedId) {
   }
   for (const name of contents) {
     if (!allowed.includes(name)) throw unsafe();
-    if (name === 'snapshots' || name === 'media' || name === 'source-session') directory(path.join(dir, name));
+    if (name === 'snapshots' || name === 'media' || name === 'source-session')
+      directory(path.join(dir, name));
     else regular(path.join(dir, name));
   }
   if (!['media', 'snapshots', 'identity.json', 'library.sqlite'].every((name) => contents.includes(name)))
@@ -254,7 +258,10 @@ export function describe(layout, db) {
     from,
     to: CURRENT_SCHEMA,
     spaceRequired: pages * pageSize * 4 + 1048576,
-    reason: '建立独立来源排序、归属移除版本、恢复明细、来源读取断点及操作回执等结构；从版本 1 升级时另建立文件路径唯一约束及升级回执表。',
+    reason:
+      from === 7
+        ? '保存用户选择的续读来源及每轮当时的历史数量。旧日志缺失的累计数量保留为未知。'
+        : '建立独立来源排序、归属移除版本、恢复明细、来源读取断点、指定来源续读和当轮计数。版本 1 的升级另建立路径唯一约束及升级回执。',
     impact: '只修改数据库结构，归档媒体保持原位。',
     rollback: '先保全快照之后的新增资料，再用匹配的旧程序在独立目录验证快照与媒体清单，确认后切换。'
   };
@@ -301,6 +308,7 @@ function initialize(root, id) {
     db.exec(upgradeV4);
     db.exec(upgradeV5);
     db.exec(upgradeV6);
+    db.exec(upgradeV7);
     db.prepare('INSERT INTO library_identity VALUES (1,?,?)').run(APP_ID, id);
     db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${CURRENT_SCHEMA}; COMMIT`);
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') throw Error('WAL unavailable.');

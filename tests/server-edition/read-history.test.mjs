@@ -273,6 +273,65 @@ test('resuming a standalone total can follow independently paused folders at the
     partial.steps[0].token
   );
 });
+for (const initial of [true, false]) {
+  test('reset total uses newly confirmed folder selection, originally linked=' + initial, async (t) => {
+    const f = await fixture(t);
+    await f.discover();
+    f.rows(() => {
+      throw Error('paused');
+    });
+    const job = await f.start(total, { followFolders: initial ? ['77'] : [] });
+    const previous = await f.done(job.jobId);
+    f.rows(() => ({ ids: ['101'] }));
+    const cmd = {
+      jobId: job.jobId,
+      stepId: previous.steps[0].token,
+      source: total,
+      action: 'reset',
+      confirmed: true,
+      followFolders: initial ? [] : ['77']
+    };
+    const id = randomUUID();
+    const reset = await f.cmd('control-read', cmd, id);
+    assert.deepEqual(await f.cmd('control-read', cmd, id), reset);
+    assert.deepEqual(
+      (await f.done(reset.jobId)).steps.map((s) => s.scope),
+      initial ? ['__all__'] : ['__all__', '77']
+    );
+  });
+}
+test('resuming the second failed folder reads only that source using the selected checkpoint', async (t) => {
+  const f = await fixture(t);
+  f.source.discoverFolders = async () => ['77', '78', '79'].map((id) => ({ id, name: id, count: 1 }));
+  await f.discover();
+  await f.cmd('add-folders', { ids: ['78', '79'] });
+  f.rows((s, c) => {
+    if (c === '0') return { ids: [s.id], next: '501' };
+    throw Object.assign(Error('夹页无效'), { code: 'SOURCE_PAGE_INVALID', status: 409 });
+  });
+  const job = await f.start(total, { allAdded: true }),
+    before = await f.done(job.jobId),
+    b = before.steps[1];
+  const payload = {
+    jobId: job.jobId,
+    source: { kind: 'collection', id: '78' },
+    stepId: b.token,
+    action: 'resume'
+  };
+  await assert.rejects(f.cmd('control-read', { ...payload, stepId: before.steps[0].token }));
+  f.rows(() => ({ ids: ['201'] }));
+  const offset = f.calls.length;
+  await f.cmd('control-read', payload);
+  const after = await f.done(job.jobId);
+  assert.deepEqual(
+    f.calls.slice(offset).map((c) => [c.source.id, c.cursor]),
+    [['78', '501']]
+  );
+  assert.deepEqual(
+    after.steps.map((s) => s.status),
+    ['failed', 'complete', 'failed']
+  );
+});
 test('review of a sharply reduced total preserves history and requires confirmation before followers', async (t) => {
   const f = await fixture(t);
   await f.discover();
@@ -301,6 +360,8 @@ test('author selection commits exactly the requested prefix even if the official
   const job = await f.start({ kind: 'author', id }, { mode: 'partial', limit: 2 });
   const part = await f.done(job.jobId);
   assert.equal(part.steps[0].checked, 2);
+  assert.equal(part.steps[0].outcome, 'limit');
+  assert.equal(part.steps[0].scope, 'author:' + id);
   assert.equal(part.status, 'paused');
   assert.equal(
     f.library.read((db) => db.prepare('SELECT count(*) n FROM works').get().n),
@@ -386,19 +447,17 @@ test('old summaries with restoration counts expose only evidence the old log act
   const f = await fixture(t),
     token = randomUUID();
   f.library.write((db) =>
-    db
-      .prepare('INSERT INTO read_legacy_runs VALUES(?,?,?)')
-      .run(
-        token,
-        '2025-10-01',
-        JSON.stringify({
-          name: '旧资料',
-          source: 'collection',
-          mode: 'full',
-          status: 'complete',
-          restored: 3
-        })
-      )
+    db.prepare('INSERT INTO read_legacy_runs VALUES(?,?,?)').run(
+      token,
+      '2025-10-01',
+      JSON.stringify({
+        name: '旧资料',
+        source: 'collection',
+        mode: 'full',
+        status: 'complete',
+        restored: 3
+      })
+    )
   );
   const history = await f.client.query('history-runs', { page: 1 });
   assert.equal(history.items[0].restored, 3);
@@ -408,6 +467,87 @@ test('old summaries with restoration counts expose only evidence the old log act
   assert.equal(restored.total, 0);
   assert.deepEqual(restored.items, []);
 });
+test('clear history preserves resumable runs and freezes completed run counts across later membership changes', async (t) => {
+  const f = await fixture(t);
+  f.rows((_s, c) => {
+    if (c === '0') return { ids: ['11'], next: '90' };
+    throw Error('pause');
+  });
+  const j = await f.start(total);
+  await f.done(j.jobId);
+  await f.cmd('clear-read-history', {});
+  assert.equal((await f.client.query('history-runs', {})).total, 1);
+  f.rows(() => ({ ids: ['12'] }));
+  await f.cmd('control-read', { jobId: j.jobId, action: 'resume' });
+  const r = await f.done(j.jobId);
+  assert.equal(r.steps[0].historyCount, 2);
+  f.rows(() => ({ ids: ['11', '12', '13'] }));
+  await f.done((await f.start(total)).jobId);
+  assert.equal((await f.client.query('read-job', { jobId: j.jobId })).steps[0].historyCount, 2);
+  await f.cmd('clear-read-history', {});
+  assert.equal((await f.client.query('history-runs', {})).total, 0);
+});
+test('author terminal shrink completes with warning and preserves the prior reliable baseline', async (t) => {
+  const f = await fixture(t),
+    id = 'MS4wLjABsynthetic001',
+    source = { kind: 'author', id };
+  f.source.lookupAuthor = async () => ({ id, uid: '88', name: '作者' });
+  await f.client.call('source/author', { text: 'https://www.douyin.com/user/' + id });
+  f.rows(() => ({ ids: Array.from({ length: 30 }, (_, i) => String(100 + i)) }));
+  const base = await f.done((await f.start(source)).jobId);
+  f.rows(() => ({ ids: ['110'] }));
+  const small = await f.done((await f.start(source)).jobId);
+  assert.equal(small.status, 'complete');
+  assert.equal(small.steps[0].warning, true);
+  assert.equal(small.steps[0].notReturned, 29);
+  const newer = await f.done((await f.start(source)).jobId);
+  assert.equal(
+    f.library.read(
+      (db) => db.prepare('SELECT anchor_run FROM read_steps WHERE id=?').get(newer.steps[0].token).anchor_run
+    ),
+    base.steps[0].token
+  );
+});
+for (const [action, method] of [
+  ['folders', 'discoverFolders'],
+  ['author', 'lookupAuthor']
+]) {
+  test(
+    'stop cancels ' + action + ' before there is a read job, even when provider finishes late',
+    async (t) => {
+      const f = await fixture(t),
+        entered = Promise.withResolvers(),
+        release = Promise.withResolvers();
+      let stopped;
+      f.source[method] = async ({ signal }) => {
+        stopped = signal;
+        entered.resolve();
+        await release.promise;
+        return action === 'author'
+          ? { id: 'MS4wLjABsynthetic001', uid: '81', name: 'late' }
+          : [{ id: '77', name: 'late' }];
+      };
+      const operationId = randomUUID();
+      await f.client.call('source/begin', { operationId, action });
+      const pending = f.client.call('source/' + action, {
+        operationId,
+        text: 'https://www.douyin.com/user/MS4wLjABsynthetic001'
+      });
+      await entered.promise;
+      const observed = assert.rejects(pending, /停止/);
+      await f.client.call('source/stop', { operationId });
+      assert.equal(stopped.aborted, true);
+      await observed;
+      release.resolve();
+      await delay(5);
+      assert.equal(
+        f.library.read((db) => db.prepare('SELECT count(*) n FROM read_sources').get().n),
+        0
+      );
+      await assert.rejects(f.client.call('source/' + action, { operationId }), /停止/);
+    }
+  );
+}
 test('work import is an idempotent NAS job and does not create a favorite relation', async (t) => {
   const f = await fixture(t);
   const url = 'https://www.douyin.com/video/' + A;

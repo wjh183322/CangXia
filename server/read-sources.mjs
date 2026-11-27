@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { isUuid } from './library.mjs';
+import { abortable } from '../electron/browser-api.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolveAuthorLink, authorURL } from '../electron/author-sources.mjs';
 import { parsePlatformJSON } from '../electron/model.mjs';
@@ -168,7 +171,70 @@ export function discoveryReads(read) {
     }
   };
 }
-export async function sourceAction(source, session, kind, payload) {
+export function createSourceOperations() {
+  const slots = new WeakMap();
+  const stopped = () => failure(409, 'SOURCE_STOPPED', '来源读取已停止。');
+  function begin(session, action, id) {
+    if (!['folders', 'author', 'resolve-work'].includes(action) || !isUuid(id))
+      throw failure(400, 'INVALID_REQUEST', '来源操作无效。');
+    if (
+      slots.has(session.signal) ||
+      session.read((db) => db.prepare("SELECT 1 FROM read_batches WHERE status='running'").get())
+    )
+      throw failure(409, 'READ_CONFLICT', '已有读取任务正在进行。');
+    const slot = { action, id, controller: new AbortController(), started: false };
+    slots.set(session.signal, slot);
+    return slot;
+  }
+  return {
+    busy: (signal) => slots.has(signal),
+    async call(source, session, action, payload) {
+      const { operationId } = payload;
+      if (action === 'begin') {
+        begin(session, payload.action, operationId);
+        return { operationId };
+      }
+      if (action === 'stop') {
+        const current = slots.get(session.signal);
+        if (current && current.id === operationId) {
+          current.controller.abort(stopped());
+          slots.delete(session.signal);
+        }
+        return { stopped: true };
+      }
+      const slot =
+        operationId === undefined ? begin(session, action, randomUUID()) : slots.get(session.signal);
+      if (
+        !slot ||
+        slot.started ||
+        slot.action !== action ||
+        (operationId !== undefined && slot.id !== operationId)
+      )
+        throw stopped();
+      slot.started = true;
+      const signal = AbortSignal.any([slot.controller.signal, session.signal]);
+      const guarded = {
+        signal,
+        read: (fn) =>
+          session.read((db) => {
+            signal.throwIfAborted();
+            return fn(db);
+          }),
+        write: (fn) =>
+          session.write((db) => {
+            signal.throwIfAborted();
+            return fn(db);
+          })
+      };
+      try {
+        return await abortable(sourceAction(source, guarded, action, payload), signal);
+      } finally {
+        if (slots.get(session.signal) === slot) slots.delete(session.signal);
+      }
+    }
+  };
+}
+async function sourceAction(source, session, kind, payload) {
   const account = session.read((db) => boundIdentity(db, source)),
     input = { authEpoch: account.authEpoch, signal: session.signal };
   const commit = (fn) =>

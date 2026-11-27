@@ -16,12 +16,16 @@ const runRow = (db, id) => db.prepare('SELECT * FROM source_read_runs WHERE job_
 const running = (db) => db.prepare("SELECT * FROM read_batches WHERE status='running'").get();
 const batchStatus = (db, id, state, msg = '') =>
   db.prepare('UPDATE read_batches SET status=?,message=? WHERE id=?').run(state, msg, id);
-const stepStatus = (db, id, state, msg = '') =>
-  db.prepare('UPDATE read_steps SET status=?,message=? WHERE id=?').run(state, msg, id);
+function stepStatus(db, id, state, msg = '') {
+  db.prepare(
+    `UPDATE read_steps SET status=?,message=?,history_count=(SELECT count(*) FROM source_members WHERE source_id=read_steps.source_id)
+    WHERE id=?`
+  ).run(state, msg, id);
+}
 const currentStep = (db, id) =>
   db
     .prepare(
-      "SELECT * FROM read_steps WHERE batch_id=? AND status IN ('waiting','running','paused','review','finalizing') ORDER BY ordinal LIMIT 1"
+      "SELECT s.* FROM read_steps s JOIN read_batches b ON b.id=s.batch_id WHERE b.id=? AND (b.selected_step IS NULL OR b.selected_step=s.id) AND s.status IN ('waiting','running','paused','review','finalizing') ORDER BY ordinal LIMIT 1"
     )
     .get(id);
 const localStore = (db, browser) =>
@@ -33,6 +37,12 @@ function anchor(db, key, uid) {
     WHERE b.uid=? AND s.source_id=? AND s.outcome IN ('end','matched') AND s.status='complete' ORDER BY s.rowid DESC LIMIT 1`
     )
     .get(uid, key)?.id;
+}
+function jobSourceKey(source) {
+  if (source?.kind !== 'link') return sourceKey(source);
+  if (typeof source.id !== 'string' || !/^\d{1,40}$/.test(source.id) || !/[1-9]/.test(source.id))
+    throw reject();
+  return 'link:' + source.id;
 }
 function adoptable(db, source, uid) {
   if (source.startsWith('link:')) return { name: '分享作品' };
@@ -143,7 +153,11 @@ function finishStep(db, step) {
     db,
     step.id,
     'complete',
-    step.outcome === 'matched' ? '连续匹配历史顺序，检查完成。' : '已到当前可访问列表末尾。'
+    step.outcome === 'end-warning'
+      ? '作者主页返回明显减少，保留已有记录及历史对照。'
+      : step.outcome === 'matched'
+        ? '连续匹配历史顺序，检查完成。'
+        : '已到当前可访问列表末尾。'
   );
 }
 function includeResumeFolders(db, job, step, options) {
@@ -226,13 +240,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
     stopExpired(db, grant);
     if (running(db)) throw reject('已有读取任务正在进行。');
     if (!['quick', 'full', 'partial'].includes(p.mode)) throw reject();
-    const key =
-        p.source?.kind === 'link' &&
-        typeof p.source.id === 'string' &&
-        /^\d{1,40}$/.test(p.source.id) &&
-        /[1-9]/.test(p.source.id)
-          ? 'link:' + p.source.id
-          : sourceKey(p.source),
+    const key = jobSourceKey(p.source),
       isAuthor = key.startsWith('author:');
     if ((p.mode === 'partial' && !isAuthor) || (isAuthor && p.mode === 'quick')) throw reject();
     if (p.mode === 'partial' && (!Number.isSafeInteger(p.limit) || p.limit < 1 || p.limit > 100000))
@@ -250,7 +258,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
           .all(uid)
           .map((r) => r.source_id)
       ];
-    } else if (p.followFolders !== undefined) {
+    } else if (p.followFolders !== undefined && p.followFolders !== false) {
       if (key !== 'total' || !Array.isArray(p.followFolders)) throw reject();
       keys.push(...p.followFolders.map((id) => sourceKey({ kind: 'collection', id })));
     }
@@ -304,7 +312,21 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       throw reject();
     const account = boundIdentity(db, source);
     if (account.uid !== job.uid) throw reject('来源账号已变化。');
+    let requested;
+    if (p.stepId !== undefined || p.source !== undefined) {
+      requested = findStep(db, p.stepId ?? '');
+      if (!requested || requested.batch_id !== job.id || jobSourceKey(p.source) !== requested.source_id)
+        throw reject('所选来源与 NAS 断点不符。');
+    }
+    const wholeBatch =
+      !requested || p.followFolders === true || (p.action === 'confirm' && !job.selected_step);
+    if (p.followFolders === true && requested && requested.source_id !== 'total') throw reject();
+    db.prepare('UPDATE read_batches SET selected_step=? WHERE id=?').run(
+      wholeBatch ? null : requested.id,
+      job.id
+    );
     const step =
+      (requested && (!wholeBatch || p.action === 'reset') ? requested : null) ??
       currentStep(db, job.id) ??
       db
         .prepare("SELECT * FROM read_steps WHERE batch_id=? AND status='failed' ORDER BY ordinal LIMIT 1")
@@ -317,10 +339,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       includeResumeFolders(db, job, first, p);
     }
     if (p.action === 'reset') {
-      if (!p.confirmed) throw reject('请先确认从头读取。');
-      const follow = db
-        .prepare('SELECT source_id FROM read_steps WHERE batch_id=? AND ordinal>? ORDER BY ordinal')
-        .all(job.id, step.ordinal);
+      if (p.confirmed !== true) throw reject('请先确认从头读取。');
       const result = start(
         db,
         {
@@ -328,20 +347,40 @@ export function createReadJobs({ source, readDelay = 1100 }) {
             source: sourceFromKey(step.source_id),
             mode: step.mode,
             limit: p.limit ?? step.goal,
-            ...(step.source_id === 'total'
-              ? { followFolders: follow.map((r) => sourceFromKey(r.source_id).id) }
-              : {}),
+            ...(step.source_id === 'total' ? { followFolders: p.followFolders ?? false } : {}),
             allowFullScan: p.allowFullScan
           }
         },
         { grant }
       );
-      batchStatus(db, job.id, 'stopped', '已从头开始新的读取。');
+      if (step.status !== 'complete')
+        db.prepare("UPDATE read_steps SET status='stopped',message='此来源已从头读取。' WHERE id=?").run(
+          step.id
+        );
+      const sibling = db
+        .prepare(
+          "SELECT 1 FROM read_steps WHERE batch_id=? AND id<>? AND status IN ('failed','paused','review','finalizing')"
+        )
+        .get(job.id, step.id);
+      batchStatus(db, job.id, sibling ? 'partial' : 'stopped', '所选来源已从头读取。');
       return result;
     }
-    if (job.status === 'review' && p.action !== 'confirm')
+    if (
+      requested &&
+      step.status === 'waiting' &&
+      db
+        .prepare(
+          "SELECT 1 FROM read_steps WHERE batch_id=? AND source_id='total' AND ordinal<? AND status<>'complete'"
+        )
+        .get(job.id, step.ordinal)
+    )
+      throw reject('总收藏及必要整理尚未完成。');
+    if (step.outcome === 'limit') db.prepare('UPDATE read_steps SET outcome=NULL WHERE id=?').run(step.id);
+    if (!['waiting', 'paused', 'failed', 'review', 'finalizing'].includes(step.status))
+      throw reject('所选读取已经结束。');
+    if (step.status === 'review' && p.action !== 'confirm')
       throw reject('本轮返回数量明显减少，请确认采用此次对照。');
-    if (p.action === 'confirm' && job.status !== 'review') throw reject();
+    if (p.action === 'confirm' && step.status !== 'review') throw reject();
     if (step.status === 'finalizing' && unfinishedArchive(db, step)) throw reject('NAS 必要整理仍未完成。');
     const run = runRow(db, step.id);
     if (run) {
@@ -378,7 +417,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
     }
     if (p.action === 'confirm') db.prepare("UPDATE read_steps SET outcome='end' WHERE id=?").run(step.id);
     db.prepare(
-      "UPDATE read_batches SET status='running',owner_generation=?,owner_boot=?,auth_epoch=?,message='' WHERE id=?"
+      "UPDATE read_batches SET hidden=0,status='running',owner_generation=?,owner_boot=?,auth_epoch=?,message='' WHERE id=?"
     ).run(grant.generation, grant.bootId, account.authEpoch, job.id);
     stepStatus(db, step.id, 'running');
     return { jobId: job.id };
@@ -386,7 +425,16 @@ export function createReadJobs({ source, readDelay = 1100 }) {
   function prepare(db, job) {
     let step = currentStep(db, job.id);
     if (!step) {
-      const failed = db.prepare("SELECT 1 FROM read_steps WHERE batch_id=? AND status='failed'").get(job.id);
+      const unfinished = db
+        .prepare(
+          "SELECT status FROM read_steps WHERE batch_id=? AND status IN ('waiting','paused','review','finalizing','failed') ORDER BY ordinal LIMIT 1"
+        )
+        .get(job.id);
+      const failed = unfinished?.status === 'failed';
+      if (unfinished && !failed) {
+        batchStatus(db, job.id, 'paused', '所选来源已结束，其他来源进度保留。');
+        return null;
+      }
       batchStatus(
         db,
         job.id,
@@ -416,7 +464,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       store.startRead({ source: scope, authEpoch, jobEpoch: 1, jobId: step.id });
       run = runRow(db, step.id);
     }
-    if (step.outcome === 'end' || step.outcome === 'matched') {
+    if (['end', 'end-warning', 'matched'].includes(step.outcome)) {
       finishStep(db, step);
       return null;
     }
@@ -531,10 +579,16 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       outcome === 'end' &&
       ((oldCount > 0 && count === 0) || (oldCount >= 20 && count < oldCount / 2) || oldCount - count >= 1000)
     ) {
+      if (step.source_id.startsWith('author:')) {
+        db.prepare("UPDATE read_steps SET outcome='end-warning' WHERE id=?").run(step.id);
+        finishStep(db, findStep(db, step.id));
+        return;
+      }
       stepStatus(db, step.id, 'review', '本轮返回数量明显减少，历史记录保留，请核对。');
       batchStatus(db, step.batch_id, 'review', '请确认返回数量变化。');
     } else if (outcome) finishStep(db, findStep(db, step.id));
     else if (step.goal !== null && count >= step.goal) {
+      db.prepare("UPDATE read_steps SET outcome='limit' WHERE id=?").run(step.id);
       stepStatus(db, step.id, 'paused', '本次限定读取已完成，可继续读取。');
       batchStatus(db, step.batch_id, 'paused', '已达到本次读取数量。');
     }

@@ -279,14 +279,74 @@ test(
     t.after(() => live.close());
     const { config } = await httpsFixture(t, live, source);
     provider.phase = 'ready';
-    provider.read = async ({url}) => {
-      const route=new URL(url).pathname;
-      const author={uid:'88',sec_uid:'MS4wLjABsynthetic001',nickname:'离线作者'};
-      if(route.endsWith('/user/profile/other/'))return {status:200,text:JSON.stringify({user:author})};
-      if(route.endsWith('/aweme/detail/'))return {status:200,text:JSON.stringify({aweme_detail:{aweme_id:'9192',item_title:'分享样本',author}})};
-      if(route.endsWith('/aweme/post/'))return {status:200,text:JSON.stringify({has_more:0,aweme_list:[{aweme_id:'9193',item_title:'作者样本',author}]})};
-      if(route.endsWith('/collects/list/'))return {status:200,text:JSON.stringify({has_more:0,collects_list:[{collects_id:'77',collects_name:'离线夹'}]})};
-      return {status:200,text:JSON.stringify({has_more:0,aweme_list:[{aweme_id:'9191',item_title:'离线作品'}]})};
+    provider.read = async ({ url }, signal) => {
+      const route = new URL(url).pathname;
+      const scenarioFile = path.join(root, 'scenario');
+      const scenario = fs.existsSync(scenarioFile) ? fs.readFileSync(scenarioFile, 'utf8') : '';
+      fs.appendFileSync(
+        path.join(root, 'requests'),
+        scenario + ' ' + route + ' ' + new URL(url).search + '\n'
+      );
+      const canceledLookup = scenario === 'stop-author' && route.endsWith('/user/profile/other/');
+      if (canceledLookup) {
+        await new Promise((resolve) => {
+          const timeout = setTimeout(resolve, 5000);
+          const stop = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+          if (signal.aborted) stop();
+          else signal.addEventListener('abort', stop, { once: true });
+        });
+      }
+      if (scenario === 'stop-folders' && route.endsWith('/collects/list/'))
+        return {
+          status: 200,
+          text: JSON.stringify({
+            has_more: 1,
+            cursor: '55',
+            collects_list: [{ collects_id: '55', collects_name: '取消样本' }]
+          })
+        };
+      if (scenario === 'fail-total' && route.endsWith('/aweme/listcollection/'))
+        return { status: 503, text: 'fixture' };
+      if (scenario === 'bad-folders' && route.endsWith('/collects/video/list/'))
+        return { status: 200, text: JSON.stringify({ has_more: 0, aweme_list: [{ aweme_id: 'bad' }] }) };
+      const author = { uid: '88', sec_uid: 'MS4wLjABsynthetic001', nickname: '离线作者' };
+      if (route.endsWith('/user/profile/other/'))
+        return { status: 200, text: JSON.stringify({ user: author }) };
+      if (route.endsWith('/aweme/detail/'))
+        return {
+          status: 200,
+          text: JSON.stringify({ aweme_detail: { aweme_id: '9192', item_title: '分享样本', author } })
+        };
+      if (route.endsWith('/aweme/post/'))
+        return {
+          status: 200,
+          text: JSON.stringify({
+            has_more: 0,
+            aweme_list: Array.from({ length: scenario === 'shrink-author' ? 1 : 30 }, (_, i) => ({
+              aweme_id: String(9200 + i),
+              item_title: '作者样本',
+              author
+            }))
+          })
+        };
+      if (route.endsWith('/collects/list/'))
+        return {
+          status: 200,
+          text: JSON.stringify({
+            has_more: 0,
+            collects_list: [
+              { collects_id: '77', collects_name: '离线夹' },
+              ...(scenario === 'two-folders' ? [{ collects_id: '78', collects_name: '第二夹' }] : [])
+            ]
+          })
+        };
+      return {
+        status: 200,
+        text: JSON.stringify({ has_more: 0, aweme_list: [{ aweme_id: '9191', item_title: '离线作品' }] })
+      };
     };
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-desktop-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
@@ -342,11 +402,20 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6])
+for (const version of [3, 4, 5, 6, 7])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
-    const { APP_ID, APPLICATION_ID, CURRENT_SCHEMA, upgradeV1, upgradeV2, upgradeV3, upgradeV4,upgradeV5 } =
-      await import('../../server/library.mjs');
+    const {
+      APP_ID,
+      APPLICATION_ID,
+      CURRENT_SCHEMA,
+      upgradeV1,
+      upgradeV2,
+      upgradeV3,
+      upgradeV4,
+      upgradeV5,
+      upgradeV6
+    } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -368,6 +437,15 @@ for (const version of [3, 4, 5, 6])
     }
     if (version >= 5) db.exec(upgradeV4);
     if (version >= 6) db.exec(upgradeV5);
+    if (version === 7) {
+      db.exec(upgradeV6);
+      db.exec(
+        "INSERT INTO read_batches(id,uid,auth_epoch,owner_boot,owner_generation,status,started) VALUES('old-group','101','a','b',1,'complete','2026-11-01')"
+      );
+      db.exec(
+        "INSERT INTO read_steps(id,batch_id,ordinal,source_id,name,mode,status,outcome) VALUES('old-run','old-group',0,'folder:77','旧夹','full','complete','end')"
+      );
+    }
     db.prepare('INSERT INTO library_identity VALUES(1,?,?)').run(APP_ID, expectedId);
     db.exec('PRAGMA application_id=' + APPLICATION_ID);
     db.exec('PRAGMA user_version=' + version + "; INSERT INTO works VALUES('29','fixture','{}')");
@@ -379,6 +457,7 @@ for (const version of [3, 4, 5, 6])
     const preview = inspectUpgrade(root, expectedId);
     assert.equal(preview.state, 'migration-required');
     assert.equal(preview.from, version);
+    if (version === 7) assert.equal(preview.to, 8);
     assert.deepEqual(fs.readFileSync(file), bytes);
     const approval = {
       from: version,
@@ -394,6 +473,12 @@ for (const version of [3, 4, 5, 6])
     snapshot.close();
     const upgraded = openLibrary({ root, expectedId });
     t.after(() => upgraded.close());
+    if (version === 7) {
+      const { jobSummary } = await import('../../server/read-history.mjs');
+      const old = upgraded.read((db) => jobSummary(db, 'old-group'));
+      assert.equal(old.steps[0].historyCount, null);
+      assert.equal(old.steps[0].name, '旧夹');
+    }
     if (version === 4) {
       const privateDir = path.join(dir, 'source-session');
       fs.mkdirSync(privateDir, { mode: 0o700 });
