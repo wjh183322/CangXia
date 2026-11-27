@@ -1103,6 +1103,18 @@ function originRange(bytes, range, type = 'application/octet-stream') {
     }
   });
 }
+function multipartBytes(bytes, start, boundary, reportedStart = start) {
+  const total = bytes.length;
+  return Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Range: bytes 0-8191/${total}\r\n\r\n`),
+    bytes.subarray(0, 8192),
+    Buffer.from(
+      `\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes ${reportedStart}-${total - 1}/${total}\r\n\r\n`
+    ),
+    bytes.subarray(start),
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  ]);
+}
 async function unarchivedVideo(f, paths) {
   f.library.write((db) =>
     db.prepare("UPDATE works SET body=? WHERE id='43'").run(
@@ -1243,16 +1255,7 @@ test('a distant anonymous 206 uses one sparse multipart reply or verified source
     if (range.includes(',')) {
       if (mode !== 'multipart' && mode !== 'bad-header') return new Response(null, { status: 416 });
       const boundary = 'controlled-boundary',
-        firstEnd = 8191;
-      const body = Buffer.concat([
-        Buffer.from(`--${boundary}\r\nContent-Range: bytes 0-${firstEnd}/${total}\r\n\r\n`),
-        bytes.subarray(0, firstEnd + 1),
-        Buffer.from(
-          `\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes ${mode === 'bad-header' ? start + 1 : start}-${total - 1}/${total}\r\n\r\n`
-        ),
-        bytes.subarray(start),
-        Buffer.from(`\r\n--${boundary}--\r\n`)
-      ]);
+        body = multipartBytes(bytes, start, boundary, mode === 'bad-header' ? start + 1 : start);
       let pos = 0;
       return new Response(
         new ReadableStream({
@@ -1306,4 +1309,68 @@ test('a distant anonymous 206 uses one sparse multipart reply or verified source
   assert.equal(res.statusCode, 404);
   res.resume();
   assert.equal(refreshes, 2);
+});
+test('generic MP4 track reads beyond the selected response prefix require corroborated identity', async (t) => {
+  const indexOffset = 12 * 1024,
+    total = 128 * 1024,
+    distant = 96 * 1024;
+  function free(size) {
+    const box = Buffer.alloc(size);
+    box.writeUInt32BE(size);
+    box.write('free', 4);
+    return box;
+  }
+  function delayedIndex(name) {
+    const seed = fs.readFileSync(new URL('./fixtures/' + name, import.meta.url));
+    const head = seed.readUInt32BE(0),
+      padding = free(indexOffset - head);
+    assert.equal(seed.toString('ascii', head + 4, head + 8), 'moov');
+    return Buffer.concat([
+      seed.subarray(0, head),
+      padding,
+      seed.subarray(head),
+      free(total - seed.length - padding.length)
+    ]);
+  }
+  const audio = delayedIndex('fragmented-generic-audio.m4a'),
+    video = delayedIndex('synthetic-fragment.mp4');
+  const f = await fixture(t);
+  await f.connect();
+  const item = await unarchivedVideo(f, ['remote-delayed-index']),
+    ranges = [];
+  let stable = false;
+  f.setRemote(({ headers }) => {
+    const range = new Headers(headers).get('range');
+    ranges.push(range);
+    if (range?.includes(',')) {
+      return new Response(multipartBytes(audio, distant, 'mixed'), {
+        status: 206,
+        headers: { 'content-type': 'multipart/byteranges; boundary=mixed' }
+      });
+    }
+    const source = stable || parseRange(range, total).start === indexOffset ? video : audio;
+    const reply = originRange(source, range);
+    if (stable) reply.headers.set('etag', '"fixed-video"');
+    return reply;
+  });
+  const get = (range) =>
+    pinnedMedia(f.client.config, f.client.grant, item, { range, signal: f.client.signal() });
+  for (const start of [null, 1024, distant]) {
+    ranges.length = 0;
+    const range = start === null ? null : `bytes=${start}-`;
+    const res = await get(range);
+    assert.equal(res.statusCode, 404);
+    res.resume();
+    const expected = [range];
+    if (start === 1024) expected.push('bytes=0-' + (total - 1));
+    if (start === distant) expected.push(`bytes=0-8191,${distant}-${total - 1}`);
+    assert.deepEqual(ranges, expected);
+  }
+  stable = true;
+  ranges.length = 0;
+  const res = await get(`bytes=${distant}-`);
+  assert.equal(res.statusCode, 206);
+  assert.equal(res.headers['content-type'], 'video/mp4');
+  assert.deepEqual(await contents(res), video.subarray(distant));
+  assert.ok(ranges.includes(`bytes=${indexOffset}-${indexOffset + 8191}`));
 });

@@ -179,7 +179,8 @@ function snapshots(store) {
   }
   return cache.works;
 }
-const prefixLimit = 128;
+const prefixLimit = 128,
+  anonymousMetadata = 8192;
 function detectPrefix(bytes, kind) {
   const tag = (start, end) => bytes.toString('latin1', start, end);
   if (kind === 'image') {
@@ -246,15 +247,19 @@ async function sniff(result, kind) {
       return null;
     }
     if (mime === 'generic-mp4') {
-      const parts = [];
-      let remaining = 8192;
-      for (const chunk of held) {
-        const part = Buffer.from(chunk.subarray(0, remaining));
-        parts.push(part);
-        remaining -= part.length;
-        if (!remaining) break;
+      const window = Buffer.alloc(anonymousMetadata);
+      let filled = 0;
+      for (let i = 0; filled < window.length; i++) {
+        if (i === held.length) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          held.push(value);
+        }
+        const part = held[i].subarray(0, window.length - filled);
+        window.set(part, filled);
+        filled += part.length;
       }
-      result.isoPrefix = Buffer.concat(parts);
+      result.isoPrefix = window.subarray(0, filled);
     }
     result.body = new ReadableStream(
       {
@@ -361,7 +366,7 @@ async function matchingTracks(result, span, fetchRange, kind) {
     hasVideo = false;
   async function at(pos, n) {
     if (!window || pos < offset || pos + n > offset + window.length) {
-      if (++reads > 16) return null;
+      if (!fetchRange || ++reads > 16) return null;
       const range = 'bytes=' + pos + '-' + Math.min(pos + 8191, total == null ? Infinity : total - 1);
       const probe = await fetchRange(range);
       try {
@@ -400,7 +405,9 @@ async function matchingTracks(result, span, fetchRange, kind) {
       }
       if (parent === 'mdia' && type === 'hdlr') {
         if (length < header + 12) return false;
-        const name = (await at(pos + header + 8, 4))?.toString('latin1');
+        const handler = await at(pos + header + 8, 4);
+        if (!handler) return false;
+        const name = handler.toString('latin1');
         if (name === 'soun') hasAudio = true;
         if (name === 'vide') hasVideo = true;
       }
@@ -425,8 +432,7 @@ async function matchingTracks(result, span, fetchRange, kind) {
 // Anonymous CDN responses have no cross-request byte identity. When available, a
 // multipart reply carries the metadata and distant span together. Near the start
 // a single contiguous reply is cheaper; only the bounded leading bytes are skipped.
-const anonymousSkipLimit = 64 * 1024,
-  anonymousMetadata = 8192;
+const anonymousSkipLimit = 64 * 1024;
 const unsupportedMulti = Symbol('origin does not serve multipart ranges');
 function rangeReader(body) {
   const reader = body.getReader();
@@ -584,7 +590,8 @@ async function sourceMime({ result, item, range, head, fetchRange, sourceIdentit
   const key = strong && JSON.stringify([item.resourceId, item.version, result.url, etag, span.total]);
   if (key && proofs.has(key) && (head || span.start > 0 || span.end < prefixLimit - 1))
     return proofs.get(key);
-  let mime;
+  let mime,
+    corroborated = strong || !!sourceIdentity;
   if (!head && span.start === 0 && (span.end >= prefixLimit - 1 || span.end === span.total - 1)) {
     mime = await sniff(result, item.kind);
   } else {
@@ -601,7 +608,8 @@ async function sourceMime({ result, item, range, head, fetchRange, sourceIdentit
     if (anonymous) {
       mime = await anonymousBody(result, item, span, fetchRange);
       if (mime === unsupportedMulti) {
-        if (!(await verifyOrigin())) return null;
+        corroborated = await verifyOrigin();
+        if (!corroborated) return null;
         prefixNeeded = true;
       }
     }
@@ -616,10 +624,23 @@ async function sourceMime({ result, item, range, head, fetchRange, sourceIdentit
       } finally {
         await probe.body?.cancel().catch(() => {});
       }
+      if (mime === 'generic-mp4' && !corroborated) {
+        // Neither a declared MIME type nor a weak validator binds a separate
+        // movie index to the bytes selected for playback.
+        if (head) return null;
+        mime = await anonymousBody(result, item, span, fetchRange);
+        if (mime === unsupportedMulti) {
+          corroborated = await verifyOrigin();
+          if (!corroborated) return null;
+          mime = 'generic-mp4';
+        }
+      }
     }
   }
   if (mime === 'generic-mp4')
-    mime = (await matchingTracks(result, span, fetchRange, item.kind)) ? item.kind + '/mp4' : null;
+    mime = (await matchingTracks(result, span, corroborated ? fetchRange : null, item.kind))
+      ? item.kind + '/mp4'
+      : null;
   if (mime && key) {
     if (proofs.size >= 256) proofs.delete(proofs.keys().next().value);
     proofs.set(key, mime);
