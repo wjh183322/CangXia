@@ -7,6 +7,7 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import selfsigned from 'selfsigned';
 import { createHttpsService } from '../../server/http.mjs';
+import { createDownloads } from '../../server/downloads.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { openLibrary } from '../../server/library.mjs';
 import { parseSourcePage, parseSourceDetail } from '../../server/source-parser.mjs';
@@ -19,7 +20,7 @@ const tls = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t, { readDelay = 0 } = {}) {
+async function fixture(t, { readDelay = 0, downloadOptions } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-reads-'));
   const library = openLibrary({ root, mode: 'init' });
   const identity = { uid: '101', authEpoch: randomUUID() };
@@ -53,7 +54,8 @@ async function fixture(t, { readDelay = 0 } = {}) {
     }
   };
   let sourceRows = () => ({ ids: [A] });
-  const sessions = createSessionService({ library, source, readDelay });
+  const downloads = downloadOptions && createDownloads({ library,root,source,...downloadOptions });
+  const sessions = createSessionService({ library, source, readDelay, downloads });
   const cert = await tls,
     token = 'a'.repeat(48);
   const https = createHttpsService({
@@ -79,6 +81,7 @@ async function fixture(t, { readDelay = 0 } = {}) {
   t.after(async () => {
     client.lock();
     sessions.close();
+    await downloads?.close();
     await new Promise((resolve) => https.close(resolve));
     library.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -96,6 +99,7 @@ async function fixture(t, { readDelay = 0 } = {}) {
   }
   return {
     client,
+    downloads,
     library,
     source,
     identity,
@@ -113,6 +117,39 @@ async function fixture(t, { readDelay = 0 } = {}) {
     }
   };
 }
+test('HTTPS linked reads wait for verified NAS metadata then resume into the selected folder',async t=>{
+  let fail=false;
+  const f=await fixture(t,{downloadOptions:{
+    fetchAsset:async()=>new Response(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==','base64'),{headers:{'Content-Type':'image/png'}}),
+    fileHook(name){if(fail && name==='beforeMetadataExchange')throw Object.assign(Error('full'),{code:'ENOSPC'});}
+  }});
+  await f.discover();
+  f.library.write(db=>{
+    db.exec("INSERT INTO download_auth VALUES(1,'fixture')");
+    db.prepare('INSERT INTO works VALUES(?,?,?)').run(A,'旧名',JSON.stringify({id:A,name:'旧名',type:'images',author:{nickname:'作者'},images:[{index:0,urls:['https://p3.douyinpic.com/test']}]}));
+  });
+  await f.cmd('enqueue-download',{workIds:[A],selection:'missing'});
+  await f.downloads.run();
+  assert.equal(f.downloads.store.resources(A).length,2);
+  fail=true;
+  const batch=await f.start(total,{followFolders:['77']});
+  for(let i=0;i<500 && !f.library.read(db=>db.prepare('SELECT error FROM archive_state WHERE work_id=?').get(A)?.error);i++)await delay(10);
+  assert.equal((await f.client.query('read-job',{jobId:batch.jobId})).status,'finalizing');
+  assert.equal(f.calls.filter(call=>call.source.kind==='collection').length,0);
+  assert.equal(f.library.read(db=>db.prepare("SELECT status FROM read_finalizers WHERE work_id=?").get(A).status),'pending');
+  fail=false;
+  await f.cmd('control-read',{jobId:batch.jobId,action:'resume'});
+  let summary;
+  for(let i=0;i<800;i++){summary=await f.client.query('read-job',{jobId:batch.jobId});if(summary.status==='complete')break;await delay(10);}
+  assert.equal(summary.status,'complete',JSON.stringify(summary));
+  assert.equal(f.calls.filter(call=>call.source.kind==='collection').length,1);
+  assert.deepEqual(f.library.read(db=>db.prepare('SELECT status FROM read_finalizers WHERE work_id=? ORDER BY rowid').all(A)).map(row=>row.status),['complete','complete']);
+  const rows=f.downloads.store.resources(A);
+  assert.equal(rows.filter(row=>row.kind==='image').length,1);
+  const meta=rows.find(row=>row.key==='metadata');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.downloads.layout.media,meta.relative_path))).collectionId,'77');
+});
+
 test('HTTPS linked batch restores each relation and reports one unique work, with durable detail and idempotent start', async (t) => {
   const f = await fixture(t);
   await f.discover();

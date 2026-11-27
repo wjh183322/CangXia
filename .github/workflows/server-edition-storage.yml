@@ -5,6 +5,10 @@ on:
     branches: [codex/server-edition-full]
     paths:
       - 'server/**'
+      - 'scripts/cover-frame.py'
+      - 'electron/hd-cover.mjs'
+      - 'tests/cover-frame-test.py'
+      - 'feasibility/nas-b/cover-runtime.lock'
       - 'shared/server-identity.mjs'
       - 'tests/server-edition/**'
       - 'electron/server-client.mjs'
@@ -32,4 +36,10 @@ jobs:
       - run: npm ci --include=dev --ignore-scripts --no-audit --no-fund
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
       - run: node server/node_modules/playwright-core/cli.js install --with-deps chromium --only-shell
+      - name: Install the pinned cover matcher and verify the original golden
+        run: |
+          python3.12 -m venv "$RUNNER_TEMP/cover-runtime"
+          "$RUNNER_TEMP/cover-runtime/bin/pip" install --only-binary=:all: --require-hashes -r feasibility/nas-b/cover-runtime.lock
+          "$RUNNER_TEMP/cover-runtime/bin/python" -B tests/cover-frame-test.py
+          echo "CANGXIA_TEST_COVER_PYTHON=$RUNNER_TEMP/cover-runtime/bin/python" >> "$GITHUB_ENV"
       - run: npm test --prefix server

@@ -8,6 +8,19 @@ import { getSystemErrorName, promisify } from 'node:util';
 import { safeName } from '../electron/model.mjs';
 import { SourceError } from './source-error.mjs';
 
+export function currentHDCover(db, workId) {
+  const row = db
+    .prepare(
+      `SELECT h.body FROM hd_covers h
+    JOIN archive_resources v ON v.work_id=h.work_id AND v.key='video' AND v.sha256=h.video_sha
+    JOIN archive_resources c ON c.work_id=h.work_id AND c.key='cover' AND c.sha256=h.cover_sha
+    JOIN archive_resources output ON output.work_id=h.work_id AND output.key=json_extract(h.body,'$.key') AND output.sha256=json_extract(h.body,'$.sha256')
+    WHERE h.work_id=?`
+    )
+    .get(workId);
+  return row && JSON.parse(row.body);
+}
+
 const metadataName = '作品信息.json';
 const metadataEscrow = 'displaced.json';
 const tokenPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -280,6 +293,10 @@ export function planDestination({
   return validHome({ kind: author ? 'author' : 'collection', id: source.id, folder, workFolder });
 }
 
+export function archiveRevision(store, workId) {
+  return store.db.prepare('SELECT revision FROM archive_state WHERE work_id=?').get(workId)?.revision ?? 0;
+}
+
 function savedHome(store, workId) {
   const row = store.db.prepare('SELECT body FROM archive_homes WHERE work_id=?').get(workId);
   return row ? JSON.parse(row.body) : null;
@@ -287,8 +304,30 @@ function savedHome(store, workId) {
 function saveHome(db, workId, value) {
   db.prepare('INSERT OR REPLACE INTO archive_homes VALUES(?,?)').run(workId, JSON.stringify(value));
 }
+// Old libraries may not yet have a folder field from directory discovery.
+function collectionFolder(db, id, name) {
+  const assigned = new Set(['收藏']);
+  for (const row of db
+    .prepare("SELECT source_id,name,body FROM read_sources WHERE source_id LIKE 'folder:%' ORDER BY rowid")
+    .iterate()) {
+    const folderId = row.source_id.slice(7);
+    const label = safeName(row.name, 52);
+    const folder =
+      JSON.parse(row.body).folder ||
+      (assigned.has(label.toLowerCase()) ? label + '-' + folderId.slice(-6) : label);
+    if (folderId === id) return folder;
+    assigned.add(folder.toLowerCase());
+  }
+  return name && safeName(name, 52);
+}
+
 function sourceFor(store, work, saved) {
-  if (saved?.home.kind === 'author') return { ...saved.home, name: saved.collectionName };
+  if (saved?.home.kind === 'author') {
+    const row = store.db
+      .prepare('SELECT name FROM read_sources WHERE source_id=?')
+      .get('author:' + saved.home.id);
+    return { ...saved.home, name: row?.name || saved.collectionName };
+  }
   const ref = store.db
     .prepare(
       `SELECT m.source_id,s.name FROM source_members m LEFT JOIN read_sources s USING(source_id)
@@ -297,8 +336,29 @@ function sourceFor(store, work, saved) {
     )
     .get(work.id);
   if (ref?.source_id.startsWith('folder:'))
-    return { kind: 'collection', id: ref.source_id.slice(7), name: ref.name };
-  if (ref?.source_id.startsWith('author:'))
+    return {
+      kind: 'collection',
+      id: ref.source_id.slice(7),
+      name: ref.name,
+      folder: collectionFolder(store.db, ref.source_id.slice(7), ref.name)
+    };
+  if (saved?.home.kind === 'collection' && saved.home.id !== '__all__') {
+    const key = 'folder:' + saved.home.id;
+    const old = store.db.prepare('SELECT name,missing FROM read_sources WHERE source_id=?').get(key);
+    const complete = store.db
+      .prepare(
+        "SELECT 1 FROM read_steps WHERE source_id=? AND mode='full' AND outcome='end' AND status IN ('complete','finalizing') LIMIT 1"
+      )
+      .get(key);
+    if (old && (old.missing || !complete || ref?.source_id !== 'total'))
+      return {
+        kind: 'collection',
+        id: saved.home.id,
+        name: old.name,
+        folder: collectionFolder(store.db, saved.home.id, old.name)
+      };
+  }
+  if (!saved && ref?.source_id.startsWith('author:'))
     return { kind: 'author', id: ref.source_id.slice(7), name: ref.name };
   return { kind: 'total', id: '__all__', name: '收藏' };
 }
@@ -326,7 +386,11 @@ async function chooseHome({ store, work, saved, layout, guard }) {
     // A directory which isn't in our home ledger must never be adopted.
     owners.set(lower(homePath(home)), new Set(['external']));
     home = planDestination({ work, source, owners, existingHome });
-    if (await status(path.join(parent.file, home.workFolder))) throw review();
+    if (
+      (!existingHome || homePath(home) !== homePath(existingHome)) &&
+      (await status(path.join(parent.file, home.workFolder)))
+    )
+      throw review();
   }
   return { home, collectionName: collectionName(source), media };
 }
@@ -1058,19 +1122,42 @@ export async function recoverFileCommits({ store, layout, workId, jobId, guard }
             (!['queued', 'running'].includes(job.state) || !store.canPublishDownload?.(commit.body.jobId))
           );
         };
+        const hdChanged =
+          commit.body.hdInputs &&
+          ['video', 'cover'].some(
+            (key) =>
+              store.resources(commit.workId).find((r) => r.key === key)?.sha256 !== commit.body.hdInputs[key]
+          );
+        const obsolete =
+          hdChanged ||
+          (commit.body.archiveRevision !== undefined &&
+            commit.body.archiveRevision !== archiveRevision(store, commit.workId));
         const options = {
           store,
           layout,
           commit,
-          recoverOnly: isStopping(),
+          recoverOnly: isStopping() || obsolete,
           guard() {
             guard?.();
+            if (
+              commit.body.archiveRevision !== undefined &&
+              commit.body.archiveRevision !== archiveRevision(store, commit.workId)
+            )
+              throw problem('NAS_ARCHIVE_STALE', '作品信息已更新。');
             if (isStopping())
               throw problem('NAS_FILE_RECOVERY_PAUSED', 'The stopped job has no new file work to recover.');
             assertWorkFiles(store, commit.workId);
           }
         };
-        return await (commit.stage === 'moving' ? applyMove(options) : placeVerified(options));
+        const result = await (commit.stage === 'moving' ? applyMove(options) : placeVerified(options));
+        const cancelling =
+          commit.stage === 'moving' &&
+          commit.body.jobId &&
+          store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId)?.state ===
+            'cancelling';
+        if (!result && (obsolete || cancelling))
+          updateCommit(store, commit, commit.stage === 'moving' ? 'cancelled' : 'rejected');
+        return result;
       } catch (error) {
         if (error.code === 'NAS_FILE_RECOVERY_PAUSED') return null;
         if (error.code === 'NAS_FILE_REVIEW') markCommitForReview(store, commit);
@@ -1097,11 +1184,16 @@ async function applyMove({ store, layout, commit, recoverOnly = false, guard }) 
   let previous = await status(from);
   let placed = await status(to);
   if (previous) {
-    if (recoverOnly) return null;
     if (!previous.isDirectory() || !same(previous, body.before.identity) || placed) throw review();
+    if (recoverOnly) return null;
     await retry(async () => {
-      if (!same(await status(from), body.before.identity) || (await status(to))) throw review();
       store.fileHook('beforeFileMove', { workId, file: to });
+      if (!same(await status(from), body.before.identity) || (await status(to))) throw review();
+      if (
+        !same(await status(oldParent.file), idOf(oldParent.stat)) ||
+        !same(await status(nextParent.file), idOf(nextParent.stat))
+      )
+        throw review();
       guard?.();
       try {
         await moveExclusive(from, to, { directory: true });
@@ -1173,6 +1265,11 @@ async function writeMetadata({ store, layout, work, home, jobId, signal, guard }
     coAuthors: work.coAuthors ?? [],
     tags: work.tags,
     rawTags: work.rawTags,
+    localTags: store.db
+      .prepare('SELECT tag FROM work_tags WHERE work_id=? ORDER BY rowid')
+      .all(workId)
+      .map((row) => row.tag),
+    hdCover: currentHDCover(store.db, workId) ?? undefined,
     publishedAt: work.publishedAt,
     originalURL: work.url,
     music: work.music,
@@ -1204,6 +1301,7 @@ async function writeMetadata({ store, layout, work, home, jobId, signal, guard }
     resourceIdentity: sha256,
     guard
   });
+  stage.commit.body.archiveRevision = archiveRevision(store, workId);
   const file = path.join(stage.dir, 'payload.json');
   store.fileHook('beforeFileWrite', { workId, kind: 'metadata', file });
   const existing = await status(file);
@@ -1246,38 +1344,58 @@ export async function finalizeWorkFiles({
   signal,
   guard: assertWriter
 }) {
+  const revision = archiveRevision(store, workId);
   const work = store.work(workId);
   const saved = savedHome(store, workId);
   if (!work || !saved) throw missing();
   const guard = () => {
     signal?.throwIfAborted();
     assertWriter?.();
+    if (archiveRevision(store, workId) !== revision)
+      throw problem('NAS_ARCHIVE_STALE', '作品信息已更新，请重新整理。');
     assertWorkFiles(store, workId);
   };
   try {
     guard();
     if (store.fileCommits(workId).some((commit) => commit.stage === 'review')) throw review();
-    const moving = store.fileCommits(workId).find((entry) => entry.stage === 'moving');
-    if (moving) await applyMove({ store, layout, commit: moving, guard });
-    const before = savedHome(store, workId);
-    const target = await chooseHome({ store, layout, work, saved: before, guard });
-    const after = { home: target.home, identity: before.identity, collectionName: target.collectionName };
-    guard();
-    if (homePath(before.home) !== homePath(after.home)) {
-      const commit = {
-        id: randomUUID(),
-        workId,
-        resourceId: null,
-        stage: 'moving',
-        body: { before, after, kind: 'move', jobId }
-      };
-      updateCommit(store, commit);
-      await applyMove({ store, layout, commit, guard });
-    } else if (JSON.stringify(before) !== JSON.stringify(after)) {
-      store.withWrite((db) => saveHome(db, workId, after, store.nextRevision()));
-    }
+    const after = await withWorkFiles(layout, '\0home-allocation', async () => {
+      guard();
+      const moving = store.fileCommits(workId).find((entry) => entry.stage === 'moving');
+      if (moving) {
+        const stale = moving.body.archiveRevision !== undefined && moving.body.archiveRevision !== revision;
+        const settled = await applyMove({ store, layout, commit: moving, recoverOnly: stale, guard });
+        if (!settled && stale) updateCommit(store, moving, 'cancelled');
+      }
+      const before = savedHome(store, workId);
+      const target = await chooseHome({ store, layout, work, saved: before, guard });
+      const after = { home: target.home, identity: before.identity, collectionName: target.collectionName };
+      guard();
+      if (homePath(before.home) !== homePath(after.home)) {
+        const owned = await directory(layout.media, homePath(before.home));
+        if (!same(owned.stat, before.identity)) throw review();
+        const assets = store.resources(workId);
+        const names = new Set(assets.map((row) => path.posix.basename(row.relative_path)));
+        if ((await fs.readdir(owned.file)).some((name) => !names.has(name))) throw review();
+        for (const asset of assets)
+          await resolveResource({ store, layout, workId, key: asset.key, verify: true, signal });
+        guard();
+        const commit = {
+          id: randomUUID(),
+          workId,
+          resourceId: null,
+          stage: 'moving',
+          body: { before, after, kind: 'move', jobId, archiveRevision: revision }
+        };
+        updateCommit(store, commit);
+        await applyMove({ store, layout, commit, guard });
+      } else if (JSON.stringify(before) !== JSON.stringify(after)) {
+        store.withWrite((db) => saveHome(db, workId, after, store.nextRevision()));
+      }
+      return after;
+    });
     await writeMetadata({ store, layout, work, home: after, jobId, signal, guard });
-    return success();
+    guard();
+    return { ...success(), home: after.home };
   } catch (error) {
     return { ok: false, pending: true, errors: [{ workId, ...fileReason(error) }] };
   }

@@ -1,4 +1,9 @@
 import { planDownloads } from '../electron/download-selection.mjs';
+import { createArchive } from './archive.mjs';
+import { assessCover } from './covers.mjs';
+import { comparableResolution } from '../electron/hd-cover.mjs';
+import { createHash } from 'node:crypto';
+import { lstatSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
 import { crc32 } from 'node:zlib';
@@ -12,6 +17,8 @@ import { avifDimensions } from './avif-dimensions.mjs';
 import { audioInfo } from '../electron/audio-info.mjs';
 import {
   assertFileStage,
+  assertResourceCurrent,
+  currentHDCover,
   assertWorkFiles,
   cleanFileStages,
   ensureHome,
@@ -190,6 +197,7 @@ function refreshCandidates(job, work) {
       if (expected.sourceIdentity !== candidate.sourceIdentity) throw needsReview();
       continue;
     }
+    if (job.hdInputs && expected.key === 'cover') continue;
     const before = job.candidates[expected.key];
     if (!before.length && ['video', 'cover'].includes(expected.key)) continue;
     if (candidateDigest(before) !== candidateDigest(candidate.candidates)) throw needsReview();
@@ -490,7 +498,7 @@ function preview(db, ids) {
     "SELECT 1 FROM media_files WHERE work_id=? AND lower(relative_path) NOT LIKE '%.json' LIMIT 1"
   );
   const completed = db.prepare(
-    "SELECT 1 FROM download_jobs WHERE work_id=? AND state='complete' AND id NOT LIKE 'audio:%' LIMIT 1"
+    "SELECT 1 FROM download_jobs WHERE work_id=? AND state='complete' AND id NOT LIKE 'audio:%' AND id NOT LIKE 'hd:%' LIMIT 1"
   );
   for (const id of selected) {
     if (typeof id !== 'string' || !/^\d{1,40}$/.test(id)) throw invalid();
@@ -525,10 +533,12 @@ export function createDownloads({
   source,
   fetchAsset = globalThis.fetch,
   fileHook,
-  checkpointBytes
+  checkpointBytes,
+  coverPython
 }) {
   const store = openDownloadStore({ library, root, fileHook }),
     { db, layout } = store;
+  const archive = createArchive(store);
   store.canPublishDownload = (id) => {
     const job = getJob(db, id);
     if (!job) return false;
@@ -556,7 +566,11 @@ export function createDownloads({
       return job;
     });
   function enqueue(conn, ids, scope = 'unsaved') {
-    if (!Array.isArray(ids) || !ids.length || !['unsaved', 'missing', 'repair', 'audio'].includes(scope))
+    if (
+      !Array.isArray(ids) ||
+      !ids.length ||
+      !['unsaved', 'missing', 'repair', 'audio', 'repair-cover'].includes(scope)
+    )
       throw invalid();
     const auth = binding(conn);
     if (source?.account()?.uid !== auth.uid) throw authRequired();
@@ -568,15 +582,22 @@ export function createDownloads({
           ? [...groups.unsaved, ...groups.partial]
           : scope === 'repair'
             ? [...groups.partial, ...groups.complete, ...groups.unsaved]
-            : ids.filter(
-                (id) => recordedWork(conn, id).type === 'images' && !groups.unavailable.includes(id)
-              );
+            : scope === 'repair-cover'
+              ? [...new Set(ids)].filter(
+                  (id) =>
+                    recordedWork(conn, id).type === 'video' &&
+                    conn.prepare("SELECT 1 FROM archive_resources WHERE work_id=? AND key='video'").get(id)
+                )
+              : ids.filter(
+                  (id) => recordedWork(conn, id).type === 'images' && !groups.unavailable.includes(id)
+                );
     let existing = 0,
       queued = 0,
       first,
       removed = 0;
     for (const workId of eligible) {
-      const jobId = scope === 'audio' ? 'audio:' + workId : workId;
+      const jobId =
+        scope === 'audio' ? 'audio:' + workId : scope === 'repair-cover' ? 'hd:' + workId : workId;
       const old = getJob(conn, jobId);
       first ??= jobId;
       if (!old && conn.prepare('SELECT 1 FROM download_jobs WHERE id=?').get(jobId)) throw needsReview();
@@ -604,6 +625,16 @@ export function createDownloads({
         ...frozen,
         auth,
         audioOnly: scope === 'audio',
+        ...(scope === 'repair-cover' && {
+          hdInputs: Object.fromEntries(
+            conn
+              .prepare(
+                "SELECT key,sha256 FROM archive_resources WHERE work_id=? AND key IN ('video','cover')"
+              )
+              .all(workId)
+              .map((row) => [row.key, row.sha256])
+          )
+        }),
         state: 'queued',
         completedKeys: [],
         filesComplete: false,
@@ -744,7 +775,7 @@ export function createDownloads({
     });
   }
 
-  async function downloadOne(job, target, home, signal) {
+  async function downloadOne(job, target, home, signal, candidateOnly = false) {
     const existing = await resolveResource({
       store,
       layout,
@@ -759,7 +790,7 @@ export function createDownloads({
       !!existing &&
       (existing.resourceIdentity !== target.identity ||
         (!target.sourceIdentity && existing.observationIdentity !== observationIdentity));
-    if (existing) {
+    if (existing && !candidateOnly) {
       if (!existing.missing && !changed) return;
       change(job.id, (current) => {
         current.completedKeys = current.completedKeys.filter((key) => key !== target.key);
@@ -782,7 +813,7 @@ export function createDownloads({
         layout,
         jobId: job.id,
         workId: job.workId,
-        key: target.key,
+        key: candidateOnly ? 'cover-hd' : target.key,
         kind: target.kind,
         resourceIdentity: target.identity,
         observationIdentity,
@@ -869,6 +900,7 @@ export function createDownloads({
     requireWriter(job, signal);
     const area = ({ dimensions }) => (dimensions.width ?? 0) * (dimensions.height ?? 0);
     const best = comparisons.toSorted((a, b) => area(b) - area(a))[0];
+    if (candidateOnly) return best;
     const previous = existing
       ? {
           missing: !!existing.missing,
@@ -919,6 +951,147 @@ export function createDownloads({
     });
   }
 
+  async function repairCover(job, home, signal) {
+    const { workId } = job;
+    const resolve = (key) => resolveResource({ store, layout, workId, key, verify: true, signal });
+    const video = await resolve('video'),
+      cover = await resolve('cover');
+    if (!video || !cover) throw failure('NAS_FILE_MISSING', '请先补齐视频及普通封面。');
+    if (video.sha256 !== job.hdInputs.video || cover.sha256 !== job.hdInputs.cover) throw needsReview();
+    const guard = () => {
+      requireWriter(job, signal);
+      for (const asset of [video, cover])
+        assertResourceCurrent({ store, resource: asset, stat: lstatSync(asset.file, { bigint: true }) });
+    };
+    const old = currentHDCover(db, workId);
+    if (old && (await resolve(old.key))?.sha256 === old.sha256) return;
+    const frozenVideo = job.expected.find((item) => item.key === 'video');
+    if (
+      video.resourceIdentity !== frozenVideo.identity ||
+      (!frozenVideo.sourceIdentity && video.observationIdentity !== candidateDigest(job.candidates.video))
+    )
+      throw needsReview();
+    const target = job.expected.find((item) => item.key === 'cover');
+    const identity = contentHash(job.hdInputs);
+    const publish = async ({ stage, result, mime, ext, dimensions }, source) => {
+      guard();
+      const existing = await resolveResource({
+        store,
+        layout,
+        workId,
+        key: 'cover-hd',
+        verify: true,
+        allowMissing: true,
+        signal
+      });
+      if (!existing || existing.sha256 !== result.sha256 || existing.missing) {
+        stage.commit.body.hdInputs = job.hdInputs;
+        const previous = existing && {
+          missing: !!existing.missing,
+          superseded: !existing.missing,
+          size: existing.size,
+          identity: existing.identity,
+          mtimeNs: existing.mtimeNs,
+          relative: existing.relative_path,
+          revision: existing.revision,
+          sha256: existing.sha256
+        };
+        await verifyAndPlace({
+          store,
+          layout,
+          stage,
+          transferred: result,
+          mime,
+          filename: (source === 'platform' ? '高清封面-' : '视频截帧-') + result.sha256.slice(0, 16) + ext,
+          home,
+          previous,
+          signal,
+          guard,
+          dimensions: { width: dimensions.width, height: dimensions.height }
+        });
+      }
+      guard();
+      return {
+        key: 'cover-hd',
+        source,
+        sha256: result.sha256,
+        width: dimensions.width,
+        height: dimensions.height
+      };
+    };
+    const result = await assessCover({
+      store,
+      video,
+      cover,
+      signal,
+      guard,
+      python: coverPython,
+      async platform(resolution) {
+        let best;
+        try {
+          if (source?.readDownloadDetail) job = await refresh(job, signal);
+          best = await downloadOne(job, target, home, signal, true);
+        } catch (error) {
+          guard();
+          if (
+            storage.has(error.code) ||
+            authErrors.has(error.code) ||
+            [
+              'SOURCE_RATE_LIMITED',
+              'NAS_MEDIA_SET_REVIEW',
+              'NAS_FILE_REVIEW',
+              'NAS_MEDIA_TARGET',
+              'NAS_FILE_OPERATION'
+            ].includes(error.code)
+          )
+            throw error;
+        }
+        if (best && comparableResolution(best.dimensions, resolution)) return publish(best, 'platform');
+      },
+      async publish(bytes, dimensions) {
+        const sha256 = createHash('sha256').update(bytes).digest('hex');
+        const stage = await openFileStage({
+          store,
+          layout,
+          jobId: job.id,
+          workId,
+          key: 'cover-hd',
+          kind: 'image',
+          resourceIdentity: identity,
+          guard
+        });
+        const file = path.join(stage.dir, 'payload.png');
+        const handle = await open(file, 'wx', 0o600);
+        try {
+          trackStagedFile(store, stage, file, await handle.stat({ bigint: true }));
+          guard();
+          await handle.writeFile(bytes);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        return publish(
+          { stage, result: { file, size: bytes.length, sha256 }, mime: 'image/png', ext: '.png', dimensions },
+          'video_frame'
+        );
+      }
+    });
+    if (!result.accepted) {
+      const pending = await cleanFileStages({ store, layout, workId, jobId: job.id });
+      if (pending)
+        change(job.id, (current) => {
+          current.cleanupPending = true;
+        });
+      throw failure('NAS_COVER_REJECTED', result.message);
+    }
+    store.withWrite((conn) => {
+      guard();
+      conn
+        .prepare('INSERT OR REPLACE INTO hd_covers VALUES(?,?,?,?)')
+        .run(workId, video.sha256, cover.sha256, JSON.stringify(result));
+    });
+  }
+
   async function saveJob(job, signal) {
     const { workId } = job;
     assertWorkFiles(store, workId);
@@ -928,7 +1101,14 @@ export function createDownloads({
     const home = await ensureHome({ store, layout, workId });
 
     let refreshed = false;
-    for (const target of job.expected) {
+    if (job.hdInputs) {
+      change(job.id, (current) => {
+        current.phase = 'matching';
+      });
+      await withWorkFiles(layout, '\0hd-matching', () => repairCover(job, home, signal));
+      for (const item of job.expected) saveProgress(job.id, item);
+    }
+    for (const target of job.hdInputs ? [] : job.expected) {
       requireWriter(job, signal);
       try {
         await downloadOne(job, target, home, signal);
@@ -1066,6 +1246,7 @@ export function createDownloads({
         wake = null;
       }
       await Promise.all([...active.values()].map((s) => s.task));
+      if (!closing) await archive.run();
     })().finally(() => {
       task = null;
       if (rerun && !closing) return run();
@@ -1074,6 +1255,7 @@ export function createDownloads({
   }
   return {
     enqueue,
+    archive,
     control,
     preview: (conn, ids) => preview(conn, ids).report,
     page: downloadPage,
@@ -1087,6 +1269,7 @@ export function createDownloads({
       wake?.();
       for (const slot of active.values()) slot.controller.abort();
       try {
+        await archive.close();
         await task;
       } finally {
         store.close();

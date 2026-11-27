@@ -233,7 +233,7 @@ function stopExpired(db, grant) {
     if (step) stepStatus(db, step.id, 'paused', '控制端已离线。');
   }
 }
-export function createReadJobs({ source, readDelay = 1100 }) {
+export function createReadJobs({ source, readDelay = 1100, archive }) {
   let live;
   function start(db, { payload: p }, { grant }) {
     const { uid, authEpoch } = boundIdentity(db, source);
@@ -392,7 +392,7 @@ export function createReadJobs({ source, readDelay = 1100 }) {
     if (step.status === 'review' && p.action !== 'confirm' && !terminalAuthorReview)
       throw reject('本轮返回数量明显减少，请确认采用此次对照。');
     if (p.action === 'confirm' && step.status !== 'review') throw reject();
-    if (step.status === 'finalizing' && unfinishedArchive(db, step)) throw reject('NAS 必要整理仍未完成。');
+    if (!archive && step.status === 'finalizing' && unfinishedArchive(db, step)) throw reject('NAS 必要整理仍未完成。');
     if (run) {
       if (!run.active) {
         const latest = db
@@ -621,9 +621,26 @@ export function createReadJobs({ source, readDelay = 1100 }) {
     while (!stop.aborted) {
       let work;
       try {
+        const pending = session.read(db => {
+          const job = jobRow(db,id);
+          return job?.status === 'finalizing' && job.owner_generation === grant.generation && job.owner_boot === grant.bootId ? currentStep(db,id) : null;
+        });
+        if (pending) {
+          if (!archive) return;
+          await archive.run(pending.source_id, stop);
+          if (stop.aborted) return;
+          const resumed = session.write(db => {
+            const job = jobRow(db,id);
+            if (job?.status !== 'finalizing' || job.owner_generation !== grant.generation || job.owner_boot !== grant.bootId || running(db) || unfinishedArchive(db,pending)) return false;
+            batchStatus(db,id,'running');
+            stepStatus(db,pending.id,'running');
+            return true;
+          });
+          if (!resumed) return;
+        }
         work = session.write((db) => prepare(db, owned(db)));
         if (!work) {
-          if (session.read((db) => jobRow(db, id).status) !== 'running') return;
+          if (!session.read(db => ['running', ...(archive ? ['finalizing'] : [])].includes(jobRow(db,id).status))) return;
           continue;
         }
         if (work.workId) {
@@ -729,7 +746,13 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       live = worker;
       const signal = AbortSignal.any([controller.signal, session.signal]);
       void execute(session, grant, id, signal).finally(() => {
-        if (live === worker) live = null;
+        if (live !== worker) return;
+        live = null;
+        // Resume may have arrived while the previous worker was draining finalizers.
+        if (!signal.aborted) {
+          try { if (session.read(db=>jobRow(db,id)?.status)==='running') this.wake(session,grant,id); }
+          catch { /* The next lease can resume from the committed boundary. */ }
+        }
       });
     }
   };

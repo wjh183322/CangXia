@@ -412,7 +412,7 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6, 7, 8, 9])
+for (const version of [3, 4, 5, 6, 7, 8, 9, 10])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
     const {
@@ -424,7 +424,7 @@ for (const version of [3, 4, 5, 6, 7, 8, 9])
       upgradeV3,
       upgradeV4,
       upgradeV5,
-      upgradeV6,upgradeV7,upgradeV8
+      upgradeV6,upgradeV7,upgradeV8,upgradeV9
     } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -450,6 +450,7 @@ for (const version of [3, 4, 5, 6, 7, 8, 9])
     if (version>=7)db.exec(upgradeV6);
     if (version>=8)db.exec(upgradeV7);
     if(version>=9)db.exec(upgradeV8);
+    if(version>=10)db.exec(upgradeV9);
     if (version === 7) {
       db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
       db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();
@@ -491,6 +492,9 @@ for (const version of [3, 4, 5, 6, 7, 8, 9])
     db.exec(
       "INSERT INTO source_members(source_id,work_id,position) VALUES('folder:77','29',7); INSERT INTO work_tags VALUES('29','manual')"
     );
+    if (version===10) {
+      db.prepare('INSERT INTO archive_homes VALUES(?,?)').run('29',JSON.stringify({home:{kind:'collection',id:'77',folder:'旧夹',workFolder:'原作品'},identity:{dev:'1',ino:'42'},collectionName:'旧夹'}));
+    }
     db.close();
     const bytes = fs.readFileSync(file);
     const preview = inspectUpgrade(root, expectedId);
@@ -512,6 +516,10 @@ for (const version of [3, 4, 5, 6, 7, 8, 9])
     snapshot.close();
     const upgraded = openLibrary({ root, expectedId });
     t.after(() => upgraded.close());
+    if (version===10) {
+      assert.equal(upgraded.read(db=>db.prepare("SELECT revision=completed AS clean FROM archive_state WHERE work_id='29'").get().clean),1);
+      assert.equal(upgraded.read(db=>JSON.parse(db.prepare("SELECT body FROM archive_homes WHERE work_id='29'").get().body).home.folder),'旧夹');
+    }
     if (version === 7) {
       const { jobSummary } = await import('../../server/read-history.mjs');
       const old = upgraded.read((db) => jobSummary(db, 'old-group'));

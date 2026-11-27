@@ -86,9 +86,9 @@ export function createSessionService({
   const bootId = randomUUID(),
     libraryId = library.libraryId;
   const discovery = createSourceOperations();
-  const jobs = createReadJobs({ source, readDelay });
+  const jobs = createReadJobs({ source, readDelay, archive: downloads?.archive });
   if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
-    'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
+    'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
   const mutations = new Map(
     Object.entries({
       'start-read': jobs.start,
@@ -325,7 +325,10 @@ export function createSessionService({
       return createReadStore({ session: service.sourceSession(who, grant), browser: source });
     },
     sourceOperation(who, grant, action, payload) {
-      return discovery.call(source, service.sourceSession(who, grant), action, payload);
+      return discovery.call(source, service.sourceSession(who, grant), action, payload).then(result => {
+        if(downloads) void downloads.run().catch(()=>{});
+        return result;
+      });
     },
     sourceSession(who, grant) {
       const signal = service.signal(who, grant);
@@ -383,7 +386,7 @@ export function createSessionService({
       });
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
-      if(downloads&&['enqueue-download','control-download','catalogue-action'].includes(command.kind))void downloads.run().catch(()=>{});
+      if(downloads&&['enqueue-download','control-download','catalogue-action','set-tags','remove-membership','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
       return receipt;
     },
     receipt(who, grant, operationId) {

@@ -8,7 +8,7 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
 export const APPLICATION_ID = 0x43585346;
-export const CURRENT_SCHEMA = 10;
+export const CURRENT_SCHEMA = 11;
 export const isUuid = (value) =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -29,6 +29,7 @@ export const upgradeV6 = fs.readFileSync(new URL('./schema/v7.sql', import.meta.
 export const upgradeV7 = fs.readFileSync(new URL('./schema/v8.sql', import.meta.url), 'utf8');
 export const upgradeV8 = fs.readFileSync(new URL('./schema/v9.sql', import.meta.url), 'utf8');
 export const upgradeV9 = fs.readFileSync(new URL('./schema/v10.sql', import.meta.url), 'utf8');
+export const upgradeV10 = fs.readFileSync(new URL('./schema/v11.sql', import.meta.url), 'utf8');
 const catalog = (db) =>
   db
     .prepare(
@@ -58,6 +59,8 @@ reference.exec(upgradeV8);
 schemas.set(9, JSON.stringify(catalog(reference)));
 reference.exec(upgradeV9);
 schemas.set(10, JSON.stringify(catalog(reference)));
+reference.exec(upgradeV10);
+schemas.set(11, JSON.stringify(catalog(reference)));
 reference.close();
 
 const foreign = () => Error('The mounted volume or database does not match the formal library.');
@@ -317,6 +320,7 @@ function initialize(root, id) {
     db.exec(upgradeV7);
     db.exec(upgradeV8);
     db.exec(upgradeV9);
+    db.exec(upgradeV10);
     db.prepare('INSERT INTO library_identity VALUES (1,?,?)').run(APP_ID, id);
     db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${CURRENT_SCHEMA}; COMMIT`);
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') throw Error('WAL unavailable.');
