@@ -15,6 +15,8 @@
 
 任务 05–07 已通过独立审查。按来源恢复和排序、指定断点的读取交接、可逐件查看的恢复日志、正式客户端分页目录和跨页选择已有隔离回归。仅涉及界面的选择确认不代表对应下载或删除执行器已经交付。
 
+任务 08–10 已通过独立审查。测试覆盖进程中断后的下载续传与登记、目录移动及高清封面恢复、正式 Windows 视频拖动、配乐、缓存锁定与平铺导出。媒体测试使用隔离服务和合成媒体；实体双机及真实异地性能仍需正式候选现场验收。
+
 ## Global Constraints
 
 - 在 `codex/server-edition-full` 开发，业务和界面对照提交 `08e6436522a3828211e9c32b51f90d7d830b4fa8`。保留 main、备份版、既有 NAS 版、试验分支及试验镜像。
@@ -169,7 +171,7 @@ assert.equal(openedUrl,expectedDouyinUrl);
 
 **文件与接口**　新增 server/downloads.mjs、server/files.mjs；对照 feasibility/nas-b/src/downloads.mjs、files.mjs、electron/download-selection.mjs、resumable-transfer.mjs；修改 src/main.jsx 的队列操作。测试文件 `tests/server-edition/downloads.test.mjs`。enqueue({workIds,selection,operationId})、controlDownload({jobId,action,operationId})、getDownloadPage(query)；文件提交记录关联作品、资源、临时文件身份、大小及摘要。
 
-- [ ] 在测试文件加入 `downloads` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `downloads` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(reconnect.jobId,first.jobId);
@@ -178,16 +180,16 @@ assert.equal(duplicateAssetFetches,0);
 assert.equal(foreignFileTouched,false);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/downloads.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。入队后 Windows 退出仍继续，完成前按选择清单逐一校验与登记；同资源可证实时 Range 续传，改变身份只重传受影响项。持久化下载并发、进度、补齐及取消状态。模拟文件已就位未登记、磁盘满、晚到回调、取消清理失败及重新打开；复查图集每一张、配乐、普通封面与视频。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: downloads`）。
+- [x] 运行 `node --test tests/server-edition/downloads.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。入队后 Windows 退出仍继续，完成前按选择清单逐一校验与登记；同资源可证实时 Range 续传，改变身份只重传受影响项。持久化下载并发、进度、补齐及取消状态。模拟文件已就位未登记、磁盘满、晚到回调、取消清理失败及重新打开；复查图集每一张、配乐、普通封面与视频。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: downloads`）。
 
 ### 09．归档整理、普通封面和高清匹配
 
 **文件与接口**　新增 server/archive.mjs、server/covers.mjs；对照 electron/local-reconcile.mjs、hd-cover.mjs、scripts/cover-frame.py、feasibility/nas-b/src/cover-adapter.mjs。测试文件 `tests/server-edition/archive.test.mjs`。reconcileArchive({workId,expectedRevision,guard}) → {home,pending,errors}；assessCover({video,cover,signal}) → 原算法结果。
 
-- [ ] 在测试文件加入 `archive` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `archive` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(secondHome,firstHome);
@@ -196,16 +198,16 @@ assert.deepEqual(nas.crop,windows.crop);
 assert.equal(staleExportOverwrote,false);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/archive.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。按既有归档 home、作者/收藏目录规则和实际对照样本处理重名、改名、移夹，跨作业互斥并记录可恢复动作；共享媒体只保留一套。作品信息 JSON 原子发布，失败保留必要收尾；使用原算法与固定依赖，覆盖媒体已换版本、无法可靠匹配和外部变动。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: archive`）。
+- [x] 运行 `node --test tests/server-edition/archive.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。按既有归档 home、作者/收藏目录规则和实际对照样本处理重名、改名、移夹，跨作业互斥并记录可恢复动作；共享媒体只保留一套。作品信息 JSON 原子发布，失败保留必要收尾；使用原算法与固定依赖，覆盖媒体已换版本、无法可靠匹配和外部变动。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: archive`）。
 
 ### 10．媒体流、临时缓存、配乐与独立导出
 
 **文件与接口**　新增 server/media.mjs、electron/server-media.mjs；修改 src/work-audio-ui.jsx、flat-download-ui.jsx、electron/flat-downloads.mjs、media-cache.mjs、file-browser.mjs；使用 media-http.mjs 的 Range 语义。测试文件 `tests/server-edition/media-export.test.mjs`。getMedia({resourceId,version,range,session})；exportSelection({ids,directory,includeCover})；Windows 主进程管理缓存键 {libraryId,resourceId,version}。
 
-- [ ] 在测试文件加入 `media-export` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `media-export` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(seek.status,206);
@@ -214,10 +216,10 @@ assert.equal(cacheAfterSwitch.matches,false);
 assert.deepEqual(nasDownloadsAfterExport,nasDownloadsBefore);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/media-export.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。查看大图/视频、配乐预览保存和播放、拖动时局部读取；版本变化和断线时中断旧流。平铺导出到用户选定本机目录，维持顺序、防覆盖、图集和可选封面；可打开导出和缓存目录。移除普通下载的本地作品目录快捷方式。清缓存与退出仅处理对应本机任务。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: media-export`）。
+- [x] 运行 `node --test tests/server-edition/media-export.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。查看大图/视频、配乐预览保存和播放、拖动时局部读取；版本变化和断线时中断旧流。平铺导出到用户选定本机目录，维持顺序、防覆盖、图集和可选封面；可打开导出和缓存目录。移除普通下载的本地作品目录快捷方式。清缓存与退出仅处理对应本机任务。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: media-export`）。
 
 ### 11．删除范围、绿联回收站与恢复
 
