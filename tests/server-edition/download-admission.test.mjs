@@ -44,9 +44,10 @@ function fixture(t){
       return new Response(png,{headers:{'content-type':'image/png','content-length':String(png.length)}});
     }});
     const sessions=createSessionService({library,source,downloads}),who={deviceId:'desktop',accountId};
-    let grant;
-    const api={library,source,downloads,acquire(){grant=sessions.acquire(who,{deviceId:who.deviceId,instanceId:randomUUID(),operationId:randomUUID()});},
-      verify:()=>source.verifyAccount(sessions.sourceSession(who,grant)),release:()=>sessions.release(who,grant,randomUUID()),
+    let grant,heartbeat;
+    const api={library,source,downloads,acquire(){grant=sessions.acquire(who,{deviceId:who.deviceId,instanceId:randomUUID(),operationId:randomUUID()});
+      heartbeat=setInterval(()=>{grant=sessions.renew(who,grant);},3000);heartbeat.unref();},
+      verify:()=>source.verifyAccount(sessions.sourceSession(who,grant)),release:()=>{clearInterval(heartbeat);return sessions.release(who,grant,randomUUID());},
       query:(kind,payload)=>sessions.query(who,grant,{kind,payload}),
       command:(kind,payload)=>sessions.command(who,grant,{kind,payload,entityVersion:0,operationId:randomUUID()}),
       admit(){const v=api.query('list-works',{source:'total'});
@@ -54,7 +55,7 @@ function fixture(t){
       state:id=>library.read(db=>({...db.prepare('SELECT state,auth FROM download_batches WHERE id=?').get(id),
         queued:db.prepare("SELECT count(*) n FROM download_batch_items WHERE batch=? AND state='queued'").get(id).n,
         changed:db.prepare("SELECT count(*) n FROM download_batch_items WHERE batch=? AND state='changed'").get(id).n})),
-      async close(){if(!active.delete(api))return;await sessions.close();await downloads.close();await source.close();library.close();}
+      async close(){if(!active.delete(api))return;clearInterval(heartbeat);await sessions.close();await downloads.close();await source.close();library.close();}
     };
     active.add(api);return api;
   }
