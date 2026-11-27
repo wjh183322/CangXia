@@ -19,7 +19,8 @@ jobs:
         with: {python-version: '3.12'}
       - run: npm ci
       - run: npm ci --prefix server --ignore-scripts
-      - run: python -m pip install --only-binary=:all: numpy==2.2.6 opencv-python-headless==4.11.0.86
+      - run: |
+          python -m pip install --only-binary=:all: numpy==2.2.6 opencv-python-headless==4.11.0.86
       - run: node server/node_modules/playwright-core/cli.js install chromium
       - run: npm run test:ui
       - run: npm run test:layout
