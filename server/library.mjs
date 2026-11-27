@@ -8,7 +8,7 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
 export const APPLICATION_ID = 0x43585346;
-export const CURRENT_SCHEMA = 13;
+export const CURRENT_SCHEMA = 14;
 export const isUuid = (value) =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -32,6 +32,7 @@ export const upgradeV9 = fs.readFileSync(new URL('./schema/v10.sql', import.meta
 export const upgradeV10 = fs.readFileSync(new URL('./schema/v11.sql', import.meta.url), 'utf8');
 export const upgradeV11 = fs.readFileSync(new URL('./schema/v12.sql', import.meta.url), 'utf8');
 export const upgradeV12 = fs.readFileSync(new URL('./schema/v13.sql', import.meta.url), 'utf8');
+export const upgradeV13 = fs.readFileSync(new URL('./schema/v14.sql', import.meta.url), 'utf8');
 const catalog = (db) =>
   db
     .prepare(
@@ -67,6 +68,8 @@ reference.exec(upgradeV11);
 schemas.set(12, JSON.stringify(catalog(reference)));
 reference.exec(upgradeV12);
 schemas.set(13, JSON.stringify(catalog(reference)));
+reference.exec(upgradeV13);
+schemas.set(14, JSON.stringify(catalog(reference)));
 reference.close();
 
 const foreign = () => Error('The mounted volume or database does not match the formal library.');
@@ -274,7 +277,7 @@ export function describe(layout, db) {
     to: CURRENT_SCHEMA,
     spaceRequired: pages * pageSize * 4 + 1048576,
     reason:
-      from === 9 ? '保存 NAS 下载队列、资源清单及可恢复的文件提交记录。' : from === 7
+      from === 13 ? '建立删除范围、回收站验证及逐项恢复回执。' : from === 9 ? '保存 NAS 下载队列、资源清单及可恢复的文件提交记录。' : from === 7
         ? '保存用户选择的续读来源及每轮当时的历史数量。旧日志缺失的累计数量保留为未知。'
         : '建立独立来源排序、归属移除版本、恢复明细、来源读取断点、指定来源续读和当轮计数。版本 1 的升级另建立路径唯一约束及升级回执。',
     impact: '只修改数据库结构，归档媒体保持原位。',
@@ -329,6 +332,7 @@ function initialize(root, id) {
     db.exec(upgradeV10);
     db.exec(upgradeV11);
     db.exec(upgradeV12);
+    db.exec(upgradeV13);
     db.prepare('INSERT INTO library_identity VALUES (1,?,?)').run(APP_ID, id);
     db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${CURRENT_SCHEMA}; COMMIT`);
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') throw Error('WAL unavailable.');

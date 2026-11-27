@@ -7,6 +7,7 @@ import {
   resolveResource,
   withWorkFiles
 } from './files.mjs';
+import {removalOwnsFiles} from './removal.mjs';
 import { SourceError } from './source-error.mjs';
 
 export function createArchive(store) {
@@ -26,6 +27,7 @@ export function createArchive(store) {
     const jobId = 'archive:' + workId;
     const tickets = archived.all(workId);
     const guard = () => {
+      if(removalOwnsFiles(db,workId))throw new SourceError('NAS_REMOVAL_BUSY','作品正在处理删除或恢复。');
       stopping.signal.throwIfAborted();
       signal?.throwIfAborted();
       owner?.();

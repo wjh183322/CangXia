@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 export function registerCatalogueHandlers({ ipc, client }) {
   const command = (kind, payload) =>
     client.command({ kind, payload, operationId: randomUUID(), entityVersion: 0 });
+  for (const [method,kind] of Object.entries({previewRemoval:'preview-removal',confirmRemoval:'confirm-removal',previewRestore:'preview-restore',restoreRemoval:'restore-removal',controlRemoval:'control-removal',startTrashProbe:'start-trash-probe',controlTrashProbe:'control-trash-probe'}))
+    ipc(method,'workspace',payload=>command(kind,payload));
+  for (const [method,kind] of Object.entries({removalStatus:'removal-status',removalHistory:'removal-history',trashStatus:'trash-status'}))
+    ipc(method,'workspace',payload=>client.query(kind,payload??{}));
   const control = (action, ids = null, extra = {}) => command('control-download', { action, ids, ...extra });
   ipc('downloadPage', 'workspace', (query) => client.query('download-page', query));
   ipc('previewDownloads', 'workspace', (workIds) => client.query('preview-download', { workIds }));

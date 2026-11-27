@@ -45,3 +45,59 @@ export function DeletionPendingPanel({Modal,api,storage,progress,revision,onClos
   {confirmation&&<div className="deletion-action-confirm"><h3>{choices[confirmation]}：{count} 个作品</h3><p>{confirmation==='restore'?'只上传本机实际拥有的所选内容，不从抖音重新下载。':confirmation==='remove-local'?'仅删除本机对应范围；作品文件移入回收站。NAS 不执行第二次删除。':'保留本机内容且暂停这些范围的自动上传。'}</p><button className="button secondary" disabled={active} onClick={()=>setConfirmation(null)}>返回清单</button><button className="button danger" disabled={active||!count} onClick={submit}>{confirmation==='restore'?'确认保留并上传':confirmation==='remove-local'?'确认删除本机内容':'确认稍后处理'}</button></div>}
  </div><footer className="modal-footer"><button className="button secondary" onClick={onClose}>关闭</button>{progress?.running?<button className="button danger" onClick={()=>api.stopDeletionResolution().catch(e=>setError(e.message))}>停止后续处理</button>:Object.entries(choices).map(([action,label])=><button key={action} className="button secondary" disabled={!count||loading||active||action!=='later'&&(!storage.connected||!storage.writable)} onClick={()=>{setConfirmation(action);setError('');}}>{label}</button>)}</footer></Modal>;
 }
+
+const removalNames={membership:'移除当前来源归属',records:'移除作品记录',files:'删除 NAS 文件','restore-records':'恢复作品记录','restore-files':'还原 NAS 文件'};
+const removalStates={preview:'等待确认',running:'正在处理',paused:'已暂停',done:'已完成',restoring:'正在还原',restored:'已还原'};
+const sourceName=source=>source==='total'?'总收藏':source?.startsWith('folder:')?'收藏夹 '+source.slice(7):source?.startsWith('author:')?'作者 '+source.slice(7):'全部作品';
+export function ServerRemovalDialog({Modal,api,initial,onClose,onConfirm,onVerify}){
+  const [plan,setPlan]=useState(initial),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  async function action(fn){setBusy(true);setError('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
+  async function confirm(){await api[plan.scope.startsWith('restore-')?'restoreRemoval':'confirmRemoval']({token:plan.token});await onConfirm();}
+  return <Modal title={removalNames[plan.scope]} onClose={onClose} dismissible={!busy}>
+    <div className="modal-content"><h3>{plan.count} 个作品</h3>
+      {plan.scope==='membership'&&<p>从{sourceName(plan.source)}移除 {plan.relations} 条归属。下次读取该来源且平台返回作品时，归属会自动恢复。其他来源和 {plan.files} 个已登记文件保留。</p>}
+      {plan.scope==='records'&&<p>在全部作品和来源列表中移除记录。回执保存作品、标签和 {plan.relations} 条归属的恢复信息；{plan.files} 个 NAS 文件继续在媒体库可用。</p>}
+      {plan.scope==='files'&&<p>将下列 {plan.files} 个登记文件移入已验证的 NAS 回收位置。所有来源共用这些文件。作品记录、{plan.relations} 条来源归属和本机缓存保留。</p>}
+      {plan.scope==='restore-files'&&<p>将 {plan.files} 个文件还原至下列原路径。每个文件核对身份和 SHA-256；原路径已被占用时暂停。</p>}
+      {plan.scope==='restore-records'&&<p>恢复作品在原来源和全部作品中的显示，保留已登记的标签、文件和次序。</p>}
+      {plan.items.map((i,n)=><p key={n}>{i.title} · {i.workId}{i.path&&<><br/>{i.path} · {i.size} 字节</>}</p>)}
+      <div><button className="text-button" disabled={busy||!plan.offset} onClick={()=>action(async()=>setPlan(await api.removalStatus({token:plan.token,offset:plan.offset-20})))}>上一页</button>
+      <button className="text-button" disabled={busy||plan.offset+20>=plan.total} onClick={()=>action(async()=>setPlan(await api.removalStatus({token:plan.token,offset:plan.offset+20})))}>下一页</button></div>
+      {plan.reason&&<p role="alert">{plan.reason}</p>}{plan.scope==='files'&&plan.reason&&<button className="text-button" onClick={onVerify}>查看回收站验证</button>}{error&&<p role="alert">{error}</p>}
+    </div><footer className="modal-footer"><button className="button secondary" onClick={onClose} disabled={busy}>取消</button><button className="button danger solid" disabled={busy||!!plan.reason} onClick={()=>action(confirm)}>确认{removalNames[plan.scope]}</button></footer>
+  </Modal>;
+}
+export function ServerRemovalHistory({Modal,api,onClose,onPlan}){
+  const [rows,setRows]=useState([]),[offset,setOffset]=useState(0),[error,setError]=useState(''),[refresh,setRefresh]=useState(0),[busy,setBusy]=useState(false);
+  useEffect(()=>{let live=true,timer;async function load(){try{const r=await api.removalHistory({offset});if(live){setRows(r);if(r.some(b=>b.state==='running'||b.state==='restoring'))timer=setTimeout(load,800);}}catch(e){if(live)setError(e.message);}}void load();return()=>{live=false;clearTimeout(timer);};},[api,offset,refresh]);
+  async function action(fn){setBusy(true);try{setError('');await fn();setRefresh(n=>n+1);}catch(e){setError(e.message);}finally{setBusy(false);}}
+  return <Modal title="删除与恢复记录" onClose={onClose}><div className="modal-content">
+    {!rows.length&&<p>此页没有已确认的删除操作。</p>}{rows.map(b=><article key={b.token}><h3>{removalNames[b.scope]} · {removalStates[b.state]}</h3>
+    <p>{new Date(b.created).toLocaleString()} · {b.count} 个作品 · 已处理 {b.done}/{b.total} 项</p>
+    {b.scope==='membership'&&<p>{sourceName(b.source)}。重新读取此来源可恢复平台仍返回的作品。</p>}
+    {b.reason&&<p role="alert">{b.reason}</p>}
+    {['done','paused'].includes(b.state)&&b.restorable>0&&['files','records'].includes(b.scope)&&<button className="button secondary" disabled={busy} onClick={()=>action(async()=>onPlan(await api.previewRestore({token:b.token})))}>预览恢复</button>}
+    {['paused','running'].includes(b.state)&&<button className="button secondary" disabled={busy} onClick={()=>action(()=>api.controlRemoval({token:b.token,action:b.state==='paused'?'resume':'pause'}))}>{b.state==='paused'?'重试剩余项目':'暂停后续项目'}</button>}</article>)}
+    {error&&<p role="alert">{error}</p>}<button className="text-button" disabled={!offset} onClick={()=>setOffset(v=>v-20)}>上一页</button><button className="text-button" disabled={rows.length<20} onClick={()=>setOffset(v=>v+20)}>下一页</button>
+    </div></Modal>;
+}
+export function TrashVerification({Modal,api,onClose}){
+  const [status,setStatus]=useState(null),[refresh,setRefresh]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  const [supported,setSupported]=useState(false),[reference,setReference]=useState(''),[retention,setRetention]=useState(''),[observed,setObserved]=useState(false);
+  useEffect(()=>{let live=true,timer;async function load(){try{const s=await api.trashStatus({});if(live){setStatus(s);if(s.busy)timer=setTimeout(load,500);}}catch(e){if(live)setError(e.message);}}void load();return()=>{live=false;clearTimeout(timer);};},[api,refresh]);
+  async function action(fn){setBusy(true);setError('');try{await fn();setObserved(false);setRefresh(n=>n+1);}catch(e){setError(e.message);}finally{setBusy(false);}}
+  const blocked=busy||status?.busy;
+  return <Modal title="验证 NAS 回收站" onClose={onClose}><div className="modal-content">
+    <p>绿联公开说明要求通过回收站界面管理文件。仅当厂商另行确认当前机型和固件支持服务端独占移动、保留原目录结构时，由 NAS 管理员配置该接口提供的媒体映射目录 CANGXIA_RECYCLE_MEDIA_ROOT。没有支持依据时，保持 NAS 文件删除停用。</p>
+    {status?.verified&&<p>已通过当前挂载和服务身份的样本还原。已核对清理期限：{status.retention}。支持依据：{status.reference}</p>}
+    {status?.reason&&<p>{status.reason}</p>}
+    {status?.sample&&<p>验证样本：{status.sample}<br/>服务端原路径：{status.original}<br/>回收位置：{status.bin}<br/>SHA-256：{status.sha256||'正在登记'}</p>}
+    {(!status?.token||['verified','failed'].includes(status.phase))?<fieldset disabled={blocked}><label><input type="checkbox" checked={supported} onChange={e=>setSupported(e.target.checked)}/>厂商已确认此映射和移动方式受支持，目标共享文件夹已启用回收站。</label>
+      <label>机型、固件及厂商支持文档或工单 <input value={reference} maxLength={400} onChange={e=>setReference(e.target.value)}/></label>
+      <label>已核对的清理期限 <input value={retention} maxLength={160} onChange={e=>setRetention(e.target.value)}/></label>
+      <button className="button secondary" disabled={!supported||!retention.trim()||!reference.trim()} onClick={()=>action(()=>api.startTrashProbe({supported,retention,reference}))}>创建并移入专用验证样本</button></fieldset>:
+    <><p>在绿联文件管理器的「回收站」内核对唯一文件名及原位置，并使用其「还原」操作。请保留验证样本，服务将继续核验字节并实测藏匣的还原入口。</p>
+    {status.phase==='await-native'?<><label><input type="checkbox" checked={observed} onChange={e=>setObserved(e.target.checked)}/>已在绿联回收站核对该文件和原位置，并使用「还原」恢复。</label><button className="button primary" disabled={blocked||!observed} onClick={()=>action(()=>api.controlTrashProbe({token:status.token,action:'verify',observed}))}>核验原路径和内容</button></>:<button className="button secondary" disabled={blocked} onClick={()=>action(()=>api.controlTrashProbe({token:status.token,action:'retry'}))}>继续验证</button>}
+    <button className="text-button" disabled={blocked} onClick={()=>action(()=>api.controlTrashProbe({token:status.token,action:'end'}))}>结束本次验证并保留样本</button></>}
+    {error&&<p role="alert">{error}</p>}</div></Modal>;
+}

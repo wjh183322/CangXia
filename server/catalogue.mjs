@@ -97,6 +97,7 @@ function build({ source, sort, filter: f }) {
     order = 'w.rowid';
   const where = ["coalesce(json_extract(w.body,'$.readHidden'),0)=0"],
     args = [];
+  if (source !== 'media' && !source.startsWith('media-folder:')) where.push('NOT EXISTS(SELECT 1 FROM removed_work_records r WHERE r.work_id=w.id)');
   if (source === 'empty') where.push('0');
   else if (source === 'all' || source === 'media') {
     from += " LEFT JOIN source_members m ON m.work_id=w.id AND m.source_id='total'";
@@ -200,6 +201,7 @@ function summary(db, id) {
 }
 import { currentHDCover } from './files.mjs';
 export function catalogueDetail(db, { id }) {
+  if (typeof id==='string' && db.prepare("SELECT 1 FROM removed_work_records WHERE work_id=? AND NOT EXISTS (SELECT 1 FROM media_files WHERE work_id=? AND lower(relative_path) NOT LIKE '%.json')").get(id,id)) return null;
   const detail = readWorkDetail(db, { id });
   if (!detail) return null;
   installFunctions(db);

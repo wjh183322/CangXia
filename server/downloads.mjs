@@ -1,3 +1,4 @@
+import {removalOwnsFiles} from './removal.mjs';
 import { planDownloads } from '../electron/download-selection.mjs';
 import { createArchive } from './archive.mjs';
 import { assessCover } from './covers.mjs';
@@ -638,6 +639,7 @@ export function createDownloads({
       !['unsaved', 'missing', 'repair', 'audio', 'repair-cover'].includes(scope)
     )
       throw invalid();
+    if(ids.some(id=>removalOwnsFiles(conn,id)))throw failure('NAS_REMOVAL_BUSY','作品正在处理删除或恢复，请先核对回执。');
     const auth = binding(conn);
     if (source?.account()?.uid !== auth.uid) throw authRequired();
     const { groups, report } = preview(conn, ids);
@@ -747,6 +749,7 @@ export function createDownloads({
         continue;
       }
       if (state && publicJob(job).state !== state) continue;
+      if(['resume','retry','cancel'].includes(action)&&removalOwnsFiles(conn,job.workId))throw failure('NAS_REMOVAL_BUSY','请先处理此作品的删除或恢复回执。');
       if (action === 'clear' && job.state === 'complete') {
         conn.prepare('UPDATE download_manifests SET hidden=1 WHERE id=?').run(id);
         conn.exec('UPDATE download_options SET revision=revision+1');

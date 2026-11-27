@@ -144,6 +144,17 @@ app.whenReady().then(async () => {
     assert(!heading.includes('打开保存目录'));
     await clickText('刷新资料库');
     await waitFor(()=>js(win,"document.querySelector('.list-footer')?.textContent.includes('45')"));
+    await js(win,"document.querySelector('[data-work-id] .card-checkbox').click()");
+    await clickText('移除作品记录');
+    await waitFor(()=>js(win,"document.body.innerText.includes('回执保存作品')"));
+    await clickText('确认移除作品记录');
+    await waitFor(()=>js(win,"document.body.innerText.includes('删除与恢复记录') && document.body.innerText.includes('预览恢复')"));
+    await clickText('预览恢复');
+    await waitFor(()=>js(win,"document.body.innerText.includes('确认恢复作品记录')"));
+    await clickText('确认恢复作品记录');
+    await waitFor(()=>js(win,"document.body.innerText.includes('已还原')"));
+    await js(win,"document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await waitFor(()=>js(win,"!document.querySelector('[role=dialog]')"));
     const receipt = await js(win, "window.cangxia.setTags('99',['fixture-tag'],0)");
     assert.equal(receipt.entityVersion, 1);
     await js(win, `document.querySelector('button[aria-label="设置"]').click()`);

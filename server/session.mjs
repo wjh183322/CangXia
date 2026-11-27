@@ -1,3 +1,4 @@
+import {createRemovalService} from './removal.mjs';
 import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection,confirmedPage} from './catalogue.mjs';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
@@ -57,7 +58,7 @@ function setTags(db, { payload, entityVersion }) {
   return { id, entityVersion: version + 1 };
 }
 function initialState(db) {
-  const count = db.prepare("SELECT count(*) AS n FROM source_members WHERE source_id='total'").get().n;
+  const count = db.prepare("SELECT count(*) AS n FROM source_members m WHERE source_id='total' AND NOT EXISTS(SELECT 1 FROM removed_work_records r WHERE r.work_id=m.work_id)").get().n;
   return {
     version: serverIdentity.version,
     works: [],
@@ -79,12 +80,14 @@ export function createSessionService({
   source,
   readDelay,
   downloads,
+  removalFiles,
   commands = {},
   catalogueActions = {},
   queries = {}
 }) {
   const bootId = randomUUID(),
     libraryId = library.libraryId;
+  const removal=createRemovalService({library,files:removalFiles??(downloads?.store&&downloads)});
   const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay, archive: downloads?.archive });
   const exportsByGrant = new Map();
@@ -157,6 +160,7 @@ export function createSessionService({
         if (Object.keys(payload).some((key) => !['source', 'workId'].includes(key))) throw invalid();
         return removeMembership(db, { ...payload, expectedVersion: entityVersion });
       },
+      ...removal.commands,
       ...commands
     })
   );
@@ -193,12 +197,14 @@ export function createSessionService({
         }
         return readState(db, state);
       },
+      ...removal.queries,
       ...queries
     })
   );
   let localGrant,
     timer,
     closed = false;
+  library.write(db=>db.exec("UPDATE removal_batches SET state='paused' WHERE state='running'"));
   library.write((db) =>
     db
       .prepare(
@@ -418,6 +424,7 @@ export function createSessionService({
         checked(db, who, grant);
         return save(db, who.accountId, operationId, digest, { ...value, operationId, kind });
       });
+      removal.wake(receipt);
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
       if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','remove-membership','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
@@ -429,6 +436,7 @@ export function createSessionService({
     close() {
       closed = true;
       forget();
+      return removal.close();
     }
   };
   return service;

@@ -770,7 +770,7 @@ export function readState(db, state) {
   for (const row of db.prepare('SELECT * FROM read_sources WHERE uid=? ORDER BY rowid').all(uid ?? '')) {
     if(row.source_id.startsWith('author:')&&!row.added)continue;
     const item = { ...JSON.parse(row.body), added: !!row.added, remoteMissing: !!row.missing };
-    item.savedCount=db.prepare('SELECT count(*) AS n FROM source_members WHERE source_id=?').get(row.source_id).n;
+    item.savedCount=db.prepare('SELECT count(*) AS n FROM source_members m WHERE source_id=? AND NOT EXISTS(SELECT 1 FROM removed_work_records r WHERE r.work_id=m.work_id)').get(row.source_id).n;
     item.mediaCount=db.prepare("SELECT count(*) AS n FROM source_members m WHERE source_id=? AND EXISTS (SELECT 1 FROM media_files f WHERE f.work_id=m.work_id AND lower(f.relative_path) NOT LIKE '%.json')").get(row.source_id).n;
     if (row.source_id.startsWith('folder:')) state.collections.push(item);
     else {

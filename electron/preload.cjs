@@ -17,6 +17,7 @@ methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
 methods.push('defectOverview');
 methods.push('validateDefectSelection','validateDownloadSelection');
 methods.push('sourceLoginView','sourceManualLogin','sourceQrShown');
+methods.push('previewRemoval','confirmRemoval','previewRestore','restoreRemoval','controlRemoval','removalStatus','removalHistory','trashStatus','startTrashProbe','controlTrashProbe');
 methods.push('previewDownloadSelection','catalogueAction','listWorks','cataloguePosition','catalogueChoices','resolveSelection');
 methods.push('startRead','controlRead','historyItems');
 methods.push('serverIdentity','serverSession','serverGateReady','serverConnect','serverRelease','serverCommand','serverReceipt');

@@ -67,8 +67,8 @@ async function main([action = 'start', ...args]) {
         });
       });
       const stop = async () => {
-        config.sessions.close();
         server.closeAllConnections();
+        await config.sessions.close();
         await config.downloads.close();
         await config.source.close();
         server.close(() => library.close());
