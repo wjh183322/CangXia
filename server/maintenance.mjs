@@ -14,6 +14,7 @@ import { displayCover, mediaList } from './media.mjs';
 import { wantedResources } from './downloads.mjs';
 import { downloadScope, summarizeRepairJobs } from './maintenance-queue.mjs';
 import { failure } from './service-error.mjs';
+import { directory } from './rehearsal-files.mjs';
 
 const invalid = () => failure(400, 'INVALID_CHECK', '检查范围或参数无效。');
 const stale = () => failure(409, 'CHECK_CHANGED', '检查结果或资料库已变化，请刷新并重新选择。');
@@ -379,14 +380,20 @@ async function storageUsage(downloads, signal, update) {
     )
     .get();
   Object.assign(totals, { archiveBytes: 0, stagingBytes: 0, files: 0, links: 0 });
-  const stack = [layout.media],
+  layout.assertCurrent();
+  // Windows may legitimately supply TEMP in 8.3 form; enumerate the verified
+  // ordinary directory under its native canonical path, including drive casing.
+  const canonicalRoot=()=>fs.realpath(directory(layout.media));
+  const media=await canonicalRoot(), staging=path.join(media,path.relative(layout.media,layout.staging));
+  const stack = [media],
     seen = new Set();
   while (stack.length) {
     signal.throwIfAborted();
     layout.assertCurrent();
     const dir = stack.pop(),
       stat = await fs.lstat(dir, { bigint: true });
-    if (!stat.isDirectory() || (await fs.realpath(dir)) !== dir) throw Error('directory changed');
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (await fs.realpath(dir)) !== dir ||
+        (await canonicalRoot())!==media) throw Error('directory changed');
     const handle = await fs.opendir(dir);
     for await (const entry of handle) {
       signal.throwIfAborted();
@@ -405,11 +412,12 @@ async function storageUsage(downloads, signal, update) {
       if (seen.has(key)) continue;
       seen.add(key);
       totals.files++;
-      totals[file.startsWith(layout.staging + path.sep) ? 'stagingBytes' : 'archiveBytes'] += Number(st.size);
+      totals[file.startsWith(staging + path.sep) ? 'stagingBytes' : 'archiveBytes'] += Number(st.size);
       if (totals.files % 128 === 0) update(totals);
     }
     const after = await fs.lstat(dir, { bigint: true });
-    if (stat.dev !== after.dev || stat.ino !== after.ino || (await fs.realpath(dir)) !== dir)
+    if (stat.dev !== after.dev || stat.ino !== after.ino || (await fs.realpath(dir)) !== dir ||
+        (await canonicalRoot())!==media)
       throw Error('directory changed');
     update(totals);
   }

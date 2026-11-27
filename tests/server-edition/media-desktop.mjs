@@ -17,6 +17,12 @@ async function wait(check, label) {
     if (await check()) return;
     await delay(50);
   }
+  if(label==='export complete'){
+    const summary=await js(`window.cangxia.state().then(s=>s.flatQueue.batches.map(b=>({
+      complete:b.complete,failed:b.failed,paused:b.paused,jobs:b.jobs.map(j=>({state:j.state,done:j.done,total:j.total,
+      reason:/清单已变化/.test(j.message)?'selection changed':/目录已变化/.test(j.message)?'directory changed':/校验/.test(j.message)?'verification':'other'}))})))`);
+    throw Error('Timed out waiting for export: '+JSON.stringify(summary));
+  }
   throw Error(
     'Timed out: ' +
       label +
@@ -95,6 +101,9 @@ app.whenReady().then(async () => {
     );
     await button('保存／补齐 NAS 配乐');
     await wait(() => js('window.cangxia.audioStatus("42").then(s=>s.nasSaved)'), 'permanent NAS audio');
+    // Saving audio bytes precedes the metadata/queue commit. The export below deliberately
+    // tests a stable confirmed catalogue revision, after the independent audio write settles.
+    await wait(()=>js("window.cangxia.downloadPage({tab:'all'}).then(r=>r.jobs.some(j=>j.id==='audio:42'&&j.downloadState==='complete'))"),'audio registration before export');
     await escape();
     await button('全部作品');
     await visible('[data-work-id="43"]');

@@ -16,8 +16,10 @@ const keys = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t, optionsForDownloads = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-maint-'));
+async function fixture(t, optionsForDownloads = {}, alternateSpelling=false) {
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-maint-'));
+  const root=alternateSpelling&&process.platform==='win32'
+    ?created.replace(/^[A-Z]:/i,drive=>drive===drive.toUpperCase()?drive.toLowerCase():drive.toUpperCase()):created;
   const library = openLibrary({ root, mode: 'init' });
   const observed = new Map();
   const source = {
@@ -214,7 +216,7 @@ test('repair confirmation uses the exact checked page and checks the disk once m
   assert.equal((await f.query('download-page', { page: 1, tab: 'all' })).total, 0);
 });
 test('storage refresh counts actual archived and staged bytes separately and preserves completed history', async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t,{},true);
   const run = await f.result((await f.command('start-check', { kind: 'storage' })).id);
   assert.equal(run.state, 'complete');
   assert.equal(run.totals.archiveBytes, 4);
