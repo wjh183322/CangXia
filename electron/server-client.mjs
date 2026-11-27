@@ -36,7 +36,7 @@ function validated(input) {
 export async function pinnedRequest(input, route, body, signal) {
   const config = validated(input);
   const agent = new https.Agent({ keepAlive: false });
-  const timeout = AbortSignal.timeout(8000);
+  const timeout = AbortSignal.timeout(route.startsWith('source/') || route.startsWith('identity/') ? 45_000 : 8000);
   const stop = signal ? AbortSignal.any([timeout, signal]) : timeout;
   agent.createConnection = (options, ready) => {
     const socket = tls.connect({

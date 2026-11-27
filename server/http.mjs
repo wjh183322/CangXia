@@ -5,6 +5,16 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 const digest = (value) => createHash('sha256').update(value).digest();
 const validId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const sourceActions = new Map([
+  ['/v1/source/open', ['openLogin']],
+  ['/v1/source/view', ['loginView', 'viewId']],
+  ['/v1/source/refresh', ['refreshLogin', 'viewId']],
+  ['/v1/source/manual', ['manualLogin', 'viewId', 'input']],
+  ['/v1/source/cancel', ['cancelLogin', 'viewId']],
+  ['/v1/source/logout', ['logout']],
+  ['/v1/identity/verify', ['verifyAccount']],
+  ['/v1/identity/recover', ['recover']]
+]);
 export function createHttpsService(options) {
   const { credentials, key, cert } = options;
   const devices = new Map(),
@@ -81,8 +91,19 @@ export function createHttpsService(options) {
           case '/v1/receipt':
             result = sessions.receipt(who, body.grant, body.operationId);
             break;
-          default:
-            throw failure(404, 'UNKNOWN_ROUTE', '无此服务接口。');
+          default: {
+            const action = sourceActions.get(req.url);
+            if (!action) throw failure(404, 'UNKNOWN_ROUTE', '无此服务接口。');
+            const session = sessions.sourceSession(who, body.grant);
+            const [method, ...keys] = action;
+            if (
+              Object.keys(body).some((key) => key !== 'grant' && !keys.includes(key)) ||
+              keys.some((key) => !Object.hasOwn(body, key))
+            )
+              throw failure(400, 'INVALID_REQUEST', '请求参数无效。');
+            result = await options.source[method](session, ...keys.map((key) => body[key]));
+            session.read(() => null);
+          }
         }
         reply(200, result);
       } catch (error) {

@@ -123,6 +123,13 @@ async function openWorkspace(config, displayedEpoch) {
     if (workspace !== win) throw Error('资料库已锁定。');
     win.show();
     gate.hide();
+    void client.call('identity/recover', {}).then(async account => {
+      if (!account || workspace !== win) return;
+      const next = await client.query('state');
+      if (workspace === win) win.webContents.send('cangxia:change', next);
+    }).catch(error => {
+      if (workspace === win) win.webContents.send('cangxia:notice', error.message);
+    });
   } catch (error) {
     if (client.epoch === epoch) client.lock(error.message);
     throw error;
@@ -179,6 +186,16 @@ app
     ipc('serverReceipt', 'workspace', (id) => client.receipt(id));
     ipc('serverCommand', 'workspace', (command) => client.command(command));
     ipc('state', 'workspace', () => client.query('state'));
+    ipc('startQrLogin', 'workspace', () => client.call('source/open', {}));
+    ipc('sourceLoginView', 'workspace', viewId => client.call('source/view', {viewId}));
+    ipc('refreshQrLogin', 'workspace', viewId => client.call('source/refresh', {viewId}));
+    ipc('cancelQrLogin', 'workspace', viewId => client.call('source/cancel', {viewId}));
+    ipc('sourceManualLogin', 'workspace', (viewId,input) => client.call('source/manual', {viewId,input}));
+    ipc('finishLogin', 'workspace', () => client.call('identity/verify', {}));
+    ipc('logout', 'workspace', async () => {
+      await client.call('source/logout', {});
+      return client.query('state');
+    });
     ipc('startupReady', 'workspace', () => true);
     ipc('setTags', 'workspace', (id, tags, entityVersion) =>
       client.command({

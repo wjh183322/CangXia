@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { createHttpsService } from './http.mjs';
+import { createSourceBrowser } from './source-browser.mjs';
 import { createSessionService } from './session.mjs';
 import { parseArgs } from 'node:util';
 import { openLibrary } from './library.mjs';
@@ -53,7 +54,8 @@ async function main([action = 'start', ...args]) {
         server.once('error', reject);
         server.listen(port, process.env.CANGXIA_HOST ?? '0.0.0.0', () => {
           try {
-            config.sessions = createSessionService({ library });
+            config.source = createSourceBrowser({ library, root });
+            config.sessions = createSessionService({ library, source: config.source });
             resolve();
           } catch (error) {
             server.close();
@@ -61,9 +63,10 @@ async function main([action = 'start', ...args]) {
           }
         });
       });
-      const stop = () => {
+      const stop = async () => {
         config.sessions.close();
         server.closeAllConnections();
+        await config.source.close();
         server.close(() => library.close());
       };
       process.once('SIGINT', stop);

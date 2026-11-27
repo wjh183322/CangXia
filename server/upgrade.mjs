@@ -13,6 +13,7 @@ import {
   syncDirectory,
   upgradeV1,
   upgradeV2,
+  upgradeV3,
   verifyIdentity,
   writeDurably
 } from './library.mjs';
@@ -26,7 +27,7 @@ export function inspectUpgrade(root, expectedId) {
 function confirm({ expectedId, from, to, imageDigest, approval }) {
   if (
     !isUuid(expectedId) ||
-    ![1, 2].includes(from) ||
+    ![1, 2, 3].includes(from) ||
     to !== CURRENT_SCHEMA ||
     typeof imageDigest !== 'string' ||
     !/^sha256:[0-9a-f]{64}$/.test(imageDigest) ||
@@ -226,7 +227,8 @@ export async function applyUpgrade(input) {
       throw Error('Insufficient space for verified snapshot and migration.');
     const receipt = await verifiedSnapshot(layout, status, request);
     if (from === 1) writer.exec(upgradeV1);
-    writer.exec(upgradeV2);
+    if (from <= 2) writer.exec(upgradeV2);
+    writer.exec(upgradeV3);
     writer.exec(`PRAGMA user_version=${CURRENT_SCHEMA}`);
     if (verifyIdentity(writer, expectedId) !== to) throw Error('Upgraded schema failed verification.');
     writer

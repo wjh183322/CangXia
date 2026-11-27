@@ -68,13 +68,27 @@ function initialState(db) {
 export function createSessionService({
   library,
   now = () => performance.now(),
+  source,
   commands = {},
   queries = {}
 }) {
   const bootId = randomUUID(),
     libraryId = library.libraryId;
   const mutations = new Map(Object.entries({ 'set-tags': setTags, ...commands }));
-  const reads = new Map(Object.entries({ state: initialState, ...queries }));
+  const reads = new Map(
+    Object.entries({
+      state: (db) => {
+        const state = initialState(db);
+        const identity = source?.account();
+        if (identity) {
+          state.account = { uid: identity.uid, nickname: identity.nickname };
+          state.collector.connected = true;
+        }
+        return state;
+      },
+      ...queries
+    })
+  );
   let localGrant,
     timer,
     closed = false;
@@ -229,6 +243,20 @@ export function createSessionService({
         checked(db, who, grant);
         return value;
       });
+    },
+    sourceSession(who, grant) {
+      const signal = service.signal(who, grant);
+      return {
+        signal,
+        read: (fn) => service.read(who, grant, fn),
+        write: (fn) =>
+          library.write((db) => {
+            checked(db, who, grant);
+            const result = fn(db);
+            checked(db, who, grant);
+            return result;
+          })
+      };
     },
     signal(who, grant) {
       service.read(who, grant, () => null);

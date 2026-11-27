@@ -8,7 +8,7 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
 export const APPLICATION_ID = 0x43585346;
-export const CURRENT_SCHEMA = 3;
+export const CURRENT_SCHEMA = 4;
 export const isUuid = (value) =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -22,6 +22,7 @@ export const upgradeV1 = `
   CREATE UNIQUE INDEX media_file_location ON media_files(relative_path);
 `;
 export const upgradeV2 = fs.readFileSync(new URL('./schema/v3.sql', import.meta.url), 'utf8');
+export const upgradeV3 = fs.readFileSync(new URL('./schema/v4.sql', import.meta.url), 'utf8');
 const catalog = (db) =>
   db
     .prepare(
@@ -37,6 +38,8 @@ reference.exec(upgradeV1);
 schemas.set(2, JSON.stringify(catalog(reference)));
 reference.exec(upgradeV2);
 schemas.set(3, JSON.stringify(catalog(reference)));
+reference.exec(upgradeV3);
+schemas.set(4, JSON.stringify(catalog(reference)));
 reference.close();
 
 const foreign = () => Error('The mounted volume or database does not match the formal library.');
@@ -97,6 +100,7 @@ export function inspectLayout(root, expectedId) {
     'library.sqlite-journal',
     'library.sqlite-wal',
     'library.sqlite-shm',
+    'source-session',
     'snapshots',
     'media'
   ];
@@ -119,7 +123,7 @@ export function inspectLayout(root, expectedId) {
   }
   for (const name of contents) {
     if (!allowed.includes(name)) throw unsafe();
-    if (name === 'snapshots' || name === 'media') directory(path.join(dir, name));
+    if (name === 'snapshots' || name === 'media' || name === 'source-session') directory(path.join(dir, name));
     else regular(path.join(dir, name));
   }
   if (!['media', 'snapshots', 'identity.json', 'library.sqlite'].every((name) => contents.includes(name)))
@@ -284,6 +288,7 @@ function initialize(root, id) {
     db.exec(v1);
     db.exec(upgradeV1);
     db.exec(upgradeV2);
+    db.exec(upgradeV3);
     db.prepare('INSERT INTO library_identity VALUES (1,?,?)').run(APP_ID, id);
     db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${CURRENT_SCHEMA}; COMMIT`);
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') throw Error('WAL unavailable.');

@@ -31,4 +31,5 @@ jobs:
           package-manager-cache: false
       - run: npm ci --include=dev --ignore-scripts --no-audit --no-fund
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+      - run: node server/node_modules/playwright-core/cli.js install --with-deps chromium --only-shell
       - run: npm test --prefix server
