@@ -16,7 +16,7 @@ export function mergeAudioCandidates(sources, previousMusic, mergedMusic, observ
   return true;
 }
 
-function mergeMusic(previous, next, fields) {
+export function mergeMusic(previous, next, fields) {
   if (!previous) return next;
   if (!next || next.state === 'unknown') return previous;
   if (!previous.id || previous.id !== next.id) return next;

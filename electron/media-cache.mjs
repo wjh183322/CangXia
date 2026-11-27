@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';import syncFs from 'node:fs';import path from 'node:path';import {randomUUID,createHash} from 'node:crypto';import {requireInside} from './model.mjs';
 export const CACHE_DEFAULTS={cover:768*1048576,audio:256*1048576,stage:256*1048576};
+export function validCacheLimit(value){return Number.isSafeInteger(value)&&value>=16*1048576&&value<=16*1073741824;}
 const limitError=()=>Object.assign(Error('缓存空间不足，已暂停新增文件；正在使用和待确认文件保留'),{code:'CACHE_LIMIT'});
 export class MediaCache{
  constructor(store,profile,{notify=()=>{}}={}){this.store=store;this.profile=path.resolve(profile);this.notify=notify;this.pins=new Map();this.reservations=new Map();this.touches=new Map();this.cleaning=false;this.closed=false;this.tail=Promise.resolve();
@@ -12,7 +13,7 @@ export class MediaCache{
   for(const name of ['','previews','backup']){const d=path.join(this.profile,'covers',name);if(!syncFs.existsSync(d))store.db.run('INSERT OR IGNORE INTO media_cache_migrations VALUES(?,1)',[d]);}
  }
  limits(){return {...CACHE_DEFAULTS,...this.store.getSetting('mediaCacheLimits')};}
- setLimits(input){const next={...this.limits()};for(const kind of ['cover','audio']){if(!Number.isSafeInteger(input?.[kind])||input[kind]<16*1048576||input[kind]>16*1073741824)throw Error('浏览缓存容量应为 16 MiB 至 16 GiB');next[kind]=input[kind];}this.store.setSetting('mediaCacheLimits',next);this.notify();return this.summary();}
+ setLimits(input){const next={...this.limits()};for(const kind of ['cover','audio']){if(!validCacheLimit(input?.[kind]))throw Error('浏览缓存容量应为 16 MiB 至 16 GiB');next[kind]=input[kind];}this.store.setSetting('mediaCacheLimits',next);this.notify();return this.summary();}
  summary(){const used={cover:0,audio:0,stage:0,legacy:0};for(const r of this.store.rows('SELECT scope,SUM(size) bytes FROM media_cache_objects GROUP BY scope'))used[r.scope]=(used[r.scope]||0)+Number(r.bytes);for(const r of this.store.rows('SELECT scope,SUM(size) bytes FROM media_cache_parts GROUP BY scope'))used[r.scope]=(used[r.scope]||0)+Number(r.bytes);for(const r of this.reservations.values())used[r.scope]=(used[r.scope]||0)+r.size;return {used,limits:this.limits(),cleaning:this.cleaning,migrating:!!this.migrating,progress:this.progress||'',lastError:this.lastError||'',cancelled:!!this.cancelled,indexed:this.store.rows('SELECT COUNT(*) n FROM media_cache_objects')[0].n};}
  exclusive(action){const run=this.tail.then(action,action);this.tail=run.catch(()=>{});return run;}
  assert(file){let p=path.resolve(file);if(!['covers','audio-cache'].some(name=>{const root=path.join(this.profile,name);return p.startsWith(root+path.sep);}))throw Error('缓存路径超出受管理目录');requireInside(this.profile,p);while(p!==this.profile){if(syncFs.existsSync(p)&&syncFs.lstatSync(p).isSymbolicLink())throw Error('缓存目录包含链接，未处理');p=path.dirname(p);}}

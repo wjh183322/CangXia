@@ -1,3 +1,4 @@
+import {mediaList,displayCover} from './media.mjs';
 import { createHmac } from 'node:crypto';
 import {
   creatorIndex,
@@ -177,6 +178,7 @@ function summary(db, id) {
     );
   return {
     ...fields,
+    mediaCover:displayCover(mediaList(db,id)),
     author,
     coAuthors,
     recordSources,
@@ -202,7 +204,10 @@ export function catalogueDetail(db, { id }) {
   if (!detail) return null;
   installFunctions(db);
   const { light, ...card } = summary(db, id);
-  return { ...card, ...detail, hdCover: currentHDCover(db,id) ?? null, author: card.author, coAuthors: card.coAuthors };
+  const media=mediaList(db,id);
+  const audioVersionMismatch=detail.type==='images' && !media.some(m=>m.key==='audio'&&m.saved) &&
+    !!db.prepare("SELECT 1 FROM archive_resources WHERE work_id=? AND key='audio'").get(id);
+  return { ...card, ...detail, media, audioVersionMismatch, hdCover: currentHDCover(db,id) ?? null, author: card.author, coAuthors: card.coAuthors };
 }
 export function listWorks(db, input, owner) {
   const ctx = context(db, input, owner),

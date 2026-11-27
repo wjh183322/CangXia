@@ -1,3 +1,4 @@
+import { refreshAudio,serveMedia } from './media.mjs';
 import https from 'node:https';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { failure } from './session.mjs';
@@ -52,6 +53,19 @@ export function createHttpsService(options) {
           throw failure(401, 'UNAUTHORIZED', '服务访问凭据无效。');
         if (req.headers['x-cangxia-protocol'] !== String(serverIdentity.protocolVersion))
           throw failure(426, 'PROTOCOL_CHANGED', '服务协议不兼容，请核对版本。');
+        const who = { deviceId, accountId: device.accountId };
+        const { sessions } = options;
+        if (['GET','HEAD'].includes(req.method) && req.url.startsWith('/v1/media?')) {
+          const params=new URL(req.url,'https://localhost').searchParams;
+          let grant;
+          try{grant=JSON.parse(Buffer.from(req.headers['x-cangxia-grant'],'base64url').toString('utf8'));}catch{}
+          const session=sessions.sourceSession(who,grant);
+          if(!options.downloads)throw failure(404,'MEDIA_UNAVAILABLE','此媒体暂不可读取。');
+          await serveMedia(req,res,{downloads:options.downloads,session,body:{
+            resourceId:params.get('id'),version:params.get('version'),head:req.method==='HEAD'
+          }});
+          return;
+        }
         if (req.method !== 'POST' || req.headers['content-type'] !== 'application/json')
           throw failure(400, 'INVALID_REQUEST', '请求格式无效。');
         let n = 0;
@@ -67,10 +81,11 @@ export function createHttpsService(options) {
         } catch {}
         if (!body || Array.isArray(body) || typeof body !== 'object')
           throw failure(400, 'INVALID_REQUEST', '请求格式无效。');
-        const who = { deviceId, accountId: device.accountId };
-        const { sessions } = options;
         let result;
         switch (req.url) {
+          case '/v1/media/refresh-audio':
+            result=await refreshAudio({downloads:options.downloads,session:sessions.sourceSession(who,body.grant),id:body.id});
+            break;
           case '/v1/status':
             result = sessions.status();
             break;
@@ -117,6 +132,7 @@ export function createHttpsService(options) {
         }
         reply(200, result);
       } catch (error) {
+        if (res.headersSent || res.destroyed) {res.destroy();return;}
         reply(error.status ?? 500, {
           code: error.status ? error.code : 'SERVER_ERROR',
           message: error.status ? error.message : 'NAS 当前无法完成请求。'

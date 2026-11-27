@@ -11,7 +11,7 @@ methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefe
 methods.push('defectPage','retryDownloads','reportCoverStatus');
 methods.push('previewDownloads');
 methods.push('cancelRepairs','repairPage');
-methods.push('audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
+methods.push('openCache','audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
 methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');
 methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
 methods.push('defectOverview');

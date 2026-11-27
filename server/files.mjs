@@ -700,12 +700,13 @@ async function digestFile(file, expected, limitLinks, signal) {
     if (
       !same(named, expected) ||
       first.size !== last.size ||
+      first.ctimeNs !== last.ctimeNs || first.ctimeNs !== named.ctimeNs ||
       first.mtimeNs !== last.mtimeNs ||
       first.size !== named.size ||
       first.mtimeNs !== named.mtimeNs
     )
       throw review();
-    return { size: Number(first.size), sha256: hash.digest('hex') };
+    return { size: Number(first.size), sha256: hash.digest('hex'),changeNs:String(last.ctimeNs) };
   } finally {
     await handle.close();
   }
@@ -717,6 +718,7 @@ async function assertDigest({ file, stat }, spec, links = 1, signal) {
     throw review();
   const actual = await digestFile(file, spec.identity, links, signal);
   if (actual.sha256 !== spec.sha256 || actual.size !== spec.size) throw review();
+  return actual.changeNs;
 }
 
 async function chooseFilename(dir, filename, kind) {
@@ -900,7 +902,7 @@ async function settlePlacement({ store, commit, destination, dir, staged, hdGuar
   if (destination.stat?.nlink === 2n && (!same(stagingAlias, body.identity) || stagingAlias.nlink !== 2n))
     throw review();
   if (stagingAlias && !same(stagingAlias, body.identity)) throw review();
-  await assertDigest(destination, body, stagingAlias ? 2 : 1);
+  let changeNs = await assertDigest(destination, body, stagingAlias ? 2 : 1);
   await syncDirectory(destination.parent.file);
   if (stagingAlias) {
     await retry(async () => {
@@ -909,7 +911,13 @@ async function settlePlacement({ store, commit, destination, dir, staged, hdGuar
     });
     await syncDirectory(dir);
     store.fileHook('afterStagingUnlink', { workId: commit.workId, file: destination.file });
+    changeNs = await assertDigest({file:destination.file,stat:await status(destination.file)},body);
   }
+  const final = await status(destination.file);
+  if (!same(final, body.identity) || final.nlink !== 1n || String(final.mtimeNs) !== body.mtimeNs)
+    throw review();
+  if(String(final.ctimeNs)!==changeNs)throw review();
+  body.registeredChangeNs = changeNs;
   updateCommit(store, commit, 'placed');
   return registerFile(store, commit, hdGuard);
 }
@@ -1157,6 +1165,7 @@ export async function resolveResource({
     file: located.file,
     identity: proof.identity,
     mtimeNs: proof.mtimeNs,
+    registeredChangeNs: proof.registeredChangeNs,
     resourceIdentity: proof.resourceIdentity,
     observationIdentity: proof.observationIdentity,
     ...proof.dimensions
@@ -1183,6 +1192,24 @@ export async function resolveResource({
   if (!permitsResource(store, workId)) return null;
   assertResourceRegistration(store, asset);
   return asset;
+}
+
+// Version 10-12 registration records predate the change-time stamp. Before serving one,
+// verify its registered digest once and bind that result to this immutable resource version.
+const verifiedLegacy = new WeakMap();
+export async function playbackChangeStamp(store,resource,signal) {
+  if(resource.registeredChangeNs)return resource.registeredChangeNs;
+  let stamps=verifiedLegacy.get(store);
+  if(!stamps){stamps=new Map();verifiedLegacy.set(store,stamps);}
+  const key=JSON.stringify([resource.id,resource.revision,resource.sha256,resource.identity]);
+  let promise=stamps.get(key);
+  if(!promise){
+    store.fileHook('beforeResourceVerify',resource);
+    promise=(async()=>assertDigest({file:resource.file,stat:await status(resource.file)},resource,1,signal))();
+    stamps.set(key,promise);
+    promise.catch(()=>stamps.delete(key));
+  }
+  return promise;
 }
 
 export async function cleanFileStages({ store, layout, workId, jobId, key, onReview }) {

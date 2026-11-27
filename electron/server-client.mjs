@@ -33,11 +33,8 @@ function validated(input) {
     libraryId: input.libraryId ?? null
   };
 }
-export async function pinnedRequest(input, route, body, signal) {
-  const config = validated(input);
-  const agent = new https.Agent({ keepAlive: false });
-  const timeout = AbortSignal.timeout(route.startsWith('source/') || route.startsWith('identity/') ? 45_000 : 8000);
-  const stop = signal ? AbortSignal.any([timeout, signal]) : timeout;
+function pinnedAgent(config,stop) {
+  const agent=new https.Agent({keepAlive:false});
   agent.createConnection = (options, ready) => {
     const socket = tls.connect({
       ...options,
@@ -56,6 +53,31 @@ export async function pinnedRequest(input, route, body, signal) {
       } else ready(null, socket);
     });
   };
+  return agent;
+}
+export async function pinnedMedia(config, grant, resource, {range,head=false,signal}={}) {
+  const agent=pinnedAgent(config,signal),url=new URL('/v1/media',config.url);
+  url.searchParams.set('id',resource.resourceId);
+  url.searchParams.set('version',resource.version);
+  return new Promise((resolve,reject)=>{
+    const req=https.request(url,{agent,signal,method:head?'HEAD':'GET',headers:{
+      authorization:'Bearer '+config.token,'x-cangxia-device':config.deviceId,
+      'x-cangxia-protocol':String(serverIdentity.protocolVersion),
+      'x-cangxia-grant':Buffer.from(JSON.stringify(grant)).toString('base64url'),
+      ...(range?{range}:{})
+    }},res=>{
+      res.once('close',()=>agent.destroy());
+      resolve(res);
+    });
+    req.on('error',error=>{agent.destroy();reject(error);});
+    req.end();
+  });
+}
+export async function pinnedRequest(input, route, body, signal) {
+  const config = validated(input);
+  const timeout = AbortSignal.timeout(route.startsWith('source/') || route.startsWith('identity/') || route==='media/refresh-audio' ? 45_000 : 8000);
+  const stop = signal ? AbortSignal.any([timeout, signal]) : timeout;
+  const agent = pinnedAgent(config,stop);
   try {
     return await new Promise((resolve, reject) => {
       const req = https.request(

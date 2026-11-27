@@ -22,3 +22,8 @@ export async function makeDirectory(parent,name){
   if(typeof name!=='string'||!name.trim()||name.length>100||/[<>:"/\\|?*\x00-\x1f]/.test(name)||/[. ]$/.test(name)||name==='.'||name==='..'||/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))throw new Error('文件夹名称无效');
   const target=path.join(dir,name);await fs.mkdir(target);return target;
 }
+
+export function pickerLocations(getPath) {
+  const names={desktop:'桌面',downloads:'下载',documents:'文档',pictures:'图片',videos:'视频',music:'音乐'};
+  return {desktop:getPath('desktop'),shortcuts:Object.entries(names).map(([id,name])=>({id,name,path:getPath(id)}))};
+}

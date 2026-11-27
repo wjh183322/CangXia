@@ -102,7 +102,7 @@ function candidateList(urls) {
   return [...new Set(urls ?? [])];
 }
 
-function candidateDigest(urls) {
+export function candidateDigest(urls) {
   if (!urls.length) return null;
   const objects = urls.map((address) => {
     const url = new URL(validMediaTarget(address));
@@ -120,7 +120,7 @@ function coverObject(address) {
   return contentHash(url.pathname + '?' + url.searchParams.toString());
 }
 
-function wantedResources(work, audioOnly) {
+export function wantedResources(work, audioOnly) {
   if (audioOnly) {
     const source = work.audioSourceHints;
     if (work.type !== 'images' || !work.music?.id || (source?.music?.id && source.music.id !== work.music.id))
@@ -131,7 +131,7 @@ function wantedResources(work, audioOnly) {
         name: '配乐',
         kind: 'audio',
         sourceIdentity: 'music:' + work.music.id,
-        candidates: candidateList(source?.sources?.filter((s) => s.kind === 'music').flatMap((s) => s.urls))
+        candidates: candidateList(source?.sources?.filter((s) => ['music','work'].includes(s.kind)).sort((a,b)=>Number(b.kind==='music')-Number(a.kind==='music')).flatMap((s) => s.urls))
       }
     ];
   }
@@ -482,9 +482,11 @@ function filterSql(tab) {
     : match;
 }
 const join = ' FROM download_manifests m JOIN download_jobs j ON m.id=j.id WHERE m.hidden=0 AND ';
-function downloadPage(db, { tab = 'active', page = 1 } = {}) {
+function downloadPage(db, { tab = 'active', page = 1 } = {}, audioOnly=false) {
   if (!Number.isSafeInteger(page) || page < 1) throw invalid();
-  const query = join + filterSql(tab);
+  const audioFilter=audioOnly && ['waiting','running'].includes(tab);
+  const condition=audioFilter ? (tab==='running'?"j.state='running'":"j.state IN ('queued','paused','pausing')") : filterSql(tab);
+  const query = join + (audioOnly?"j.id LIKE 'audio:%' AND ":"") + condition;
   const total = db.prepare('SELECT COUNT(*) AS n' + query).get().n,
     pages = Math.max(1, Math.ceil(total / 50));
   page = Math.min(page, pages);
@@ -498,12 +500,13 @@ function downloadPage(db, { tab = 'active', page = 1 } = {}) {
       .map((r) => publicJob(JSON.parse(r.body)))
   };
 }
-function queueState(db) {
+function queueState(db,audioOnly=false) {
   const opts = db.prepare('SELECT * FROM download_options').get();
+  const family = audioOnly?"j.id LIKE 'audio:%' AND ":"";
   const rows = db
     .prepare(
       'SELECT j.state,count(*) n' +
-        join +
+        join + family +
         "(j.state<>'cancelled' OR json_extract(m.body,'$.cleanupPending')=1) GROUP BY j.state"
     )
     .all();
@@ -520,13 +523,13 @@ function queueState(db) {
   }
   return {
     summary: true,
-    paused: !!opts.paused,
+    paused: audioOnly?rows.some(r=>['paused','pausing'].includes(r.state)):!!opts.paused,
     revision: opts.revision,
     concurrency: opts.concurrency,
     counts,
     running: counts.running > 0,
     jobs: db
-      .prepare('SELECT m.body' + join + "j.state='running' LIMIT 6")
+      .prepare('SELECT m.body' + join + family + "j.state='running' LIMIT 6")
       .all()
       .map((r) => publicJob(JSON.parse(r.body)))
   };
@@ -784,21 +787,22 @@ export function createDownloads({
     )
       throw authRequired();
   }
-  async function fetchMedia(url, options, job) {
+  async function fetchSourceMedia(url, options, guard) {
     let target = validMediaTarget(url);
     const headers = new Headers(options.headers);
     headers.set('Referer', 'https://www.douyin.com/');
+    headers.set('Accept-Encoding','identity');
     for (let hops = 0; hops < 6; hops++) {
-      requireWriter(job, options.signal);
+      guard();
       const response = await fetchAsset(target, {
-        method: 'GET',
+        method: options.method==='HEAD'?'HEAD':'GET',
         headers,
         redirect: 'manual',
         credentials: 'omit',
         signal: options.signal
       });
       try {
-        requireWriter(job, options.signal);
+        guard();
         if (response.url && validMediaTarget(response.url) !== target)
           throw failure('NAS_MEDIA_TARGET', '来源返回了未核对的资源地址。');
         if (redirectCodes.includes(response.status)) {
@@ -821,6 +825,8 @@ export function createDownloads({
     }
     throw failure('NAS_MEDIA_REDIRECTS', '资源重定向次数过多。');
   }
+  const fetchMedia = (url, options, job) =>
+    fetchSourceMedia(url, options, () => requireWriter(job, options.signal));
   async function refresh(job, signal) {
     requireWriter(job, signal);
     const observed = await source.readDownloadDetail({ workId: job.workId, ...job.auth, signal });
@@ -1367,10 +1373,19 @@ export function createDownloads({
   }
   return {
     enqueue,
+    fetchSourceMedia,
+    sourceAuthorization: () => binding(db),
+    readMediaDetail:(workId,auth,signal)=>source.readDownloadDetail({workId,...auth,signal}),
     archive,
     control,
     preview: (conn, ids) => preview(conn, ids).report,
-    page: downloadPage,
+    page: (db,input)=>downloadPage(db,input),
+    audioPage:(db,{page,filter})=>{
+      const tab={all:'all',waiting:'waiting',running:'running',failed:'failed',complete:'complete'}[filter];
+      if(!tab)throw invalid();
+      return downloadPage(db,{page,tab},true);
+    },
+    audioState:db=>queueState(db,true),
     state: queueState,
     store,
     layout,

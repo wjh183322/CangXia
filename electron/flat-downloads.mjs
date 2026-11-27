@@ -14,7 +14,7 @@ function targetsFor(w,cover){return w.type==='video'?[{key:'video',kind:'video',
 
 // No store writes: batches, resource URLs and checkpoints live only in this process.
 export class FlatDownloadQueue{
- constructor({store,collector,fetchMedia,notify=()=>{},protectedPaths=[]}){Object.assign(this,{store,collector,fetchMedia,notify,protectedPaths});this.batches=[];this.intents=new Map();this.checkpoints=new Map();this.running=false;}
+ constructor({store,collector,fetchMedia,acquireAsset,notify=()=>{},protectedPaths=[]}){Object.assign(this,{store,collector,fetchMedia,acquireAsset,notify,protectedPaths});this.batches=[];this.intents=new Map();this.checkpoints=new Map();this.running=false;}
  state(){return {running:this.running,batches:this.batches.map(b=>({id:b.id,directory:b.directory,includeCover:b.includeCover,paused:b.paused,canceled:b.canceled,cleanupMessage:b.cleanupMessage||'',total:b.jobs.length,complete:b.jobs.filter(j=>j.state==='complete').length,failed:b.jobs.filter(j=>j.state==='failed').length,files:b.jobs.reduce((n,j)=>n+j.results.size,0),skipped:b.jobs.reduce((n,j)=>n+[...j.results.values()].filter(r=>r.skipped).length,0),jobs:b.jobs.map(j=>({id:j.id,title:j.work.name,state:j.state,message:j.message||'',done:j.results.size,total:j.targets?.length||0}))}))};}
  emit(){this.notify();}
  checkDirectory(value){
@@ -26,13 +26,16 @@ export class FlatDownloadQueue{
  }
  prepare(value,ids,includeCover=false){
   const directory=this.checkDirectory(value),works=ids.map(id=>this.store.work(id)).filter(Boolean).map(w=>structuredClone(w));if(!works.length)throw new Error('请先选择作品');
+  return this.prepareWorks(directory,works,includeCover);
+ }
+ prepareWorks(directory,works,includeCover){
   const token=randomUUID();this.intents.clear();this.intents.set(token,{directory,works,includeCover:!!includeCover,expires:Date.now()+600000});return {token,directory,count:works.length,nonempty:fs.readdirSync(directory).length>0};
  }
  start(token,allowNonempty=false){
   const intent=this.intents.get(token);if(!intent||intent.expires<Date.now())throw new Error('下载确认已过期，请重新选择目录');
   const directory=this.checkDirectory(intent.directory);if(fs.readdirSync(directory).length&&!allowNonempty)return {needsConfirmation:true};
   this.intents.delete(token);const id=randomUUID(),stage=path.join(directory,'.cangxia-flat-'+id);fs.mkdirSync(stage);const stageStat=fs.lstatSync(stage);
-  const batch={id,directory,stage,stageStat,includeCover:intent.includeCover,paused:false,canceled:false,jobs:intent.works.map((work,index)=>({id:work.id,work,index,state:'waiting',results:new Map(),local:structuredClone(this.store.download(work.id)||null)}))};
+  const batch={id,directory,stage,stageStat,owned:new Map(),includeCover:intent.includeCover,paused:false,canceled:false,jobs:intent.works.map((work,index)=>({id:work.id,work,index,state:'waiting',results:new Map(),local:structuredClone(this.store.download(work.id)||null)}))};
   this.batches.push(batch);this.emit();void this.run();return {id};
  }
  get(id){const batch=this.batches.find(b=>b.id===id);if(!batch)throw new Error('本次下载任务已清除');return batch;}
@@ -47,7 +50,15 @@ export class FlatDownloadQueue{
  waitForIdle(){return this.running?new Promise(r=>(this.waiters??=[]).push(r)):Promise.resolve();}
  async cancel(id){const b=this.get(id);b.canceled=true;b.paused=true;if(this.current===b){this.controller?.abort();await this.waitForBatch(b);}for(const j of b.jobs)if(unfinished(j))j.state='canceled';await this.cleanup(b);this.emit();}
  async clear(id){const b=this.get(id);if(b.jobs.some(unfinished)&&!b.canceled)throw new Error('请先取消剩余任务');await this.cleanup(b);this.batches=this.batches.filter(x=>x!==b);this.emit();}
- async cleanup(b){if(b.cleanupPromise)return b.cleanupPromise;b.cleanupPromise=(async()=>{if(!fs.existsSync(b.stage))return;this.assertStage(b);await fs.promises.rm(b.stage,{recursive:true});for(const key of this.checkpoints.keys())if(inside(b.stage,key))this.checkpoints.delete(key);})();try{await b.cleanupPromise;}finally{b.cleanupPromise=null;}}
+ async cleanup(b){if(b.cleanupPromise)return b.cleanupPromise;b.cleanupPromise=(async()=>{if(!fs.existsSync(b.stage))return;this.assertStage(b);if(this.acquireAsset){
+    for(const [file] of b.owned)this.removeOwned(b,file);
+    try{await fs.promises.rmdir(b.stage);}catch(e){if(!['ENOTEMPTY','EEXIST'].includes(e.code))throw e;b.cleanupMessage='临时目录中有其他文件，已保留。';}
+   }else await fs.promises.rm(b.stage,{recursive:true});for(const key of this.checkpoints.keys())if(inside(b.stage,key))this.checkpoints.delete(key);})();try{await b.cleanupPromise;}finally{b.cleanupPromise=null;}}
+ removeOwned(b,file){
+  this.assertStage(b);const owned=b.owned.get(file),stat=fs.lstatSync(file,{bigint:true,throwIfNoEntry:false});
+  if(owned && stat?.isFile() && owned.dev===stat.dev && owned.ino===stat.ino)fs.unlinkSync(file);
+  b.owned.delete(file);
+ }
  async dispose(){this.pauseAll();for(const b of this.batches)b.canceled=true;this.controller?.abort();await this.waitForIdle();for(const b of this.batches)await this.cleanup(b);this.batches=[];this.intents.clear();this.checkpoints.clear();}
  async run(){
   if(this.running)return;this.running=true;
@@ -78,11 +89,12 @@ export class FlatDownloadQueue{
   this.assertStage(b);const ext=path.extname(asset.file);for(let n=0;n<10000;n++){
    signal.throwIfAborted();const file=path.join(b.directory,base+(n?`_${n+1}`:'')+ext);const existing=fs.lstatSync(file,{throwIfNoEntry:false});
    if(existing){if(existing.isFile()&&!existing.isSymbolicLink()&&existing.size===asset.size&&await hashFile(file,signal)===asset.sha256)return {file,skipped:true};continue;}
-   try{await fs.promises.link(asset.file,file);return {file,skipped:false};}catch(e){if(e.code==='EEXIST')continue;if(!['EPERM','ENOTSUP','EOPNOTSUPP','EXDEV','ENOSYS'].includes(e.code))throw e;}
+   if(!asset.handle)try{await fs.promises.link(asset.file,file);return {file,skipped:false};}catch(e){if(e.code==='EEXIST')continue;if(!['EPERM','ENOTSUP','EOPNOTSUPP','EXDEV','ENOSYS'].includes(e.code))throw e;}
    // Exclusive creation is the fallback for filesystems without hard links.
    let handle;try{handle=await fs.promises.open(file,'wx');}catch(e){if(e.code==='EEXIST')continue;throw e;}
    const owned=await handle.stat();try{
-    for await(const bytes of fs.createReadStream(asset.file)){signal.throwIfAborted();let used=0;while(used<bytes.length){const {bytesWritten}=await handle.write(bytes,used,bytes.length-used);if(!bytesWritten)throw new Error('文件写入未完成');used+=bytesWritten;}}
+    const input=asset.handle?asset.handle.createReadStream({start:0,autoClose:false}):fs.createReadStream(asset.file);
+    for await(const bytes of input){signal.throwIfAborted();let used=0;while(used<bytes.length){const {bytesWritten}=await handle.write(bytes,used,bytes.length-used);if(!bytesWritten)throw new Error('文件写入未完成');used+=bytesWritten;}}
     await handle.sync();await handle.close();handle=null;if(await hashFile(file,signal)!==asset.sha256)throw new Error('目标文件校验失败');return {file,skipped:false};
    }catch(e){await handle?.close();const now=fs.lstatSync(file,{throwIfNoEntry:false});if(now&&!now.isSymbolicLink()&&now.dev===owned.dev&&now.ino===owned.ino)await fs.promises.unlink(file);throw e;}
   }throw new Error('同名文件过多，请选择其他文件夹');
@@ -93,16 +105,17 @@ export class FlatDownloadQueue{
   for(let i=0;i<j.targets.length;i++){
    signal.throwIfAborted();let t=j.targets[i];const previous=j.results.get(t.key);if(previous&&regular(previous.file)?.size===previous.size&&await hashFile(previous.file,signal)===previous.sha256)continue;j.results.delete(t.key);
    const name=`asset_${j.index}_${i}`;j.message=`校验并保存 ${i+1} / ${j.targets.length} 个文件`;this.emit();
+   let asset;
    try{
-    let asset=await this.copyLocal(b,j,t,name,signal);
+    asset=this.acquireAsset?await this.acquireAsset(b,j,t,signal):await this.copyLocal(b,j,t,name,signal);
     if(!asset){
      if(!refreshed){try{const fresh=await this.collector.resolveMediaOnly(j.id,signal);const next=targetsFor(fresh,b.includeCover);if(next.length!==j.targets.length||next.some((x,k)=>x.key!==j.targets[k].key))throw new Error('作品媒体数量发生变化，请重新发起单独下载');j.targets=next;t=next[i];}catch(e){if(signal.aborted||e.httpStatus===429||e.message.includes('数量发生变化'))throw e;}refreshed=true;}
      asset=await this.network(b,j,t,name,signal);
     }
     signal.throwIfAborted();const prefix=`${String(j.index+1).padStart(4,'0')}_${safeName(j.work.author?.nickname||'未知作者',32)}_${j.id}`;
     const base=prefix+(t.key==='cover'?'_封面':t.kind==='image'?'_'+String(t.number||i+1).padStart(2,'0'):'');
-    const result=await this.publish(b,asset,base,signal);j.results.set(t.key,{...result,size:asset.size,sha256:asset.sha256});await fs.promises.unlink(asset.file);this.emit();
-   }catch(e){if(signal.aborted)throw e;errors.push(`${i+1}：${e.message}`);if(e.httpStatus===429)break;}
+    const result=await this.publish(b,asset,base,signal);j.results.set(t.key,{...result,size:asset.size,sha256:asset.sha256});if(!this.acquireAsset)await fs.promises.unlink(asset.file);this.emit();
+   }catch(e){if(signal.aborted)throw e;errors.push(`${i+1}：${e.message}`);if(e.httpStatus===429)break;}finally{if(asset?.handle){await asset.handle.close();this.removeOwned(b,asset.file);}}
   }
   if(errors.length||j.results.size!==j.targets.length)throw new Error(`部分文件未完成（${j.results.size}/${j.targets.length}）：${errors.join('；')}`);
  }

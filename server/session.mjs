@@ -87,8 +87,14 @@ export function createSessionService({
     libraryId = library.libraryId;
   const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay, archive: downloads?.archive });
+  const exportsByGrant = new Map();
+  function confirmExport(db,ids,{grant}) {
+    const token=randomUUID();
+    exportsByGrant.set(token,{generation:grant.generation,ids});
+    return {token,count:ids.length};
+  }
   if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
-    'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
+    'flat-download':confirmExport, 'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
   const mutations = new Map(
     Object.entries({
       'start-read': jobs.start,
@@ -120,6 +126,11 @@ export function createSessionService({
           if(payload.revision!==undefined&&catalogueRevision(db)!==payload.revision)throw failure(409,'STALE_SELECTION','作品列表已更新，请重新确认。');
           return downloads.enqueue(db,payload.workIds,payload.selection);
         },
+        'control-audio':(db,{payload:{action}})=>{
+          if(!['pause','resume','cancel'].includes(action))throw invalid();
+          const ids=db.prepare("SELECT id FROM download_manifests WHERE hidden=0 AND id LIKE 'audio:%'").all().map(r=>r.id);
+          return downloads.control(db,{action,ids});
+        },
         'control-download':(db,{payload})=>downloads.control(db,payload)
       }),
       'set-tags': setTags,
@@ -144,6 +155,18 @@ export function createSessionService({
         const ids=confirmedSelection(db,{...input,confirmedCount:count},owner,{collect:true});
         return downloads.preview(db,ids);
       },'download-page':downloads.page,'preview-download':(db,{workIds})=>({...downloads.preview(db,workIds),revision:catalogueRevision(db)})}),
+      ...(downloads && {'audio-page':downloads.audioPage}),
+      'export-page': (db,{token,offset},{grant})=>{
+        const batch=exportsByGrant.get(token);
+        if(!batch || batch.generation!==grant.generation || !Number.isSafeInteger(offset) || offset<0) throw invalid();
+        const page=batch.ids.slice(offset,offset+64);
+        if(offset+page.length>=batch.ids.length)exportsByGrant.delete(token);
+        return page.map(id=>{
+          const work=catalogueDetail(db,{id});
+          if(!work)throw invalid();
+          return {id,name:work.name,type:work.type,author:work.author,images:work.images,media:work.media};
+        });
+      },
       'work-detail': catalogueDetail,
       'list-works': listWorks,
       'catalogue-position': cataloguePosition,
@@ -154,7 +177,7 @@ export function createSessionService({
       'history-items': historyItems,
       state: (db) => {
         const state = initialState(db);
-        if(downloads)state.queue=downloads.state(db);
+        if(downloads){state.queue=downloads.state(db);state.audioQueue=downloads.audioState(db);state.storage.sharedAudio=true;}
         const identity = source?.account();
         if (identity) {
           state.account = { uid: identity.uid, nickname: identity.nickname };
@@ -205,6 +228,7 @@ export function createSessionService({
   }
   function forget() {
     clearTimeout(timer);
+    exportsByGrant.clear();
     localGrant?.controller.abort();
     localGrant = null;
   }
@@ -335,6 +359,7 @@ export function createSessionService({
       const signal = service.signal(who, grant);
       return {
         signal,
+        guard: (db) => checked(db, who, grant),
         read: (fn) => service.read(who, grant, fn),
         write: (fn) =>
           library.write((db) => {
@@ -387,7 +412,7 @@ export function createSessionService({
       });
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
-      if(downloads&&['enqueue-download','control-download','catalogue-action','set-tags','remove-membership','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
+      if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','remove-membership','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
       return receipt;
     },
     receipt(who, grant, operationId) {
