@@ -42,7 +42,7 @@ async function prepare({ sources, target, uid, imageDigest, guard = () => {} }) 
   const requiredBytes = 4 * (dbBytes + 1048576) + 2 * mediaBytes;
   const stat = fs.statSync(parent, { bigint: true });
   const previewId = contentHash({
-    version: 1,
+    version: 2,
     schema: CURRENT_SCHEMA,
     target,
     parent: [String(stat.dev), String(stat.ino)],
@@ -92,6 +92,90 @@ const mimeByExt = {
   '.aac': 'audio/aac',
   '.wav': 'audio/wav'
 };
+function saveImportedDownloads(db, rows, assets) {
+  const works = new Map(rows.filter((r) => r.type === 'work').map((r) => [r.key, r.value]));
+  const downloads = new Map(rows.filter((r) => r.type === 'download').map((r) => [r.work, r.value]));
+  const tasks = new Map(rows.filter((r) => r.type === 'task').map((r) => [r.work, r.value]));
+  const verified = new Map();
+  for (const a of assets) {
+    const set = verified.get(a.work) ?? new Set();
+    set.add(a.key);
+    verified.set(a.work, set);
+  }
+  function put(job, hidden) {
+    db.prepare('INSERT INTO download_jobs VALUES(?,?,?)').run(job.id, job.workId, job.state);
+    db.prepare('INSERT INTO download_manifests(id,work_id,body,hidden) VALUES(?,?,?,?)').run(
+      job.id,
+      job.workId,
+      JSON.stringify(job),
+      Number(hidden)
+    );
+  }
+  for (const id of new Set([...downloads.keys(), ...tasks.keys()])) {
+    const work = works.get(id),
+      archive = downloads.get(id),
+      task = tasks.get(id),
+      saved = verified.get(id) ?? new Set();
+    const primary = work.type === 'video' ? ['video'] : (work.images?.map((im) => 'image-' + im.index) ?? []);
+    const required = [
+      ...new Set([
+        ...primary,
+        ...(archive?.requiredKeys ?? []),
+        ...(work.type === 'video' && work.coverUrls?.length ? ['cover'] : [])
+      ])
+    ];
+    const complete =
+      archive?.state === 'complete' &&
+      primary.length > 0 &&
+      required.every((k) => saved.has(k)) &&
+      archive.recordedKeys.every((k) => saved.has(k));
+    const base = {
+      workId: id,
+      title: work.name,
+      phase: 'legacy',
+      expected: required.map((key) => ({ key })),
+      completedKeys: required.filter((k) => saved.has(k))
+    };
+    if (archive) {
+      put(
+        {
+          ...base,
+          id: 'legacy-archive:' + id,
+          state: complete ? 'complete' : 'partial',
+          filesComplete: complete,
+          legacyArchive: archive
+        },
+        true
+      );
+      if (!complete && saved.size)
+        db.prepare("INSERT INTO maintenance_file_state VALUES(?,'partial')").run(id);
+    }
+    if (task) {
+      const state =
+        task.state === 'complete'
+          ? complete
+            ? 'complete'
+            : 'review'
+          : ['running', 'waiting', 'queued', 'paused'].includes(task.state)
+            ? 'paused'
+            : ['failed', 'unavailable', 'cancelled'].includes(task.state)
+              ? task.state
+              : 'review';
+      put(
+        {
+          ...base,
+          id,
+          state,
+          legacyState: task.state,
+          legacyRank: task.rank,
+          legacyTask: task,
+          reason: { code: 'LEGACY_TASK', message: '旧任务状态 ' + task.state + '，按本次选择重新核验来源。' }
+        },
+        false
+      );
+    }
+  }
+}
 function populate(db, uid, rows, assets, media) {
   db.prepare('INSERT INTO source_account VALUES(1,?,?,NULL)').run(uid, '');
   const priority = { work: 0, source: 1, run: 2 };
@@ -127,8 +211,7 @@ function populate(db, uid, rows, assets, media) {
         db.prepare('INSERT INTO read_legacy_runs VALUES(?,?,?)').run(key, v.started, j(v.summary));
         break;
       case 'logItem':
-        db.prepare('INSERT INTO read_legacy_items VALUES(?,?,?,?)').run(v.run, v.kind, v.position, j(v.body));
-        break;
+        break; // The legacy primary key was session/work, so multiple items may share the same recorded position.
       case 'profile':
         db.prepare('INSERT INTO source_creator_profiles VALUES(?,?)').run(key, j(v));
         break;
@@ -144,26 +227,27 @@ function populate(db, uid, rows, assets, media) {
         );
         break;
       }
-      case 'task': {
-        const job = {
-          id: 'legacy:' + work,
-          workId: work,
-          title: db.prepare('SELECT title FROM works WHERE id=?').get(work).title,
-          state: 'cancelled',
-          expected: [],
-          completedKeys: [],
-          phase: 'legacy',
-          legacyTask: v,
-          legacyState: v.state,
-          legacyRank: v.rank,
-          reason: { code: 'LEGACY_TASK', message: '旧任务状态 ' + v.state + '。重新选择下载资源后可入队。' }
-        };
-        db.prepare('INSERT INTO download_jobs VALUES(?,?,?)').run(job.id, work, job.state);
-        db.prepare('INSERT INTO download_manifests(id,work_id,body) VALUES(?,?,?)').run(job.id, work, j(job));
-        break;
-      }
+      case 'task':
+      case 'download':
+        break; // Registered after the actual media and required keys have been checked.
     }
   }
+  const logItems = rows
+    .filter((r) => r.type === 'logItem')
+    .map((r) => r.value)
+    .sort((a, b) => a.position - b.position || String(a.body.id).localeCompare(String(b.body.id), 'en'));
+  const offsets = new Map();
+  for (const item of logItems) {
+    const n = offsets.get(item.run) ?? 0;
+    offsets.set(item.run, n + 1);
+    db.prepare('INSERT INTO read_legacy_items VALUES(?,?,?,?)').run(
+      item.run,
+      item.kind,
+      n,
+      JSON.stringify({ ...item.body, position: item.position })
+    );
+  }
+  saveImportedDownloads(db, rows, assets);
   let revision = 0;
   for (const a of assets) {
     const file = child(media, a.relative),
@@ -187,11 +271,22 @@ function populate(db, uid, rows, assets, media) {
         identity: idOf(stat),
         mtimeNs: String(stat.mtimeNs),
         registeredChangeNs: String(stat.ctimeNs),
+        ...(a.musicId
+          ? {
+              resourceIdentity: contentHash({
+                workId: a.work,
+                key: 'audio',
+                kind: 'audio',
+                sourceIdentity: 'music:' + a.musicId
+              })
+            }
+          : {}),
         files: {}
       }),
       revision
     );
   }
+  db.prepare('UPDATE download_options SET revision=max(revision,?)').run(revision);
 }
 function databaseDigest(db, ...exclude) {
   const hash = createHash('sha256');
@@ -226,6 +321,8 @@ async function existing(target, previewId, guard) {
       snapshot,
       mediaRoot,
       manifestSha256: receipt.manifestSha256,
+      uid: receipt.uid,
+      libraryId: receipt.libraryId,
       guard
     });
     if (!verification.verified) throw Error('彩排目标媒体发生变化。');

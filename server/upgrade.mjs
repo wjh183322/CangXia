@@ -88,7 +88,7 @@ function hashFile(file) {
 }
 
 export async function verifiedSnapshot(layout, status, request) {
-  const parent = path.join(layout.dir, 'snapshots');
+  const parent = request.externalRoot ?? path.join(layout.dir, 'snapshots');
   // Each attempt owns its destination; a failure or retry never replaces a recovery point.
   const id = randomUUID();
   const stage = path.join(parent, '.pending-' + id);
@@ -120,11 +120,14 @@ export async function verifiedSnapshot(layout, status, request) {
       if (isolated.prepare('PRAGMA journal_mode=DELETE').get().journal_mode !== 'delete') {
         throw Error('Cannot make snapshot self-contained.');
       }
-      if(request.rehearsal){
+      if (request.rehearsal) {
         isolated.exec('PRAGMA secure_delete=ON');
-        if(status.from>=10)isolated.exec('DELETE FROM download_auth');
-        if(status.from>=5)isolated.exec('UPDATE source_account SET profile_id=NULL');
-        if(status.from>=3)isolated.exec('DELETE FROM interactive_lease');
+        if (status.from >= 10)
+          isolated.exec(
+            "DELETE FROM download_auth; UPDATE download_manifests SET body=json_remove(body,'$.auth.sessionKey') WHERE json_type(body,'$.auth.sessionKey') IS NOT NULL"
+          );
+        if (status.from >= 5) isolated.exec('UPDATE source_account SET profile_id=NULL');
+        if (status.from >= 3) isolated.exec('DELETE FROM interactive_lease');
         isolated.exec('VACUUM');
       }
     } finally {

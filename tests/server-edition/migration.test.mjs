@@ -13,6 +13,12 @@ import { ServerClient, pinnedRequest } from '../../electron/server-client.mjs';
 import { registerCatalogueHandlers } from '../../electron/server-ipc.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../../electron/store.mjs';
+import { listWorks } from '../../server/catalogue.mjs';
+import { historyRuns, historyItems } from '../../server/read-history.mjs';
+import * as recovery from '../../server/recovery.mjs';
+import { mediaList } from '../../server/media.mjs';
+import { authorPublic } from '../../shared/backup-protocol.mjs';
+import { createDownloads } from '../../server/downloads.mjs';
 import { openLibrary } from '../../server/library.mjs';
 import { createBackupServer } from '../../backup-server/server.mjs';
 import { sealSource, previewImport, importApproved } from '../../server/migration.mjs';
@@ -55,13 +61,45 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
     { scope: { workId: deleted, kind: 'files', sourceId: '' }, generation: 1, revision: 1, deleted: true },
     []
   );
+  const parentLog = {
+    token: 'old-batch',
+    scope: '__batch__',
+    source: 'batch',
+    name: '合成批次',
+    phase: 'done',
+    startedAt: '2026-01-01T00:00:00Z'
+  };
+  store.readHistory.batches.put(parentLog);
+  store.readHistory.batches.put({
+    token: 'old-child',
+    scope: '__all__',
+    batchId: 'old-batch',
+    batchState: 'complete',
+    hasReadSummary: true,
+    name: '总收藏',
+    checked: 18,
+    rawCount: 22,
+    notReturned: null,
+    countsVersion: 2,
+    startedAt: parentLog.startedAt
+  });
+  store.db.run('INSERT INTO read_history_children VALUES(?,?,?)', ['old-batch', 'old-child', 4]);
+  const detail = { id, name: '恢复明细', kind: 'fill', reappeared: true, position: 3 };
+  store.db.run('INSERT INTO read_history_items VALUES(?,?,?,?,?,?)', [
+    'old-child',
+    id,
+    3,
+    'fill',
+    JSON.stringify(detail),
+    123
+  ]);
   const source = createBackupServer({
     dataDir: nas,
     token: 'synthetic-rehearsal-only-'.repeat(2),
     allowInsecureLoopback: true
   });
   await source.listen();
-  const bytes = Buffer.from('synthetic-video-body'),
+  const bytes = fs.readFileSync(new URL('./fixtures/media-preview.mp4', import.meta.url)),
     sha = hash(bytes),
     home = { kind: 'collection', id: '__all__', folder: '收藏', workFolder: '旧归档' };
   fs.writeFileSync(path.join(nas, 'objects', sha), bytes);
@@ -192,7 +230,19 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
       assert.equal(db.prepare('SELECT count(*) n FROM works WHERE id=?').get('999').n, 0);
       assert.equal(db.prepare('SELECT count(*) n FROM media_files WHERE work_id=?').get(deleted).n, 0);
       assert.equal(db.prepare('SELECT count(*) n FROM download_auth').get().n, 0);
-      assert.equal(db.prepare('SELECT state FROM download_jobs WHERE work_id=?').get(id).state, 'cancelled');
+      assert.deepEqual(
+        listWorks(db, { source: 'all', filter: { downloaded: 'complete' } }, { grant: { proof: 'test' } })
+          .ids,
+        [id]
+      );
+      assert.equal(db.prepare('SELECT state FROM download_jobs WHERE id=?').get(id).state, 'paused');
+      assert.equal(historyRuns(db).items[0].token, 'old-batch');
+      assert.equal(historyRuns(db).total, 1);
+      const child = historyRuns(db, { batch: 'old-batch' }).items[0];
+      assert.equal(child.checked, 18);
+      assert.equal(child.rawCount, 22);
+      assert.equal(child.notReturned, null);
+      assert.equal(historyItems(db, { runId: child.token, kind: 'returned' }).items[0].id, id);
       assert.equal(db.prepare('SELECT count(*) n FROM source_members WHERE work_id=?').get(deleted).n, 0);
     });
     const rel = '收藏/旧归档/原件.mp4',
@@ -210,15 +260,50 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
     fs.cpSync(result.snapshot, snapshot, { recursive: true });
     fs.cpSync(mediaRoot, archive, { recursive: true });
     const check = () =>
-      verifyRestore({ snapshot, mediaRoot: archive, manifestSha256: result.manifestSha256 });
+      verifyRestore({
+        snapshot,
+        mediaRoot: archive,
+        manifestSha256: result.manifestSha256,
+        uid,
+        libraryId: result.libraryId
+      });
+    assert.equal((await check()).matched.length, 2);
+    const targetRestore = path.join(root, 'playable-copy');
+    const restoredInput = {
+      snapshot,
+      mediaRoot: archive,
+      manifestSha256: result.manifestSha256,
+      uid,
+      target: targetRestore,
+      libraryId: result.libraryId,
+      confirmed: true
+    };
+    const playable = await recovery.restoreApproved(restoredInput);
+    assert.equal(playable.verifiedPlayback, 1);
+    assert.equal(playable.registeredFiles, 2);
+    await assert.rejects(recovery.restoreApproved(restoredInput), /存在/);
+    await assert.rejects(
+      recovery.restoreApproved({ ...restoredInput, uid: '1234', target: path.join(root, 'wrong-account') }),
+      /账号/
+    );
     assert.equal((await check()).matched.length, 2);
     assert.deepEqual(fs.readFileSync(path.join(archive, '收藏', '旧归档', '作品信息.json')), metadata);
     fs.writeFileSync(path.join(archive, rel), 'modified');
     assert.equal((await check()).changed.length, 1);
+    const mutatedTarget = path.join(root, 'changed-restore');
+    await assert.rejects(recovery.restoreApproved({ ...restoredInput, target: mutatedTarget }), /核实/);
+    assert.ok(!fs.existsSync(mutatedTarget));
     fs.unlinkSync(path.join(archive, rel));
     assert.equal((await check()).missing.length, 1);
     fs.writeFileSync(path.join(archive, '旁存文件'), 'keep');
     assert.deepEqual((await check()).extra, ['旁存文件']);
+    const foreignControl = path.join(archive, '.cangxia-staging');
+    fs.mkdirSync(foreignControl);
+    const fake = new DatabaseSync(path.join(foreignControl, 'worker.sqlite'));
+    fake.exec('CREATE TABLE owner(id TEXT PRIMARY KEY,foreign_data TEXT) STRICT');
+    fake.prepare('INSERT INTO owner VALUES(?,?)').run(result.libraryId, 'operator-file');
+    fake.close();
+    assert.ok((await check()).extra.includes('.cangxia-staging/worker.sqlite'));
     fs.appendFileSync(path.join(snapshot, 'library.sqlite'), 'corrupt');
     await assert.rejects(check(), /摘要/);
     lib.write((db) => {
@@ -233,6 +318,25 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
       confirmed: true
     });
     assert.ok(saved.snapshot !== result.snapshot);
+    const handoffDir = dir('growing-handoff');
+    let wrote = false;
+    const changing = await preserveBeforeRollback({
+      root: target,
+      destination: handoffDir,
+      uid,
+      libraryId: result.libraryId,
+      imageDigest,
+      confirmed: true,
+      guard: () => {
+        if (wrote || !fs.readdirSync(handoffDir).some((n) => !n.startsWith('.'))) return;
+        wrote = true;
+        lib.write((db) =>
+          db.prepare('INSERT INTO works VALUES(?,?,?)').run('4', '封存后新增', JSON.stringify(work('4')))
+        );
+      }
+    });
+    assert.equal(changing.updatedAfterSnapshot, true);
+    assert.equal(changing.verified, false);
     assert.equal(
       fs.readFileSync(path.join(saved.snapshot, 'library.sqlite')).includes('private-test-session-material'),
       false
@@ -356,8 +460,224 @@ test('desktop IPC uses the authenticated owner and worker to approve a named off
     library.read((db) => db.prepare('SELECT count(*) n FROM works').get().n),
     0
   );
+  const external = path.join(root, 'restores', 'usb01');
+  fs.mkdirSync(external);
+  fs.cpSync(done.summary.snapshot, path.join(external, 'snapshot'), { recursive: true });
+  fs.cpSync(done.summary.mediaRoot, path.join(external, 'media'), { recursive: true });
+  config.restores.usb01 = { libraryId: done.summary.libraryId, manifestSha256: done.summary.manifestSha256 };
+  fs.writeFileSync(path.join(root, 'rehearsal.json'), JSON.stringify(config));
+  const checked = await op({ action: 'verify', restore: 'usb01' });
+  assert.equal(checked.state, 'done', checked.message);
+  const restored = await op({
+    action: 'restore',
+    restore: 'usb01',
+    target: 'usable',
+    uid,
+    libraryId: checked.summary.libraryId,
+    manifestSha256: checked.summary.manifestSha256,
+    confirmed: true
+  });
+  assert.equal(restored.state, 'done', restored.message);
+  assert.equal(restored.summary.registeredFiles, 0);
+  library.write((db) => {
+    db.prepare('INSERT INTO source_account VALUES(1,?,?,NULL)').run(uid, '现场合成账号');
+    db.prepare('INSERT INTO works VALUES(?,?,?)').run('202', '切换后新增', JSON.stringify(work('202')));
+    db.prepare("INSERT INTO download_jobs VALUES('202','202','paused')").run();
+    db.prepare("INSERT INTO download_manifests(id,work_id,body) VALUES('202','202',?)").run(
+      JSON.stringify({
+        id: '202',
+        workId: '202',
+        state: 'paused',
+        auth: { uid, sessionKey: 'do-not-copy-credential' }
+      })
+    );
+  });
+  const liveSnapshots = path.join(liveRoot, 'cangxia-server', 'snapshots'),
+    before = fs.readdirSync(liveSnapshots);
+  const handoff = await op({
+    action: 'handoff',
+    libraryId: library.libraryId,
+    uid,
+    target: 'before-rollback',
+    confirmed: true
+  });
+  assert.equal(handoff.state, 'done', handoff.message);
+  assert.ok(handoff.summary.verified);
+  assert.deepEqual(fs.readdirSync(liveSnapshots), before);
+  assert.ok(handoff.summary.snapshot.startsWith(path.join(root, 'targets', 'before-rollback') + path.sep));
+  const handoffDb = path.join(handoff.summary.snapshot, 'library.sqlite');
+  assert.equal(fs.readFileSync(handoffDb).includes('do-not-copy-credential'), false);
+  const reader = new DatabaseSync(handoffDb, { readOnly: true });
+  assert.equal(reader.prepare('SELECT state FROM download_jobs WHERE work_id=?').get('202').state, 'paused');
+  reader.close();
   await client.release();
   await other.connect({ ...cfg, deviceId: 'B', token: creds.B.token });
   await other.acquire();
   await assert.rejects(other.call('rehearsal', { input: { action: 'list' } }), /账号无权/);
+});
+
+test('independent memberships, audio identity, ranked overlays and restored generations survive normal queries', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-order-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const win = path.join(root, 'windows'),
+    nas = path.join(root, 'nas'),
+    target = path.join(root, 'target');
+  fs.mkdirSync(win);
+  fs.mkdirSync(nas);
+  const uid = '55',
+    author = 'MS4wLjABsynthetic01';
+  const s = await Store.open(path.join(win, 'library.sqlite'), path.join(win, 'archive'));
+  const n = createBackupServer({ dataDir: nas, token: 'synthetic-'.repeat(5), allowInsecureLoopback: true });
+  await n.listen();
+  try {
+    const nasId = n.status().libraryId;
+    s.deviceScopes.bind(nasId);
+    s.setSetting('account', { uid });
+    const record = (k, id, b) =>
+      n.db.prepare('INSERT INTO records VALUES(?,?,?,1)').run(k, id, JSON.stringify(b));
+    record('settings', 'account', { value: { uid } });
+    const person = {
+      id: author,
+      uid: '123',
+      name: '作者',
+      folder: '作者作品/作者',
+      url: 'https://www.douyin.com/user/' + author,
+      updatedAt: '2026-01-01',
+      run: { count: 2, pages: 1, status: 'complete' }
+    };
+    s.put('authors', author, person);
+    record('authors', author, authorPublic(person));
+    s.put('collections', '77', { id: '77', name: '夹', added: true });
+    for (const id of ['1', '2', '3', '4', '5', '88', '89']) {
+      const w = work(id);
+      if (id === '88' || id === '89') w.music = { id: '100', version: 1, state: 'known' };
+      s.put('works', id, w);
+    }
+    s.db.run('INSERT INTO author_members VALUES(?,?,?,?)', [author, '1', 0, 0]);
+    record('author_members', author + ':1', { authorId: author, workId: '1', position: 0, hidden: false });
+    for (const [id, pos] of [
+      ['1', 0],
+      ['2', 1]
+    ])
+      s.db.run('INSERT INTO members VALUES(?,?,?)', ['77', id, pos]);
+    s.db.run('INSERT INTO sync_runs VALUES(?,?)', ['77', JSON.stringify({ status: 'running' })]);
+    s.db.run('INSERT INTO sync_items VALUES(?,?,?)', ['77', '3', 0]);
+    s.put('collections', '78', { id: '78', name: '读取夹', added: true });
+    for (const [id, pos] of [
+      ['1', 0],
+      ['2', 1]
+    ])
+      s.db.run('INSERT INTO members VALUES(?,?,?)', ['78', id, pos]);
+    const readRun = { key: 'quick:78', scope: '78', mode: 'quick', status: 'running' };
+    s.put('collection_read_runs', readRun.key, readRun);
+    for (const [id, pos] of [
+      ['3', 0],
+      ['2', 1]
+    ])
+      s.db.run('INSERT INTO collection_read_items VALUES(?,?,?)', [readRun.key, id, pos]);
+    const displayed = s.collectionReads.order('78', s.orderedMemberRows('78')).map((r) => r.work_id);
+    for (const [id, pos] of [
+      ['4', 10],
+      ['5', 10],
+      ['88', 11]
+    ])
+      s.db.run('INSERT INTO members VALUES(?,?,?)', ['__all__', id, pos]);
+    for (const [id, state] of [
+      ['4', 'failed'],
+      ['5', 'cancelled']
+    ])
+      s.db.run('INSERT INTO download_tasks VALUES(?,?,?,?)', [id, state, 1, JSON.stringify({ id, state })]);
+    const files = { workId: '88', kind: 'files', sourceId: '' };
+    s.deviceScopes.remember({ scope: files, generation: 1, revision: 1, deleted: true });
+    const scope = (id, kind, sid, gen, del, rev) =>
+      n.db
+        .prepare('INSERT INTO scope_state VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(id, kind, sid, gen, Number(del), rev, 'synthetic', 'n', 'test', '2026');
+    scope('88', 'files', '', 2, false, 9);
+    scope('88', 'account', '__all__', 1, true, 10);
+    const audio = Buffer.alloc(44 + 16000);
+    audio.write('RIFF');
+    audio.writeUInt32LE(audio.length - 8, 4);
+    audio.write('WAVEfmt ', 8);
+    audio.writeUInt32LE(16, 16);
+    audio.writeUInt16LE(1, 20);
+    audio.writeUInt16LE(1, 22);
+    audio.writeUInt32LE(8000, 24);
+    audio.writeUInt32LE(16000, 28);
+    audio.writeUInt16LE(2, 32);
+    audio.writeUInt16LE(16, 34);
+    audio.write('data', 36);
+    audio.writeUInt32LE(16000, 40);
+    const sha = hash(audio);
+    fs.writeFileSync(path.join(nas, 'objects', sha), audio);
+    n.db.prepare('INSERT INTO objects VALUES(?,?)').run(sha, audio.length);
+    for (const id of ['88', '89'])
+      record('downloads', id, {
+        state: 'partial',
+        collectionId: '__all__',
+        home: { kind: 'collection', id: '__all__', folder: '收藏', workFolder: '归档' + id },
+        assets: [],
+        audio: {
+          state: 'saved',
+          musicId: id === '88' ? '100' : '999',
+          object: { sha256: sha, size: audio.length, format: 'wav', duration: 1 }
+        }
+      });
+    const args = {
+      uid,
+      imageDigest,
+      target,
+      sources: [
+        await sealSource({ kind: 'windows', directory: win, database: 'library.sqlite' }),
+        await sealSource({ kind: 'nas', directory: nas, database: 'library.sqlite' })
+      ]
+    };
+    const preview = await previewImport(args);
+    assert.ok(preview.conflicts.some((c) => c.reason.includes('顺序') && c.key === 'total/5'));
+    const result = await importApproved({
+      ...args,
+      previewId: preview.previewId,
+      approval: { confirmed: true, uid, target, previewId: preview.previewId }
+    });
+    const lib = openLibrary({ root: target, expectedId: result.libraryId }),
+      owner = { grant: { proof: 'test' } },
+      downloads = createDownloads({ library: lib, root: target });
+    try {
+      lib.read((db) => {
+        assert.deepEqual(listWorks(db, { source: 'folder:77' }, owner).ids, ['3', '1', '2']);
+        assert.deepEqual(listWorks(db, { source: 'folder:78' }, owner).ids, displayed);
+        assert.deepEqual(listWorks(db, { source: 'author:' + author }, owner).ids, ['1']);
+        assert.deepEqual(listWorks(db, { source: 'total' }, owner).ids, []);
+        assert.equal(mediaList(db, '88').find((a) => a.key === 'audio')?.saved, true);
+        assert.ok(!mediaList(db, '89').some((a) => a.key === 'audio' && a.saved));
+        assert.ok(downloads.page(db, { tab: 'failed' }).jobs.some((j) => j.workId === '4'));
+        assert.ok(!downloads.page(db, { tab: 'active' }).jobs.some((j) => j.workId === '5'));
+      });
+      const proof = await preserveBeforeRollback({
+        root: target,
+        libraryId: result.libraryId,
+        imageDigest,
+        uid,
+        confirmed: true
+      });
+      assert.equal(proof.verification.extra.length, 0);
+      assert.ok(proof.verified);
+      const restored = await recovery.restoreApproved({
+        uid,
+        libraryId: result.libraryId,
+        snapshot: proof.snapshot,
+        mediaRoot: proof.mediaRoot,
+        target: path.join(root, 'recovered'),
+        confirmed: true,
+        manifestSha256: proof.manifestSha256
+      });
+      assert.equal(restored.verifiedPlayback, 1);
+    } finally {
+      await downloads.close();
+      lib.close();
+    }
+  } finally {
+    s.close();
+    await n.close();
+  }
 });

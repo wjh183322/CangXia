@@ -5,7 +5,7 @@ import { Worker, isMainThread, workerData, parentPort } from 'node:worker_thread
 import { fileURLToPath } from 'node:url';
 import { child, directory, disjoint, digest, segment } from './rehearsal-files.mjs';
 import { previewImport, importApproved } from './migration.mjs';
-import { preserveBeforeRollback, verifyRestore } from './recovery.mjs';
+import { preserveBeforeRollback, verifyRestore, restoreApproved } from './recovery.mjs';
 import { connect, inspectLayout, isUuid, writeDurably, syncDirectory } from './library.mjs';
 
 const nameOf = (value) => {
@@ -54,21 +54,54 @@ function filesFor(root, config, names) {
     return { ...JSON.parse(bytes), directory: directory(child(root, 'sources/' + n)) };
   });
 }
-async function run({ root, input, config, flag }, guard) {
+async function run({ root, liveRoot, input, config }, guard) {
   const action = input.action;
-  if (action === 'verify') {
+  if (['verify', 'restore'].includes(action)) {
     const restore = nameOf(input.restore),
       expected = config.restores?.[restore];
     if (!expected) throw Error('请选择配置好的独立恢复副本。');
     const base = directory(child(root, 'restores/' + restore));
-    return verifyRestore({
+    const args = {
       snapshot: directory(child(base, 'snapshot')),
       mediaRoot: directory(child(base, 'media')),
       manifestSha256: expected.manifestSha256,
+      libraryId: expected.libraryId,
+      uid: config.uid,
+      guard
+    };
+    disjoint(liveRoot, args.snapshot);
+    disjoint(liveRoot, args.mediaRoot);
+    if (action === 'verify')
+      return { ...(await verifyRestore(args)), restore, manifestSha256: args.manifestSha256 };
+    if (
+      input.manifestSha256 !== args.manifestSha256 ||
+      input.libraryId !== args.libraryId ||
+      input.uid !== config.uid
+    )
+      throw Error('请重新核对恢复点、库身份和账号后批准。');
+    const target = child(root, 'targets/' + nameOf(input.target));
+    disjoint(liveRoot, target);
+    return restoreApproved({ ...args, target, confirmed: input.confirmed });
+  }
+  const target = child(root, 'targets/' + nameOf(input.target));
+  disjoint(liveRoot, target);
+  if (action === 'handoff') {
+    if (input.uid !== config.uid || input.confirmed !== true)
+      throw Error('请批准当前运行库的独立回退恢复点。');
+    const layout = inspectLayout(liveRoot, input.libraryId);
+    if (!layout) throw Error('当前运行库身份不符。');
+    if (fs.existsSync(target)) throw Error('移交目标名已存在。');
+    fs.mkdirSync(target, { mode: 0o700 });
+    return preserveBeforeRollback({
+      root: liveRoot,
+      libraryId: input.libraryId,
+      uid: config.uid,
+      destination: target,
+      imageDigest: config.imageDigest,
+      confirmed: true,
       guard
     });
   }
-  const target = child(root, 'targets/' + nameOf(input.target));
   if (action === 'preserve') {
     const layout = inspectLayout(target, input.libraryId);
     if (!layout) throw Error('找不到指定彩排目标。');
@@ -85,6 +118,7 @@ async function run({ root, input, config, flag }, guard) {
     }
     return preserveBeforeRollback({
       root: target,
+      uid: config.uid,
       libraryId: input.libraryId,
       imageDigest: config.imageDigest,
       confirmed: input.confirmed,
@@ -93,6 +127,7 @@ async function run({ root, input, config, flag }, guard) {
   }
   const sources = filesFor(root, config, input.sources),
     args = { sources, target, uid: config.uid, imageDigest: config.imageDigest, guard };
+  for (const s of sources) disjoint(liveRoot, s.directory);
   if (action === 'preview') return previewImport(args);
   if (action === 'import')
     return importApproved({
@@ -130,6 +165,13 @@ function saveResult(dir, result) {
       verification[key] = verification[key].length;
     }
   delete summary.conflicts;
+  const disk = fs.statfsSync(dir, { bigint: true });
+  const needed = BigInt(
+    Buffer.byteLength(JSON.stringify(summary)) +
+      audit.reduce((n, row) => n + Buffer.byteLength(JSON.stringify(row)) + 2, 0) +
+      1048576
+  );
+  if (disk.bavail * disk.bsize < needed) throw Error('独立报告目录空间不足。');
   for (let pos = 0; pos < audit.length; pos += 50)
     writeDurably(
       path.join(dir, 'page-' + (pos / 50 + 1) + '.json'),
@@ -138,12 +180,12 @@ function saveResult(dir, result) {
   finishReport(dir, 'result.json', { ...summary, total: audit.length });
 }
 if (!isMainThread && workerData?.rehearsalWorker) {
-  const { root, input, config, flag, dir } = workerData;
+  const { flag, dir } = workerData;
   const guard = () => {
     if (Atomics.load(new Int32Array(flag), 0)) throw Error('彩排已取消或控制权已失效。');
   };
   try {
-    const result = await run({ root, input, config, flag }, guard);
+    const result = await run(workerData, guard);
     guard();
     saveResult(dir, result);
     parentPort.postMessage('ready');
@@ -172,12 +214,15 @@ export function createRehearsals({ root, liveRoot }) {
           .readdirSync(reports)
           .filter((id) => isUuid(id) && fs.existsSync(child(reports, id + '/request.json')))
           .map((id) => ({ id, ...readJson(child(reports, id + '/request.json')) }))
-          .filter((r) => r.accountId === accountId)
+          .filter((r) => r.accountId === accountId && r.uid === config.uid)
           .sort((a, b) => b.started.localeCompare(a.started));
         return {
           sources: Object.keys(config.sources).sort(),
           restores: Object.keys(config.restores ?? {}),
           uid: config.uid,
+          libraryId: session.read(
+            (db) => db.prepare('SELECT library_id FROM library_identity WHERE singleton=1').get().library_id
+          ),
           jobs: jobs.slice(0, 50)
         };
       }
@@ -185,7 +230,7 @@ export function createRehearsals({ root, liveRoot }) {
         if (!isUuid(input.id)) throw Error('彩排编号无效。');
         const dir = directory(child(reports, input.id)),
           request = readJson(child(dir, 'request.json'));
-        if (request.accountId !== accountId) throw Error('彩排账号不符。');
+        if (request.accountId !== accountId || request.uid !== config.uid) throw Error('彩排账号不符。');
         if (input.action === 'cancel') {
           running.get(input.id)?.abort();
           return { id: input.id };
@@ -205,13 +250,15 @@ export function createRehearsals({ root, liveRoot }) {
           page
         };
       }
-      if (!['preview', 'import', 'verify', 'preserve'].includes(input.action)) throw Error('彩排操作无效。');
+      if (!['preview', 'import', 'verify', 'preserve', 'restore', 'handoff'].includes(input.action))
+        throw Error('彩排操作无效。');
       if (running.size) throw Error('已有彩排正在执行，请先查看或取消。');
       const id = randomUUID(),
         dir = child(reports, id);
       fs.mkdirSync(dir, { mode: 0o700 });
       finishReport(dir, 'request.json', {
         accountId,
+        uid: config.uid,
         action: input.action,
         target: input.target ?? null,
         started: new Date().toISOString()
@@ -219,7 +266,7 @@ export function createRehearsals({ root, liveRoot }) {
       const flag = new SharedArrayBuffer(4),
         abort = () => Atomics.store(new Int32Array(flag), 0, 1);
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { rehearsalWorker: true, root, input, config, flag, dir }
+        workerData: { rehearsalWorker: true, root, liveRoot, input, config, flag, dir }
       });
       const check = setInterval(() => {
         try {

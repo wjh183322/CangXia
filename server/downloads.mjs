@@ -341,7 +341,7 @@ async function verifyPng(file, size, signal) {
   throw formatError();
 }
 
-async function verifyFormat(asset, mime, signal) {
+export async function verifyFormat(asset, mime, signal) {
   signal.throwIfAborted();
   const { file, size } = asset;
   if (size < 16) throw formatError();
@@ -451,7 +451,7 @@ function publicJob(job) {
     message:
       job.reason?.message || (job.state === 'paused' ? '已暂停' : n + '/' + total + ' 项已校验' + detail),
     reason: job.reason,
-    progress: job.state === 'complete' ? 100 : Math.min(99, Math.floor((100 * (n + partial)) / total)),
+    progress: job.state === 'complete' ? 100 : total ? Math.min(99, Math.floor((100 * (n + partial)) / total)) : 0,
     bytes: job.bytes || 0,
     cleanupPending: job.cleanupPending,
     filesComplete: job.filesComplete,
@@ -694,7 +694,7 @@ export function createDownloads({
           .get(workId)
       )
         throw needsReview();
-      if (old && (tabs.active.includes(old.state) || old.cleanupPending)) {
+      if (old && !old.legacyTask && (tabs.active.includes(old.state) || old.cleanupPending)) {
         existing++;
         continue;
       }
@@ -773,6 +773,20 @@ export function createDownloads({
         fenceUnavailable(conn,job.workId);continue;
       }
       if(['resume','retry','cancel'].includes(action)&&removalOwnsFiles(conn,job.workId))throw failure('NAS_REMOVAL_BUSY','请先处理此作品的删除或恢复回执。');
+      if (job.legacyTask && !['complete', 'cancelled'].includes(job.state)) {
+        if (action === 'cancel') {
+          job.state = 'cancelled';
+          put(conn, job);
+          changed++;
+          continue;
+        }
+        const resume = action === 'resume' && job.state === 'paused';
+        const retry = action === 'retry' && ['failed', 'review', 'unavailable'].includes(job.state);
+        if (resume || retry) {
+          changed += enqueue(conn, [job.workId], job.legacyTask.coverOnly ? 'repair-cover' : 'repair').queued;
+          continue;
+        }
+      }
       if (action === 'clear' && job.state === 'complete') {
         conn.prepare('UPDATE download_manifests SET hidden=1 WHERE id=?').run(id);
         conn.exec('UPDATE download_options SET revision=revision+1');

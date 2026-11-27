@@ -35,7 +35,50 @@ export function disjoint(a, b) {
     const rel = path.relative(x, y);
     return !rel || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
   };
-  if (within(a, b) || within(b, a)) throw Error('源、运行库及目标必须使用独立目录。');
+  const fail = () => {
+    throw Error('源、运行库及目标必须使用独立目录。');
+  };
+  if (within(a, b) || within(b, a)) fail();
+  function ancestors(file) {
+    const ids = [];
+    for (let p = file; ; p = path.dirname(p)) {
+      try {
+        const s = fs.lstatSync(p, { bigint: true });
+        ids.push({ path: p, id: s.dev + '/' + s.ino });
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
+      if (path.dirname(p) === p) break;
+    }
+    return ids;
+  }
+  const x = ancestors(a),
+    y = ancestors(b);
+  if (
+    x.some((p) => p.path === a && y.some((q) => q.id === p.id)) ||
+    y.some((q) => q.path === b && x.some((p) => p.id === q.id))
+  )
+    fail();
+  if (process.platform === 'linux') {
+    const unescape = (s) => s.replace(/\\([0-7]{3})/g, (_, v) => String.fromCharCode(parseInt(v, 8)));
+    const mounts = fs
+      .readFileSync('/proc/self/mountinfo', 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => {
+        const fields = line.split(' ');
+        return { device: fields[2], root: unescape(fields[3]), at: unescape(fields[4]) };
+      })
+      .sort((l, r) => r.at.length - l.at.length);
+    const backing = (file) => {
+      const m = mounts.find((m) => within(m.at, file));
+      if (!m) fail();
+      return { device: m.device, path: path.join(m.root, path.relative(m.at, file)) };
+    };
+    const p = backing(a),
+      q = backing(b);
+    if (p.device === q.device && (within(p.path, q.path) || within(q.path, p.path))) fail();
+  }
 }
 export async function fileProof(file) {
   directory(path.dirname(file));
@@ -161,7 +204,13 @@ function verifyWal(file) {
   }
 }
 export async function readCopy(source, name, read) {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cangxia-legacy-'));
+  const temp = directory(os.tmpdir()),
+    space = fs.statfsSync(temp, { bigint: true });
+  const bytes = source.files
+    .filter((f) => [name, name + '-wal'].includes(f.relative))
+    .reduce((sum, f) => sum + BigInt(f.size), 0n);
+  if (space.bavail * space.bsize < 2n * bytes + 1048576n) throw Error('临时 SQLite/WAL 副本空间不足。');
+  const scratch = fs.mkdtempSync(path.join(temp, 'cangxia-legacy-'));
   try {
     const file = path.join(scratch, 'copy.sqlite');
     for (const suffix of ['', '-wal']) {

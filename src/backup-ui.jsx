@@ -68,6 +68,8 @@ export function ServerBackupResponsibility({ api }) {
   const summary = report?.summary,
     approval = summary?.previewId && summary?.identities && summary.target?.split(/[\\/]/).pop() === target;
   const totalPages = Math.max(1, Math.ceil((summary?.total || 0) / 50));
+  const verifiedRestore = summary?.restore === restore && summary?.verified && summary?.manifestSha256;
+  const [handoff, setHandoff] = useState(false);
   return (
     <section>
       <h3>备份与还原</h3>
@@ -88,6 +90,7 @@ export function ServerBackupResponsibility({ api }) {
               value={target}
               onChange={(e) => {
                 setTarget(e.target.value);
+                setHandoff(false);
                 setConfirmed(false);
               }}
               placeholder="例如 rehearsal-01"
@@ -100,18 +103,78 @@ export function ServerBackupResponsibility({ api }) {
           >
             预览迁移差异与空间
           </button>
-          {!!config.restores.length && (
+          <details>
+            <summary>运行库回退前移交</summary>
+            <p>
+              为当前运行库 {config.libraryId} 在新目标 {target || '（请输入名称）'}{' '}
+              生成独立快照并核对媒体。请保留切换后新增资料及任务，并由绿联复制归档。
+            </p>
             <label>
-              外部还原目录
-              <select value={restore} onChange={(e) => setRestore(e.target.value)}>
-                {config.restores.map((r) => (
-                  <option key={r}>{r}</option>
-                ))}
-              </select>
+              <input type="checkbox" checked={handoff} onChange={(e) => setHandoff(e.target.checked)} />
+              确认封存当前库，不切换运行卷
+            </label>
+            <button
+              disabled={busy || !handoff || !target}
+              onClick={() =>
+                handle(async () => {
+                  setHandoff(false);
+                  await launch({
+                    action: 'handoff',
+                    target,
+                    uid: config.uid,
+                    libraryId: config.libraryId,
+                    confirmed: true
+                  });
+                })
+              }
+            >
+              创建独立回退恢复点
+            </button>
+          </details>
+          {!!config.restores.length && (
+            <div>
+              <label>
+                外部还原目录
+                <select value={restore} onChange={(e) => setRestore(e.target.value)}>
+                  {config.restores.map((r) => (
+                    <option key={r}>{r}</option>
+                  ))}
+                </select>
+              </label>
               <button disabled={busy} onClick={() => handle(() => launch({ action: 'verify', restore }))}>
                 核对还原的数据库和媒体
               </button>
-            </label>
+              {verifiedRestore && target && (
+                <>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={confirmed}
+                      onChange={(e) => setConfirmed(e.target.checked)}
+                    />
+                    确认在新目标 {target} 重建文件身份并通过正式播放接口核验
+                  </label>
+                  <button
+                    disabled={busy || !confirmed}
+                    onClick={() =>
+                      handle(() =>
+                        launch({
+                          action: 'restore',
+                          restore,
+                          target,
+                          uid: config.uid,
+                          libraryId: summary.libraryId,
+                          manifestSha256: summary.manifestSha256,
+                          confirmed: true
+                        })
+                      )
+                    }
+                  >
+                    验证独立恢复库可用性
+                  </button>
+                </>
+              )}
+            </div>
           )}
           {!!config.jobs.length && (
             <label>
@@ -124,9 +187,14 @@ export function ServerBackupResponsibility({ api }) {
                   <option key={j.id} value={j.id}>
                     {j.started} ·{' '}
                     {
-                      { preview: '预览', import: '导入', verify: '恢复核对', preserve: '回退前封存' }[
-                        j.action
-                      ]
+                      {
+                        preview: '预览',
+                        import: '导入',
+                        verify: '恢复核对',
+                        preserve: '回退前封存',
+                        restore: '独立开库验证',
+                        handoff: '运行库回退移交'
+                      }[j.action]
                     }{' '}
                     {j.target}
                   </option>
@@ -216,7 +284,16 @@ export function ServerBackupResponsibility({ api }) {
                   清单 SHA-256 {summary.manifestSha256}
                 </p>
               )}
-              {(summary.databaseVerified || summary.verification) && (
+              {summary.updatedAfterSnapshot && (
+                <p role="alert">封存期间运行库新增或变更了资料，请保留刚生成的快照并在停写后再建恢复点。</p>
+              )}
+              {summary.verifiedPlayback !== undefined && (
+                <p>
+                  已在独立目标登记 {summary.registeredFiles} 个文件，正式播放接口已读回{' '}
+                  {summary.verifiedPlayback} 个资源。
+                </p>
+              )}
+              {(summary.matched !== undefined || summary.verification) && (
                 <p>
                   数据库已核验 · 匹配 {(summary.verification ?? summary).matched} · 缺失{' '}
                   {(summary.verification ?? summary).missing} · 变动{' '}

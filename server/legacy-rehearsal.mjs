@@ -1,6 +1,14 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { validCollection, validId, validAuthor, validHome, contentHash } from '../shared/backup-protocol.mjs';
+import {
+  validCollection,
+  validId,
+  validAuthor,
+  validHome,
+  contentHash,
+  authorPublic
+} from '../shared/backup-protocol.mjs';
+import { readLegacyOrder } from './legacy-order.mjs';
 import { normalizeScope } from '../shared/backup-scopes.mjs';
 import { child, readCopy, segment } from './rehearsal-files.mjs';
 
@@ -16,7 +24,7 @@ const allowedWork =
 const allowedSource =
   'id name folder rank added archived remoteMissing uid uniqueId avatar url reportedCount readSummary updatedAt';
 const allowedRun =
-  'scope source startedAt endedAt mode name status phase count pages total oldCount newCount added filled frontAdded initialAdded reappeared outcome succeeded failed skipped paused pending complete';
+  'scope source startedAt endedAt finishedAt mode name status phase count checked rawCount countsVersion existing newWorks pages total oldCount newCount added restored filled frontAdded initialAdded reappeared notReturned historyCount hasPrevious baselineKnown warning outcome succeeded failed skipped paused pending complete running processed includeTotal batchState batchMessage hasReadSummary reason message readPhase saveFailed';
 const allowedNested = new Set(
   'index urls width height source id uid secUid uniqueId nickname roleTitle avatar name state version title author duration mixPending clip begin end volume unit textExtra challenges hashtag_name hashtagName hashtag_id hashtagId start end type user_id text challenge_name cha_name cid desc sec_uid is_commerce count complete pages time identities imageOriginals imageCount videoPixels videoRanked videoBitRate videoObservedAt kind position reason code at status original url music signature observedAt value'.split(
     ' '
@@ -98,7 +106,9 @@ export async function reconcile(sources, uid) {
     identities = [],
     fileClaims = [],
     objectFiles = new Map(),
-    unlinked = new Map();
+    unlinked = new Map(),
+    versions = new Map(),
+    legacyFlags = [];
   function issue(source, type, key, reason) {
     conflicts.push({ source, type, key: String(key), reason });
   }
@@ -110,6 +120,27 @@ export async function reconcile(sources, uid) {
     if (s.kind === 'files') protect('files', s.workId, reason);
     if (s.kind === 'account') protect('account', s.workId, reason);
     if (s.kind === 'author') protect('member', sourceKey(s.sourceId, true) + '/' + s.workId, reason);
+  }
+  function version(s, record, lineage, origin) {
+    normalizeScope(s);
+    if (
+      !Number.isSafeInteger(record.revision) ||
+      record.revision < 1 ||
+      !Number.isSafeInteger(record.generation) ||
+      record.generation < 1
+    )
+      throw Error('旧库删除范围版本无效。');
+    const key = JSON.stringify([lineage, s.workId, s.kind, s.sourceId]),
+      list = versions.get(key) ?? [];
+    list.push({
+      scope: s,
+      revision: record.revision,
+      generation: record.generation,
+      deleted: !!record.deleted,
+      lineage,
+      origin
+    });
+    versions.set(key, list);
   }
   for (const [index, source] of sources.entries()) {
     const origin = source.kind + '#' + (index + 1),
@@ -149,7 +180,8 @@ export async function reconcile(sources, uid) {
         typeof b.name === 'string' &&
         ['video', 'images'].includes(b.type)
       ) {
-        if (b.readHidden) protect('account', key, '旧端隐藏或删除');
+        if (b.readHidden)
+          legacyFlags.push({ origin, s: { workId: key, kind: 'account', sourceId: '__all__' } });
         const publicWork = publicFields(b, allowedWork);
         for (const field of Object.keys(b)) {
           if (['id', 'readHidden', 'backupCover'].includes(field)) continue;
@@ -173,7 +205,11 @@ export async function reconcile(sources, uid) {
         (table === 'collections' && validCollection(key)) ||
         (table === 'authors' && validAuthor(key))
       ) {
-        add('source', sourceKey(key, table === 'authors'), { ...publicFields(b, allowedSource), id: key });
+        const normalized = table === 'authors' ? authorPublic({ ...b, id: key }) : b;
+        add('source', sourceKey(key, table === 'authors'), {
+          ...publicFields(normalized, allowedSource),
+          id: key
+        });
       } else if (table === 'members' || table === 'author_members') {
         const author = table === 'author_members',
           sid = author ? b.authorId : b.collectionId,
@@ -183,7 +219,7 @@ export async function reconcile(sources, uid) {
           throw Error('旧来源归属标识无效。');
         const sk = sourceKey(sid, author),
           k = sk + '/' + id;
-        if (b.hidden) protect('member', k, '旧作者归属已隐藏或删除');
+        if (b.hidden) legacyFlags.push({ origin, s: { workId: id, kind: 'author', sourceId: sid } });
         if (pos === null || !Number.isSafeInteger(pos) || pos < 0) {
           issue(origin, 'member', k, '旧库未确认排序，保留待核对');
           return;
@@ -197,7 +233,8 @@ export async function reconcile(sources, uid) {
       ) {
         add('tags', key, [...new Set(b.tags)].sort(), key);
       } else if (['downloads', 'backup_downloads'].includes(table) && validId(key)) {
-        if (b.backupDeleted || b.backupRemoved) protect('files', key, '旧端已删除媒体');
+        if (b.backupDeleted || b.backupRemoved)
+          legacyFlags.push({ origin, s: { workId: key, kind: 'files', sourceId: '' } });
         if (table === 'downloads' && source.kind !== 'nas' && b.path) {
           const rel =
             typeof originalRoot === 'string' &&
@@ -222,6 +259,16 @@ export async function reconcile(sources, uid) {
           }
           if (!b.home) b = { ...b, home: inferred };
         }
+        add(
+          'download',
+          key,
+          {
+            state: typeof b.state === 'string' ? b.state : null,
+            requiredKeys: Array.isArray(b.requiredKeys) ? [...new Set(b.requiredKeys)].sort() : null,
+            recordedKeys: (b.assets ?? []).map((a) => a.key).sort()
+          },
+          key
+        );
         if (validHome(b.home)) add('home', key, b.home, key);
         else issue(origin, 'home', key, '未确认原归档位置，保留候选');
         for (const a of b.assets ?? [])
@@ -232,7 +279,9 @@ export async function reconcile(sources, uid) {
             key,
             { ...a, key: 'audio', kind: 'audio', file: a.file || '配乐.' + (a.format || 'm4a') },
             b.home,
-            true
+            true,
+            null,
+            b.audio.musicId
           );
         }
         for (const k of b.requiredKeys ?? [])
@@ -285,7 +334,7 @@ export async function reconcile(sources, uid) {
             issue(origin, 'object', r.sha, '已登记的对象缺失或变动');
         });
         rows('scope_state', 'SELECT * FROM scope_state', (r) => {
-          if (r.deleted) scope({ workId: r.work_id, kind: r.kind, sourceId: r.source_id }, 'NAS 明确删除');
+          version({ workId: r.work_id, kind: r.kind, sourceId: r.source_id }, r, sourceId, origin);
         });
       } else {
         if (
@@ -303,21 +352,11 @@ export async function reconcile(sources, uid) {
         for (const t of ['works', 'authors', 'collections', 'downloads', 'backup_downloads', 'local_tags']) {
           rows(t, 'SELECT id,body FROM ' + t + ' ORDER BY id', (r) => entry(t, r.id, JSON.parse(r.body)));
         }
-        rows('members', 'SELECT * FROM members ORDER BY collection_id,work_id', (r) =>
-          entry('members', r.collection_id + ':' + r.work_id, {
-            collectionId: r.collection_id,
-            workId: r.work_id,
-            rank: r.rank
-          })
-        );
-        rows('author_members', 'SELECT * FROM author_members ORDER BY author_id,work_id', (r) =>
-          entry('author_members', r.author_id + ':' + r.work_id, {
-            authorId: r.author_id,
-            workId: r.work_id,
-            position: r.position,
-            hidden: !!r.hidden
-          })
-        );
+        for (const name of ['members', 'author_members']) touched.add(name);
+        readLegacyOrder(db, names, entry, (source, id, pos) => {
+          protect('member', source + '/' + id, '原来源中多件作品占用同一顺序 ' + pos);
+          issue(origin, 'member', source + '/' + id, '原来源顺序冲突 ' + pos);
+        });
         rows('creator_profiles', 'SELECT * FROM creator_profiles', (r) =>
           add(
             'profile',
@@ -365,11 +404,18 @@ export async function reconcile(sources, uid) {
             '旧任务状态 ' + r.state + '，顺序 ' + r.rank + '，彩排后须重新选择才会执行'
           );
         });
+        const parents = new Map();
+        rows('read_history_children', 'SELECT batch_id,run_id,position FROM read_history_children', (r) =>
+          parents.set(r.run_id, { batchId: r.batch_id, batchPosition: r.position })
+        );
         rows('read_history_runs', 'SELECT id,started_at,body FROM read_history_runs', (r) =>
-          add('run', r.id, { started: r.started_at, summary: publicFields(JSON.parse(r.body), allowedRun) })
+          add('run', r.id, {
+            started: r.started_at,
+            summary: { ...publicFields(JSON.parse(r.body), allowedRun), ...parents.get(r.id) }
+          })
         );
         rows('read_history_items', 'SELECT * FROM read_history_items', (r) =>
-          add('logItem', r.session_id + '/' + r.kind + '/' + r.position, {
+          add('logItem', JSON.stringify([r.session_id, r.work_id]), {
             run: r.session_id,
             kind: r.kind,
             position: r.position,
@@ -382,7 +428,12 @@ export async function reconcile(sources, uid) {
       }
       if (!sourceId || !validId(account?.uid) || account.uid !== uid)
         throw Error('旧库账号或库身份未核实，无法合并。');
-      identities.push({ source: origin, sourceId, uid });
+      identities.push({
+        source: origin,
+        sourceId,
+        uid,
+        lineage: names.includes('records') ? sourceId : null
+      });
       for (const t of names.filter((t) => !touched.has(t))) {
         if (!/^[a-z][a-z0-9_]*$/.test(t)) throw Error('旧库包含未识别表。');
         const privateTable =
@@ -414,7 +465,12 @@ export async function reconcile(sources, uid) {
             .prepare('SELECT body FROM ' + t + ' WHERE local_id=? AND library_id=?')
             .iterate(...params)) {
             const b = JSON.parse(r.body);
-            if (b.deleted || t === 'pending_deletions') scope(b.scope, '设备记录明确删除或尚待处理');
+            version(
+              b.scope,
+              { ...b, deleted: t === 'pending_deletions' || b.deleted },
+              binding.library_id === 'unbound' ? 'device:' + sourceId : binding.library_id,
+              origin
+            );
           }
         }
         if (
@@ -458,11 +514,68 @@ export async function reconcile(sources, uid) {
     )
   )
     throw Error('旧设备绑定的 NAS 库身份不一致。');
+  const restored = new Set();
+  for (const [key, list] of versions) {
+    list.sort((a, b) => b.revision - a.revision || b.generation - a.generation);
+    const latest = list[0];
+    const historicalRelease =
+      !latest.deleted &&
+      latest.origin.startsWith('recovery#') &&
+      list.some((r) => r.deleted && !r.origin.startsWith('recovery#')) &&
+      !list.some((r) => !r.origin.startsWith('recovery#') && r.revision === latest.revision && !r.deleted);
+    if (
+      historicalRelease ||
+      list.some(
+        (r) =>
+          r.generation > latest.generation ||
+          (r.generation === latest.generation && r.deleted !== latest.deleted) ||
+          (r.revision === latest.revision &&
+            (r.deleted !== latest.deleted || r.generation !== latest.generation))
+      )
+    ) {
+      scope(latest.scope, '旧库删除代际或同版本决定冲突');
+      continue;
+    }
+    if (latest.deleted) scope(latest.scope, '明确删除或设备持有的删除范围');
+    else restored.add(key);
+    for (const old of list.slice(1))
+      if (old.deleted !== latest.deleted)
+        issue(
+          old.origin,
+          'scopeHistory',
+          latest.scope.workId,
+          '已按同库较新的范围版本 ' + latest.revision + ' 判定'
+        );
+  }
+  for (const { origin, s } of legacyFlags) {
+    const identity = identities.find((i) => i.source === origin);
+    const liveBinding = identities.find(
+      (i) => i.source.startsWith('windows#') && i.sourceId === identity.sourceId
+    )?.boundLibrary;
+    const bound = identity.boundLibrary || liveBinding;
+    const lineage =
+      identity.lineage || (bound && bound !== 'unbound' && bound) || 'device:' + identity.sourceId;
+    if (!restored.has(JSON.stringify([lineage, s.workId, s.kind, s.sourceId])))
+      scope(s, '旧端隐藏或显式删除');
+    else issue(origin, 'scopeHistory', s.workId, '旧标记已由同一库较新的明确恢复覆盖');
+  }
   const output = new Map();
-  const legacyTable = { work: 'works', tags: 'local_tags', home: 'downloads' };
+  const legacyTable = { work: 'works', tags: 'local_tags', home: 'downloads', download: 'downloads' };
   for (const [id, g] of groups) {
     const variants = g.variants.filter((v) => !v.historical),
       v = variants[0];
+    if (g.type === 'download' && v) {
+      const observations = variants.map((x) => ({ source: x.origin, ...x.value }));
+      const states = new Set(observations.map((x) => x.state));
+      const merged = {
+        state: states.size === 1 ? v.value.state : 'partial',
+        requiredKeys: [...new Set(observations.flatMap((x) => x.requiredKeys ?? []))],
+        recordedKeys: [...new Set(observations.flatMap((x) => x.recordedKeys))],
+        observations
+      };
+      if (states.size > 1) issue('合并', 'download', g.key, '旧下载状态不同，按未完整保留并核对文件');
+      for (const row of variants) row.value = merged;
+    }
     let reason = denied.get(id) || denied.get(ident(legacyTable[g.type], g.key));
     if (g.type === 'source')
       reason ||= denied.get(
@@ -477,7 +590,7 @@ export async function reconcile(sources, uid) {
       reason ||=
         denied.get(ident(v?.value.table, v?.value.oldKey)) ||
         (!v?.value.source.startsWith('author:') && denied.get(ident('account', g.work)));
-    if (['home', 'task'].includes(g.type)) reason ||= denied.get(ident('files', g.work));
+    if (['home', 'task', 'download'].includes(g.type)) reason ||= denied.get(ident('files', g.work));
     // Account deletion covers account collections. An independently verified author membership may still own the work.
     const contributors = new Set(g.variants.map((x) => x.origin));
     for (const identity of identities.filter((i) => contributors.has(i.source))) {
@@ -505,6 +618,28 @@ export async function reconcile(sources, uid) {
       issue(x.origin, g.type, g.key, '历史版本与活动来源不同');
     output.set(id, { type: g.type, key: g.key, work: g.work, value: v.value, origin: v.origin });
   }
+  const ordered = new Map();
+  for (const g of output.values())
+    if (g.type === 'member') {
+      const k = ident(g.value.source, g.value.position),
+        other = ordered.get(k);
+      if (other) {
+        for (const row of [other, g]) {
+          issue(row.origin, 'member', row.key, '合并后多个作品占用同一顺序 ' + row.value.position);
+          output.delete(ident('member', row.key));
+        }
+      } else ordered.set(k, g);
+    }
+  for (const g of output.values())
+    if (
+      g.type === 'run' &&
+      g.value.summary.batchId &&
+      output.get(ident('run', g.value.summary.batchId))?.value.summary.source !== 'batch'
+    ) {
+      issue(g.origin, 'run', g.key, '历史批次缺失，子日志独立保留');
+      delete g.value.summary.batchId;
+      delete g.value.summary.batchPosition;
+    }
   const authorOwned = new Set(
     [...output.values()]
       .filter(
@@ -515,11 +650,8 @@ export async function reconcile(sources, uid) {
       )
       .map((g) => g.work)
   );
-  for (const [id, g] of output)
-    if (g.type === 'work' && denied.has(ident('account', g.key)) && !authorOwned.has(g.key)) {
-      issue(g.origin, 'work', g.key, denied.get(ident('account', g.key)));
-      output.delete(id);
-    }
+  // Retain the work body while resolving an independent files scope. Account-only removal
+  // suppresses every collection relation, including total, while leaving author/verified media usable.
   for (const [id, g] of output) {
     if (
       (g.work && !output.has(ident('work', g.work))) ||
@@ -573,7 +705,7 @@ export async function reconcile(sources, uid) {
       issue(origin, 'asset', key, reason || '缺少已核实的活动作品或原归档位置');
       continue;
     }
-    if (musicId && musicId !== output.get(ident('work', id)).value.music?.id) {
+    if (a.key === 'audio' && (!musicId || musicId !== output.get(ident('work', id)).value.music?.id)) {
       issue(origin, 'asset', key, '旧配乐和作品音乐身份不符');
       continue;
     }
@@ -619,6 +751,7 @@ export async function reconcile(sources, uid) {
       relative,
       size: proof.size,
       sha256: proof.sha256,
+      ...(musicId ? { musicId } : {}),
       from: proof
     };
     const list = candidates.get(key) ?? [];
@@ -642,6 +775,23 @@ export async function reconcile(sources, uid) {
     }
     assets.push(a);
   }
+  const fileOwned = new Set(assets.map((a) => a.work));
+  const heldWorks = new Set(
+    [...output.values()]
+      .filter(
+        (g) =>
+          g.type === 'work' &&
+          denied.has(ident('account', g.key)) &&
+          !authorOwned.has(g.key) &&
+          !fileOwned.has(g.key)
+      )
+      .map((g) => g.key)
+  );
+  for (const [k, g] of output)
+    if (heldWorks.has(g.work)) {
+      issue(g.origin, g.type, g.key, '账号范围已删除，未核实独立的作者归属或媒体');
+      output.delete(k);
+    }
   for (const { origin, path } of unlinked.values())
     issue(origin, 'file', path, '文件未关联到已核实的活动资源');
   for (const identity of identities) {

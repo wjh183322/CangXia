@@ -120,14 +120,34 @@ export function historyRuns(db, { batch, page: input } = {}) {
     )
     .get();
   const legacy = db
-    .prepare('SELECT count(*) runs,(SELECT count(*) FROM read_legacy_items) items FROM read_legacy_runs')
+    .prepare(
+      "SELECT count(*) runs,(SELECT count(*) FROM read_legacy_items) items FROM read_legacy_runs WHERE json_extract(summary,'$.batchId') IS NULL"
+    )
     .get();
   stats.runs += legacy.runs;
   stats.items += legacy.items;
   let total, items;
   if (batch) {
     const group = db.prepare('SELECT started FROM read_batches WHERE id=? AND NOT hidden').get(batch);
-    if (!group) throw invalid();
+    if (!group) {
+      if (
+        !db
+          .prepare("SELECT 1 FROM read_legacy_runs WHERE id=? AND json_extract(summary,'$.source')='batch'")
+          .get(batch)
+      )
+        throw invalid();
+      const from = " FROM read_legacy_runs WHERE json_extract(summary,'$.batchId')=?";
+      total = db.prepare('SELECT count(*) n' + from).get(batch).n;
+      items = db
+        .prepare(
+          'SELECT id,started,summary' +
+            from +
+            " ORDER BY json_extract(summary,'$.batchPosition'),id LIMIT 50 OFFSET ?"
+        )
+        .all(batch, offset)
+        .map((r) => ({ ...JSON.parse(r.summary), token: r.id, startedAt: r.started, legacy: true }));
+      return { ...paged(items, total, page), stats };
+    }
     total = db.prepare('SELECT count(*) n FROM read_history_steps WHERE history_batch=?').get(batch).n;
     items = db
       .prepare(
@@ -139,7 +159,7 @@ export function historyRuns(db, { batch, page: input } = {}) {
     total = db.prepare('SELECT count(*) n FROM read_batches WHERE NOT hidden').get().n + legacy.runs;
     items = db
       .prepare(
-        `SELECT id,started,NULL summary FROM read_batches WHERE NOT hidden UNION ALL SELECT id,started,summary FROM read_legacy_runs ORDER BY started DESC,id LIMIT 50 OFFSET ?`
+        `SELECT id,started,NULL summary FROM read_batches WHERE NOT hidden UNION ALL SELECT id,started,summary FROM read_legacy_runs WHERE json_extract(summary,'$.batchId') IS NULL ORDER BY started DESC,id LIMIT 50 OFFSET ?`
       )
       .all(offset)
       .map((b) => {
@@ -165,14 +185,18 @@ export function historyItems(db, { runId, kind = 'all', page: input } = {}) {
   if (!step) {
     if (!db.prepare('SELECT 1 FROM read_legacy_runs WHERE id=?').get(runId))
       throw failure(404, 'UNKNOWN_READ', '找不到此次读取。');
-    const filter = "FROM read_legacy_items WHERE run_id=? AND (?='all' OR kind=?)";
+    const filter =
+      "FROM read_legacy_items WHERE run_id=? AND (?='all' OR CASE WHEN kind='fill' AND json_extract(body,'$.reappeared')=1 THEN 'returned' ELSE kind END=?)";
     const args = [runId, kind, kind];
     const total = db.prepare('SELECT count(*) n ' + filter).get(...args).n;
     const records = db
       .prepare('SELECT body ' + filter + ' ORDER BY position LIMIT 50 OFFSET ?')
       .all(...args, offset);
     return paged(
-      records.map((row) => JSON.parse(row.body)),
+      records.map((row) => {
+        const b = JSON.parse(row.body);
+        return b.reappeared ? { ...b, kind: 'returned' } : b;
+      }),
       total,
       page
     );
