@@ -372,7 +372,8 @@ export function ServerMaintenancePanel({ api, initialId, initialState, onDetail,
                             unavailable: '来源不可用',
                             'waiting-rate': '等待限流解除',
                             'waiting-auth': '等待登录',
-                            'finalization-pending': '等待登记'
+                            'finalization-pending': '等待登记',
+                            'awaiting-registration': '字节已保存，等待同作品登记'
                           }[j.state]
                         }
                       </p>

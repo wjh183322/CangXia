@@ -90,7 +90,7 @@ app.whenReady().then(async () => {
     const audit=auditEntrypoints(channels,exposed);
     assert.equal(audit.rows,142);assert.equal(audit.migration,8);
     await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
-    const buttonText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(label)})?.click()`);
+    const buttonText=label=>waitFor(()=>js(win,`(()=>{const button=[...document.querySelectorAll('button')].find(b=>!b.disabled&&b.textContent.trim()===${JSON.stringify(label)});if(!button)return false;button.click();return true;})()`));
     await buttonText('检查与补齐');
     await waitFor(()=>js(win,"document.querySelector('[data-maintenance-history]')"));
     await buttonText('检查全部文件');

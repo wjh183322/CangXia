@@ -1,5 +1,6 @@
 import {getJob,putJob as put,fenceUnavailable} from './download-records.mjs';
 import {inspectInventory} from './maintenance-inventory.mjs';
+import {sharedRepairPeers,needsResourceWork} from './maintenance-queue.mjs';
 import {removalOwnsFiles} from './removal.mjs';
 import { planDownloads } from '../electron/download-selection.mjs';
 import { createArchive } from './archive.mjs';
@@ -427,7 +428,7 @@ function binding(db) {
   return { uid: value.uid, sessionKey: value.session_key, authEpoch: value.auth_epoch };
 }
 function publicJob(job) {
-  const state = ['queued', 'paused', 'pausing'].includes(job.state)
+  const state = ['queued', 'paused', 'pausing','awaiting-registration'].includes(job.state)
     ? 'waiting'
     : retryStates.has(job.state) || job.cleanupPending
       ? 'failed'
@@ -458,7 +459,7 @@ function publicJob(job) {
   };
 }
 const tabs = {
-  active: ['queued', 'running', 'paused', 'pausing', 'cancelling'],
+  active: ['queued', 'running', 'paused', 'pausing', 'cancelling','awaiting-registration'],
   failed: [...retryStates],
   complete: ['complete'],
   unavailable: ['unavailable']
@@ -475,7 +476,7 @@ const join = ' FROM download_manifests m JOIN download_jobs j ON m.id=j.id WHERE
 function downloadPage(db, { tab = 'active', page = 1 } = {}, audioOnly=false) {
   if (!Number.isSafeInteger(page) || page < 1) throw invalid();
   const audioFilter=audioOnly && ['waiting','running'].includes(tab);
-  const condition=audioFilter ? (tab==='running'?"j.state='running'":"j.state IN ('queued','paused','pausing')") : filterSql(tab);
+  const condition=audioFilter ? (tab==='running'?"j.state='running'":"j.state IN ('queued','paused','pausing','awaiting-registration')") : filterSql(tab);
   const query = join + (audioOnly?"j.id LIKE 'audio:%' AND ":"") + condition;
   const total = db.prepare('SELECT COUNT(*) AS n' + query).get().n,
     pages = Math.max(1, Math.ceil(total / 50));
@@ -778,7 +779,7 @@ export function createDownloads({
         changed++;
         continue;
       }
-      if (action === 'pause' && ['running', 'queued'].includes(job.state))
+      if (action === 'pause' && ['running', 'queued','awaiting-registration'].includes(job.state))
         job.state = job.state === 'running' ? 'pausing' : 'paused';
       else if (
         (action === 'resume' && job.state === 'paused') ||
@@ -1277,12 +1278,37 @@ export function createDownloads({
       saveProgress(job.id, target);
     }
     requireWriter(job, signal);
+    if (sharedRepairPeers(db, job).some(needsResourceWork) && getJob(db, job.id).filesComplete) {
+      const cleanup = await cleanFileStages({ store, layout, workId, jobId: job.id });
+      requireWriter(job, signal);
+      if (!cleanup && sharedRepairPeers(db, job).some(needsResourceWork)) {
+        const keys = job.hdInputs ? [currentHDCover(db, workId)?.key] : job.expected.map((t) => t.key);
+        const rows = store.resources(workId);
+        const assets = keys.map((key) => {
+          const row = rows.find((a) => a.key === key),
+            proof = row && registeredAssetProof(db, workId, row);
+          if (!proof?.identity) throw needsReview();
+          return { id: row.id, sha256: row.sha256, identity: proof.identity };
+        });
+        change(job.id, (current) => {
+          current.state = 'awaiting-registration';
+          current.finalizationPending = true;
+          current.cleanupPending = false;
+          current.reason = {
+            code: 'NAS_REGISTRATION_PENDING',
+            message: '此范围字节已保存，等待同一作品的其他范围完成后核验登记。'
+          };
+          current.registrationAssets = assets;
+        });
+        return;
+      }
+    }
     const deferred = db
       .prepare(
         "SELECT 1 FROM maintenance_queue_links l JOIN maintenance_items i ON i.run=l.run AND i.work_id=l.work_id WHERE l.job=? AND json_extract(i.result,'$.registration')='pending' LIMIT 1"
       )
       .get(job.id);
-    if (deferred) return job;
+    if (deferred||sharedRepairPeers(db,job).some(p=>p.state==='awaiting-registration')) return job;
     const result = await finalizeWorkFiles({
       store,
       layout,

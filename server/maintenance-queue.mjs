@@ -5,7 +5,18 @@ export function downloadScope(id, workId) {
   if (id === 'hd:' + workId) return 'cover-hd';
   return null;
 }
-export const unsettled = (state) => ['queued', 'running', 'paused', 'pausing', 'cancelling'].includes(state);
+export const unsettled = (state) =>
+  ['queued', 'running', 'paused', 'pausing', 'cancelling', 'awaiting-registration'].includes(state);
+export function sharedRepairPeers(db, job) {
+  return db
+    .prepare(
+      `SELECT DISTINCT p.job AS id,j.state FROM maintenance_queue_links s
+    JOIN maintenance_queue_links p ON p.run=s.run AND p.work_id=s.work_id AND p.job<>s.job
+    JOIN download_jobs j ON j.id=p.job WHERE s.job=? AND s.work_id=?`
+    )
+    .all(job.id, job.workId);
+}
+export const needsResourceWork = (peer) => unsettled(peer.state) && peer.state !== 'awaiting-registration';
 export function summarizeRepairJobs(result) {
   const jobs = result.jobs;
   const states = [...new Set(jobs.map((j) => j.state))];
@@ -56,12 +67,11 @@ export function updateRepairJobs(db, job, inventory) {
         ];
       }
       if (value.registration && inventory) {
-        value.registration =
-          inventory.registrationConfirmed
-            ? 'complete'
-            : jobs.some((j) => unsettled(j.state))
-              ? 'pending'
-              : 'failed';
+        value.registration = inventory.registrationConfirmed
+          ? 'complete'
+          : jobs.some((j) => unsettled(j.state))
+            ? 'pending'
+            : 'failed';
         if (value.registration === 'complete')
           value.issues = value.issues.filter((i) => i.scope !== 'archive');
       }

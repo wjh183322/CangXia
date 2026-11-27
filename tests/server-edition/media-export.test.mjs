@@ -48,7 +48,7 @@ const keypair = selfsigned.generate([{ name: 'commonName', value: 'localhost' }]
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t, { audioBytes = music, readDetail, removalHook } = {}) {
+async function fixture(t, { audioBytes = music, readDetail, removalHook, interceptAsset } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-media-'));
   const volume = path.join(root, 'volume'),
     profile = path.join(root, 'profile'),
@@ -115,6 +115,7 @@ async function fixture(t, { audioBytes = music, readDetail, removalHook } = {}) 
     },
     fetchAsset: async (url, options) => {
       assert.ok(url.startsWith(base));
+      if(interceptAsset){const response=await interceptAsset(url,options);if(response)return response;}
       if (url.startsWith(base + 'remote') && remote) return remote(options, url);
       const [body, mime] = url.endsWith('audio')
         ? [audioBytes, 'audio/wav']
@@ -1600,3 +1601,135 @@ test('audio restoration recomputes only its work status, retaining independent m
     assert.deepEqual(fs.readFileSync(audio), fs.readFileSync(audio + '.saved-' + extraMissing));
   }
 });
+
+for (const failAudio of [false, true])
+  test(
+    'shared picture/audio/JSON repair settles one registration; audio failure = ' + failAudio,
+    async (t) => {
+      let failing = false,
+        record = false,
+        held = false;
+      const entered = Promise.withResolvers(),
+        release = Promise.withResolvers(),
+        requests = [];
+      const f = await fixture(t, {
+        interceptAsset: async (url) => {
+          if (record) requests.push(url.slice(base.length));
+          if (record && url === base + 'audio' && !held) {
+            held = true;
+            entered.resolve();
+            await release.promise;
+          }
+          if (failing && url === base + 'audio') return new Response(null, { status: 503 });
+        }
+      });
+      await f.connect();
+      const cmd = (kind, payload, operationId = randomUUID()) =>
+        f.client.command({ kind, payload, operationId, entityVersion: 0 });
+      async function settled(id) {
+        for (let n = 0; n < 200; n++) {
+          const p = await f.client.query('check-page', { id });
+          if (p.state === 'complete') return p;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        assert.fail('check did not finish');
+      }
+      const jobs = () => f.client.query('download-page', { tab: 'all' });
+      const repair = async () => {
+        const page = await f.client.query('list-works', { source: 'media' });
+        const scan = await settled(
+          (
+            await cmd('start-check', {
+              kind: 'files',
+              selection: {
+                source: 'media',
+                scope: page.scope,
+                revision: page.revision,
+                ids: ['42'],
+                all: false,
+                confirmedCount: 1
+              }
+            })
+          ).id
+        );
+        const payload = {
+          selection: { id: scan.id, version: scan.version, revision: scan.revision, ids: ['42'], all: false }
+        };
+        const op = randomUUID(),
+          run = await cmd('retry-repair', payload, op);
+        assert.deepEqual(await cmd('retry-repair', payload, op), run);
+        return (await settled(run.id)).id;
+      };
+      await cmd('enqueue-download', { workIds: ['42'], selection: 'audio' });
+      await f.downloads.run();
+      const file = (key) =>
+        path.join(
+          f.downloads.layout.media,
+          f.downloads.store.resources('42').find((r) => r.key === key).relative_path
+        );
+      const image = file('image-0'),
+        audio = file('audio'),
+        meta = file('metadata');
+      for (const p of [image, audio, meta]) fs.renameSync(p, p + '.saved');
+      await cmd('control-download', { action: 'pause', ids: null });
+      const id = await repair();
+      assert.equal((await settled(id)).pendingJobs, 2);
+      failing = failAudio;
+      record = true;
+      await cmd('control-download', { action: 'resume', ids: null });
+      const deadline=setTimeout(()=>entered.reject(Error('audio scope did not start')),10000);
+      try{await entered.promise;}finally{clearTimeout(deadline);}
+      try {
+        await f.client.release();
+        await f.connect();
+        const mid = await settled(id);
+        assert.equal(mid.pendingJobs, 2);
+        assert.equal(mid.items[0].jobs.find((j) => j.id === '42').state, 'awaiting-registration');
+        assert.equal(mid.items[0].registration, 'pending');
+        assert.equal(fs.existsSync(meta), false);
+        assert.ok(
+          (await f.client.query('download-page', { tab: 'active' })).jobs.some(
+            (j) => j.id === '42' && j.state === 'waiting'
+          )
+        );
+        assert.deepEqual(fs.readFileSync(image), fs.readFileSync(image + '.saved'));
+      } finally {
+        release.resolve();
+      }
+      await f.downloads.run();
+      const done = await settled(id),
+        item = done.items[0];
+      assert.equal(done.pendingJobs, 0);
+      assert.equal(
+        item.jobs.find((j) => j.id === '42').state,
+        failAudio ? 'finalization-pending' : 'complete'
+      );
+      assert.equal(item.jobs.find((j) => j.id === 'audio:42').state, failAudio ? 'failed' : 'complete');
+      assert.equal(item.registration, failAudio ? 'failed' : 'complete');
+      assert.equal(item.fileStatus, failAudio ? 'failed' : 'complete');
+      assert.equal(
+        (await jobs()).jobs.find((j) => j.id === '42').downloadState,
+        failAudio ? 'finalization-pending' : 'complete'
+      );
+      assert.equal(requests.filter((x) => x === 'img0').length, 1);
+      assert.equal(requests.filter((x) => x === 'img1').length, 0);
+      if (failAudio) {
+        assert.ok(!fs.existsSync(meta));
+        assert.ok(!fs.existsSync(audio));
+        failing = false;
+        const again = await repair();
+        await f.downloads.run();
+        assert.equal((await settled(again)).items[0].fileStatus, 'complete');
+        assert.equal(
+          requests.filter((x) => x === 'img0').length,
+          1,
+          'registration-only retry must not transfer the image again'
+        );
+      }
+      assert.equal(requests.filter((x) => x === 'audio').length,failAudio?2:1);
+      assert.deepEqual(fs.readFileSync(image), fs.readFileSync(image + '.saved'));
+      assert.deepEqual(fs.readFileSync(audio), fs.readFileSync(audio + '.saved'));
+      const keys = JSON.parse(fs.readFileSync(meta)).assets.map((a) => a.key);
+      assert.ok(keys.includes('audio') && keys.includes('image-0'));
+    }
+  );

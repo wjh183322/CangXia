@@ -15,6 +15,7 @@ export async function inspectInventory({ store, layout, work, signal, wantedReso
   const rows = store.resources(id),
     issues = [];
   let metadataVerified = false;
+  const resources = new Map();
   let bytes = 0,
     verified = 0;
   const attached = store.db.prepare('SELECT count(*) n FROM media_files WHERE work_id=?').get(id).n;
@@ -38,6 +39,7 @@ export async function inspectInventory({ store, layout, work, signal, wantedReso
       }
       bytes += value.size;
       verified++;
+      resources.set(value.id, { sha256: value.sha256, identity: value.identity });
       if (row.key === 'metadata') metadataVerified = true;
     } catch (e) {
       signal.throwIfAborted();
@@ -60,7 +62,7 @@ export async function inspectInventory({ store, layout, work, signal, wantedReso
     }
   }
 
-  return { issues, verified, bytes, metadataVerified };
+  return { issues, verified, bytes, metadataVerified, resources };
 }
 export function inventoryStatus(issues) {
   if (!issues.length) return null;

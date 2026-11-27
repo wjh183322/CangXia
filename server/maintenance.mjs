@@ -219,7 +219,7 @@ function admitRepairJobs(db, downloads, run, workId, operations, issues) {
       const state = db.prepare('SELECT state FROM download_jobs WHERE id=?').get(id)?.state;
       if (
         !(response.queued || response.existing) ||
-        !['queued', 'running', 'paused', 'pausing'].includes(state)
+        !['queued', 'running', 'paused', 'pausing', 'awaiting-registration'].includes(state)
       )
         throw stale();
       db.prepare('INSERT INTO maintenance_queue_links VALUES(?,?,?)').run(run, workId, id);
@@ -322,6 +322,7 @@ function diagnostic(db, { workId }, owner) {
           'waiting-auth',
           'waiting-rate',
           'finalization-pending',
+          'awaiting-registration',
           'unavailable'
         ].includes(job.state)
           ? job.state
