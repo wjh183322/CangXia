@@ -19,7 +19,7 @@ const methods = [
   'startDefectRepair', 'startQrLogin', 'startRead', 'startRepairs', 'startTrashProbe', 'startupReady',
   'state', 'stopDefectRepair', 'stopSync', 'stopWorkCreators', 'storageUsage', 'sync',
   'trashStatus', 'validateDefectSelection', 'validateDownloadSelection', 'verificationManual', 'verificationView', 'verifySources',
-  'workDetail'
+  'workDetail', 'serverRehearsal'
 ];
 const api = {
   windowRole: typeof process === 'undefined' ? '' : process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17)

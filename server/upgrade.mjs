@@ -56,7 +56,7 @@ function confirm({ expectedId, from, to, imageDigest, approval }) {
 }
 
 const tables = ['works', 'work_tags', 'source_members', 'download_jobs', 'media_files'];
-function inventory(db) {
+export function inventory(db) {
   const counts = Object.fromEntries(
     tables.map((name) => [name, db.prepare('SELECT count(*) AS n FROM ' + name).get().n])
   );
@@ -87,7 +87,7 @@ function hashFile(file) {
   }
 }
 
-async function verifiedSnapshot(layout, status, request) {
+export async function verifiedSnapshot(layout, status, request) {
   const parent = path.join(layout.dir, 'snapshots');
   // Each attempt owns its destination; a failure or retry never replaces a recovery point.
   const id = randomUUID();
@@ -119,6 +119,13 @@ async function verifiedSnapshot(layout, status, request) {
       // Make the exported file self-contained even when its source is using WAL.
       if (isolated.prepare('PRAGMA journal_mode=DELETE').get().journal_mode !== 'delete') {
         throw Error('Cannot make snapshot self-contained.');
+      }
+      if(request.rehearsal){
+        isolated.exec('PRAGMA secure_delete=ON');
+        if(status.from>=10)isolated.exec('DELETE FROM download_auth');
+        if(status.from>=5)isolated.exec('UPDATE source_account SET profile_id=NULL');
+        if(status.from>=3)isolated.exec('DELETE FROM interactive_lease');
+        isolated.exec('VACUUM');
       }
     } finally {
       isolated.close();

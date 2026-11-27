@@ -26,13 +26,274 @@ export function BackupPanel({storage={},busy,api,onUpdated,onImport,onConflict})
  </section>;
 }
 
-export function ServerBackupResponsibility() {
+export function ServerBackupResponsibility({ api }) {
+  const [config, setConfig] = useState(null),
+    [target, setTarget] = useState(''),
+    [restore, setRestore] = useState('');
+  const [job, setJob] = useState(''),
+    [page, setPage] = useState(1),
+    [report, setReport] = useState(null);
+  const [error, setError] = useState(''),
+    [busy, setBusy] = useState(false),
+    [confirmed, setConfirmed] = useState(false);
+  const call = (input) => api.serverRehearsal(input);
+  const handle = async (fn) => {
+    setBusy(true);
+    setError('');
+    try {
+      await fn();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refresh = async () => {
+    const c = await call({ action: 'list' });
+    setConfig(c);
+    setRestore((x) => (c.restores.includes(x) ? x : c.restores[0] || ''));
+  };
+  const select = async (id, p = 1) => {
+    const r = await call({ action: 'status', id, page: p });
+    setJob(id);
+    setPage(p);
+    setReport(r);
+    setConfirmed(false);
+  };
+  const launch = async (input) => {
+    const r = await call(input);
+    await refresh();
+    await select(r.id);
+  };
+  const summary = report?.summary,
+    approval = summary?.previewId && summary?.identities && summary.target?.split(/[\\/]/).pop() === target;
+  const totalPages = Math.max(1, Math.ceil((summary?.total || 0) / 50));
   return (
     <section>
       <h3>备份与还原</h3>
       <p>
-        完整媒体的备份任务、备份结果和文件还原请在绿联「同步与备份」中查看。藏匣在数据库升级前创建并校验数据库快照。
+        用绿联「同步与备份」备份已核验的数据库快照和同一恢复点的媒体目录。还原到独立目录后，可在此核对文件。
       </p>
+      <button className="button secondary" disabled={busy} onClick={() => handle(refresh)}>
+        查看迁移彩排与恢复点
+      </button>
+      {config && (
+        <div className="backup-form">
+          <p>
+            来源账号 {config.uid} · 已封存来源 {config.sources.join('、')}
+          </p>
+          <label>
+            独立彩排目录名
+            <input
+              value={target}
+              onChange={(e) => {
+                setTarget(e.target.value);
+                setConfirmed(false);
+              }}
+              placeholder="例如 rehearsal-01"
+            />
+          </label>
+          <button
+            className="button secondary"
+            disabled={busy || !target}
+            onClick={() => handle(() => launch({ action: 'preview', target, sources: config.sources }))}
+          >
+            预览迁移差异与空间
+          </button>
+          {!!config.restores.length && (
+            <label>
+              外部还原目录
+              <select value={restore} onChange={(e) => setRestore(e.target.value)}>
+                {config.restores.map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
+              </select>
+              <button disabled={busy} onClick={() => handle(() => launch({ action: 'verify', restore }))}>
+                核对还原的数据库和媒体
+              </button>
+            </label>
+          )}
+          {!!config.jobs.length && (
+            <label>
+              彩排记录
+              <select value={job} onChange={(e) => handle(() => select(e.target.value))}>
+                <option value="" disabled>
+                  选择报告
+                </option>
+                {config.jobs.map((j) => (
+                  <option key={j.id} value={j.id}>
+                    {j.started} ·{' '}
+                    {
+                      { preview: '预览', import: '导入', verify: '恢复核对', preserve: '回退前封存' }[
+                        j.action
+                      ]
+                    }{' '}
+                    {j.target}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {report && (
+            <>
+              <button disabled={busy} onClick={() => handle(() => select(job, page))}>
+                刷新结果
+              </button>
+              {report.state === 'running' && (
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    handle(async () => {
+                      await call({ action: 'cancel', id: job });
+                      await select(job);
+                    })
+                  }
+                >
+                  取消彩排
+                </button>
+              )}
+              <p role="status">
+                {
+                  {
+                    running: '正在核验',
+                    interrupted: '服务已中断，请重新预览或重试本次批准',
+                    failed: report.message,
+                    done: '报告已生成'
+                  }[report.state]
+                }
+              </p>
+            </>
+          )}
+          {summary && (
+            <>
+              <p>
+                {summary.target && '目标 ' + summary.target}{' '}
+                {summary.libraryId && '库标识 ' + summary.libraryId}{' '}
+                {summary.requiredBytes !== undefined &&
+                  '所需空间 ' + (summary.requiredBytes / 1048576).toFixed(1) + ' MiB'}
+              </p>
+              {summary.counts && (
+                <p>
+                  {Object.entries(summary.counts)
+                    .map(
+                      ([k, v]) =>
+                        (({
+                          work: '作品',
+                          source: '来源',
+                          member: '归属',
+                          tags: '标签组',
+                          task: '任务',
+                          home: '归档目录',
+                          profile: '作者资料',
+                          audioHint: '配乐线索',
+                          run: '读取日志',
+                          logItem: '日志明细',
+                          media: '媒体'
+                        })[k] ?? k) +
+                        ' ' +
+                        v
+                    )
+                    .join(' · ')}
+                </p>
+              )}
+              {summary.identities?.map((s) => (
+                <div key={s.source}>
+                  <p>
+                    {s.source} · {s.sourceId} · 账号 {s.uid}
+                  </p>
+                  <p>
+                    独有作品 {s.inventory?.work?.unique ?? 0} · 独有归属 {s.inventory?.member?.unique ?? 0} ·
+                    媒体引用 {s.mediaClaims} · 待核对 {s.held}
+                  </p>
+                </div>
+              ))}
+              {summary.snapshot && (
+                <p>
+                  数据库快照 {summary.snapshot}
+                  <br />
+                  归档目录 {summary.mediaRoot}
+                  <br />
+                  清单 SHA-256 {summary.manifestSha256}
+                </p>
+              )}
+              {(summary.databaseVerified || summary.verification) && (
+                <p>
+                  数据库已核验 · 匹配 {(summary.verification ?? summary).matched} · 缺失{' '}
+                  {(summary.verification ?? summary).missing} · 变动{' '}
+                  {(summary.verification ?? summary).changed} · 清单外{' '}
+                  {(summary.verification ?? summary).extra}
+                </p>
+              )}
+              {!!summary.total && (
+                <>
+                  <p>
+                    核对明细 {summary.total} 条 · {page}/{totalPages} 页
+                  </p>
+                  <ul>
+                    {report.items.map((r, i) => (
+                      <li key={i}>{[r.source, r.type, r.key, r.reason].filter(Boolean).join(' · ')}</li>
+                    ))}
+                  </ul>
+                  <button disabled={busy || page <= 1} onClick={() => handle(() => select(job, page - 1))}>
+                    上一页
+                  </button>
+                  <button
+                    disabled={busy || page >= totalPages}
+                    onClick={() => handle(() => select(job, page + 1))}
+                  >
+                    下一页
+                  </button>
+                </>
+              )}
+              {approval && (
+                <>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={confirmed}
+                      onChange={(e) => setConfirmed(e.target.checked)}
+                    />
+                    我已核对来源、删除保护与候选，确认写入独立目录 {target}
+                  </label>
+                  <button
+                    className="button primary"
+                    disabled={busy || !confirmed}
+                    onClick={() =>
+                      handle(() =>
+                        launch({
+                          action: 'import',
+                          sources: config.sources,
+                          target,
+                          previewId: summary.previewId,
+                          uid: config.uid,
+                          confirmed: true
+                        })
+                      )
+                    }
+                  >
+                    批准本次彩排
+                  </button>
+                </>
+              )}
+              {summary.snapshot &&
+                summary.libraryId &&
+                config.jobs.find((j) => j.id === job)?.target === target && (
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      handle(() =>
+                        launch({ action: 'preserve', target, libraryId: summary.libraryId, confirmed: true })
+                      )
+                    }
+                  >
+                    封存此彩排库的后续增量与任务
+                  </button>
+                )}
+            </>
+          )}
+        </div>
+      )}
+      {error && <p role="alert">{error}</p>}
     </section>
   );
 }

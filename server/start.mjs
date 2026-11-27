@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import {createDownloads} from './downloads.mjs';
+import {createRehearsals} from './rehearsal-service.mjs';
 import { createHttpsService } from './http.mjs';
 import { createSourceBrowser } from './source-browser.mjs';
 import { createSessionService } from './session.mjs';
@@ -55,6 +56,7 @@ async function main([action = 'start', ...args]) {
         server.once('error', reject);
         server.listen(port, process.env.CANGXIA_HOST ?? '0.0.0.0', () => {
           try {
+            config.rehearsals=createRehearsals({root:process.env.CANGXIA_REHEARSAL_ROOT,liveRoot:root});
             config.source = createSourceBrowser({ library, root });
             config.downloads = createDownloads({library,root,source:config.source});
             config.sessions = createSessionService({ library, source: config.source,downloads:config.downloads });
@@ -67,6 +69,7 @@ async function main([action = 'start', ...args]) {
         });
       });
       const stop = async () => {
+        config.rehearsals.close();
         server.closeAllConnections();
         await config.sessions.close();
         await config.downloads.close();

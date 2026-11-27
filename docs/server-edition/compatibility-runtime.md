@@ -1,8 +1,8 @@
 # 服务版正式入口核对
 
-对应 [0.3.46 基线及逐项验收场景](compatibility.md)。此表记录 0.4.1 任务 12 时的正式落点。Windows 集成测试在实际启动的进程中捕获 IPC 注册，逐项检查下列目标、preload 可调用项、保留的事件和退役动作。该项验证覆盖接线；具体业务结果由来源、资料库、下载、媒体、删除及维护专项分别验证。
+对应 [0.3.46 基线及逐项验收场景](compatibility.md)。此表记录 0.4.1 任务 13 时的正式落点。Windows 集成测试在实际启动的进程中捕获 IPC 注册，逐项检查下列目标、preload 可调用项、保留的事件和退役动作。该项验证覆盖接线；具体业务结果由来源、资料库、下载、媒体、删除及维护专项分别验证。
 
-标为「迁移13」的行尚有旧资料迁移或完整恢复待交付；已实现的分支另列。任务 14 负责打包后原界面复核、两台真实电脑、远程链路和绿联实际挂载。数据库快照及其媒体清单由藏匣校验，完整媒体备份和还原由绿联「同步与备份」执行。
+标为「迁移彩排」的入口通过 NAS 连接设置中的迁移与还原报告操作。任务 14 负责打包复核、两台真实电脑、远程链路及绿联实际挂载。详见[彩排与外部还原操作](migration-rehearsal.md)。
 
 | 基线入口 | 状态 | 正式处理器 | 对应动作及边界 |
 | --- | --- | --- | --- |
@@ -30,9 +30,9 @@
 | `refreshNASCatalogue` | 替换 | `listWorks` | NAS 媒体库查询 media 来源，刷新重新取页及版本。 |
 | `nasCatalogueWork` | 替换 | `workDetail` | 同一作品的详情直接来自正式库。 |
 | `nasCataloguePreview` | 替换 | `workDetail` `audioPrepare` | Windows 自定义协议代理当前会话的 NAS 资源，覆盖图像、视频 Range 和配乐。 |
-| `prepareNASRestore` | 迁移13 | `flatPrepare` | 带走本机副本走平铺预览。恢复点与目标冲突预览由任务 13 实现。 |
-| `confirmNASRestore` | 迁移13 | `flatStart` | 带走副本走平铺导出。独立目标恢复确认在任务 13。 |
-| `stopNASCatalogue` | 迁移13 | `flatCancel` `listWorks` | 离页丢弃旧检索，平铺任务可取消。取消正式资料恢复由任务 13 实现。 |
+| `prepareNASRestore` | 迁移彩排 |`flatPrepare` `serverRehearsal` | 预览隔离目标与保护范围。 |
+| `confirmNASRestore` | 迁移彩排 |`flatStart` `serverRehearsal` | 批准已核验来源与新目标。 |
+| `stopNASCatalogue` | 迁移彩排 |`flatCancel` `listWorks` `serverRehearsal` | 取消在途彩排，已发布目标保留。 |
 | `openAccount` | 替换 | `startQrLogin` `finishLogin` | 从设置或账号按钮进入 NAS 官方扫码并核验 UID。第三方工具的私密会话不复制到 NAS。 |
 | `startQrLogin` | 直连 | `startQrLogin` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
 | `refreshQrLogin` | 直连 | `refreshQrLogin` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
@@ -43,7 +43,7 @@
 | `checkQrLogin` | 替换 | `sourceLoginView` `sourceManualLogin` `finishLogin` | 沿用当前 NAS 流程的二维码、人工验证和核验账号。 |
 | `finishLogin` | 直连 | `finishLogin` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
 | `logout` | 直连 | `logout` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
-| `confirmLegacyAccount` | 迁移13 | `finishLogin` | 日常连接核验来源 UID；旧库迁移还须独立目标及批准。 |
+| `confirmLegacyAccount` | 迁移彩排 |`finishLogin` `serverRehearsal` | 对照当前会话、旧库、管理员配置及批准中的账号。 |
 | `importLoginConfig` | 替换 | `startQrLogin` `finishLogin` | 从设置或账号按钮进入 NAS 官方扫码并核验 UID。第三方工具的私密会话不复制到 NAS。 |
 | `sync` | 直连 | `sync` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
 | `stopSync` | 直连 | `stopSync` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
@@ -144,7 +144,7 @@
 | `syncBackup` | 替换 | `serverRelease` `serverReceipt` | 换机先核对已发送操作并释放，接手端访问同一 NAS 库。 |
 | `cancelBackup` | 直连 | `cancelBackup` | 经正式 Windows 主进程注册，原动作及验证场景见基线表。 |
 | `finishBackupExit` | 替换 | `serverRelease` | 窗口关闭和交接均提示未完成的平铺导出，核对操作回执后释放。NAS 普通队列继续。 |
-| `acceptRemoteBackup` | 迁移13 | `serverConnect` | 采用正式库用重新连接。历史 Windows 资料须走任务 13 的迁移审批。 |
-| `openBackupRecovery` | 迁移13 | — | 旧源、独立目标、已核验快照、媒体清单与恢复核对由任务 13 交付。 |
-| `previewExistingLibrary` | 迁移13 | — | 旧源、独立目标、已核验快照、媒体清单与恢复核对由任务 13 交付。 |
-| `importExistingLibrary` | 迁移13 | — | 旧源、独立目标、已核验快照、媒体清单与恢复核对由任务 13 交付。 |
+| `acceptRemoteBackup` | 迁移彩排 |`serverConnect` `serverRehearsal` | 日常重连读取正式库，历史资料独立预演。 |
+| `openBackupRecovery` | 迁移彩排 | `serverRehearsal` | 查看历史副本候选、独立恢复点与校验结果。 |
+| `previewExistingLibrary` | 迁移彩排 | `serverRehearsal` | 查看旧来源差异及所需空间。 |
+| `importExistingLibrary` | 迁移彩排 | `serverRehearsal` | 明确确认后发布独立目标与快照。 |

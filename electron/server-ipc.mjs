@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 export function registerCatalogueHandlers({ ipc, client }) {
+  ipc('serverRehearsal','workspace',input=>client.call('rehearsal',{input}));
   const command = (kind, payload) =>
     client.command({ kind, payload, operationId: randomUUID(), entityVersion: 0 });
   for (const [method,kind] of Object.entries({previewRemoval:'preview-removal',confirmRemoval:'confirm-removal',previewRestore:'preview-restore',restoreRemoval:'restore-removal',controlRemoval:'control-removal',startTrashProbe:'start-trash-probe',controlTrashProbe:'control-trash-probe'}))

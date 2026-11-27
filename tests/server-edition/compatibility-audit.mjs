@@ -35,8 +35,8 @@ export function auditEntrypoints(registered, exposed) {
   for (const [entry, status, field] of maps) {
     const [name] = names(entry),
       targets = names(field);
-    if (migration.has(name) !== (status === '迁移13')) unverified.push(name + ' phase');
-    if (!targets.length && !migration.has(name)) unverified.push(name + ' missing target');
+    if (migration.has(name) && (status !== '迁移彩排' || !targets.includes('serverRehearsal'))) unverified.push(name + ' rehearsal');
+    if (!targets.length) unverified.push(name + ' missing target');
     if (status === '事件' && !calls.has(name)) unverified.push(name + ' missing subscription');
     if (status === '移除' && (registered.has(name) || calls.has(name)))
       unverified.push(name + ' retired method exposed');

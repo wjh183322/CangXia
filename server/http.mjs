@@ -86,6 +86,13 @@ export function createHttpsService(options) {
           case '/v1/media/refresh-audio':
             result=await refreshAudio({downloads:options.downloads,session:sessions.sourceSession(who,body.grant),id:body.id});
             break;
+          case '/v1/rehearsal': {
+            const session=sessions.sourceSession(who,body.grant);
+            if(!options.rehearsals)throw failure(409,'REHEARSAL_DISABLED','请配置独立的彩排目录。');
+            try{result=options.rehearsals.handle(session,who.accountId,body.input);}
+            catch(error){if(error.status)throw error;throw failure(409,'REHEARSAL_UNAVAILABLE',error.message);}
+            break;
+          }
           case '/v1/status':
             result = sessions.status();
             break;
