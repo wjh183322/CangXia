@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { visit } from 'jsonc-parser';
 import { pageResult } from '../electron/api-pagination.mjs';
-import { goneMessage } from '../shared/source-state.mjs';
+import { goneMessage, filteredSourceState, detailSourceState } from '../shared/source-state.mjs';
 import { normalizeCreator, mergeCreator, sameCreator } from '../shared/creators.mjs';
 import { parsePlatformJSON, parseWork } from '../electron/model.mjs';
 import { audioSources } from '../electron/work-audio.mjs';
@@ -343,12 +343,36 @@ export function parseSourceDetail({ workId, status, text, retryAfter, observedAt
     throw invalid('作品详情不可用');
   validateJson(text);
   const data = parsePlatformJSON(text);
-  const first = data?.aweme_detail;
-  const nested = data?.data?.aweme_detail;
-  if ((first && nested) || (!first && !nested)) throw invalid('作品详情未提供唯一作品');
-  const { work } = observe(first || nested, observedAt, { fullDetail: true });
+  const first = data?.aweme_detail,
+    nested = data?.data?.aweme_detail;
+  if (first && nested) throw invalid('作品详情未提供唯一作品');
+  const statusRecord = (verdict) => ({ ...verdict, method: 'platform', checkedAt: observedAt });
+  if (!first && !nested) {
+    const filters = [data?.filter_detail, data?.data?.filter_detail].filter(Boolean);
+    if (filters.length > 1 || filters.some((f) => f.aweme_id !== workId))
+      throw invalid('过滤结果与目标作品不一致');
+    const verdict = filteredSourceState(data, workId) ?? detailSourceState(null, workId);
+    return { id: workId, statusOnly: true, sourceStatus: statusRecord(verdict), remoteState: verdict.state };
+  }
+  const raw = first || nested;
+  const { work, hints } = observe(raw, observedAt, { fullDetail: true });
   if (work.id !== workId) throw invalid('返回的作品详情与目标不一致');
-  return work;
+  const verdict = detailSourceState(raw, workId, work);
+  return {
+    ...work,
+    sourceStatus: statusRecord(verdict),
+    remoteState: verdict.state,
+    ...(hints.length
+      ? {
+          audioSourceHints: {
+            workId,
+            sources: hints,
+            observedAt,
+            ...(work.music ? { music: work.music } : {})
+          }
+        }
+      : {})
+  };
 }
 
 const sessionKeys = new Set([

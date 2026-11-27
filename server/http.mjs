@@ -9,6 +9,7 @@ const sourceActions = new Map([
   ['/v1/source/open', ['openLogin']],
   ['/v1/source/view', ['loginView', 'viewId']],
   ['/v1/source/refresh', ['refreshLogin', 'viewId']],
+  ['/v1/source/shown', ['qrShown', 'viewId', 'token']],
   ['/v1/source/manual', ['manualLogin', 'viewId', 'input']],
   ['/v1/source/cancel', ['cancelLogin', 'viewId']],
   ['/v1/source/logout', ['logout']],

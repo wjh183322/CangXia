@@ -190,6 +190,7 @@ app
     ipc('sourceLoginView', 'workspace', viewId => client.call('source/view', {viewId}));
     ipc('refreshQrLogin', 'workspace', viewId => client.call('source/refresh', {viewId}));
     ipc('cancelQrLogin', 'workspace', viewId => client.call('source/cancel', {viewId}));
+    ipc('sourceQrShown','workspace',(viewId,token)=>client.call('source/shown',{viewId,token}));
     ipc('sourceManualLogin', 'workspace', (viewId,input) => client.call('source/manual', {viewId,input}));
     ipc('finishLogin', 'workspace', () => client.call('identity/verify', {}));
     ipc('logout', 'workspace', async () => {

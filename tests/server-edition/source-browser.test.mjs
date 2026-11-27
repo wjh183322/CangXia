@@ -40,12 +40,24 @@ function setup(t) {
     async loginView() {
       return {
         phase: this.phase,
-        ...(this.phase === 'ready' ? { image: 'data:image/png;base64,fixture' } : {})
+        ...(this.phase === 'ready'
+          ? {
+              image:
+                'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ZkAAAAASUVORK5CYII=',
+              imageToken: 'fixture-render-token'
+            }
+          : {})
       };
     },
     async read(request) {
       this.reads.push(request);
       return { status: 200, text: JSON.stringify(this.page || fixtures['unsafe-integer']) };
+    },
+    async beginLogin() {},
+    endLogin() {},
+    async qrShown(token) {
+      this.shown = token;
+      return {};
     },
     async close() {},
     async refresh() {
@@ -58,6 +70,7 @@ function setup(t) {
       root,
       openProvider: async (saved) => {
         provider.restored = !!saved;
+        provider.lastSaved = saved;
         return provider;
       }
     });
@@ -104,13 +117,32 @@ test('three scoped page requests preserve decimal identities, cursors and source
     });
     const req = provider.reads.at(-1),
       url = new URL(req.url);
-    assert.ok(url.pathname.endsWith(route));
-    assert.equal(
-      kind === 'total'
-        ? new URLSearchParams(req.body).get('cursor')
-        : url.searchParams.get(kind === 'author' ? 'max_cursor' : 'cursor'),
-      cursor
-    );
+    assert.equal(url.origin, 'https://www.douyin.com');
+    assert.equal(url.pathname, '/aweme/v1/web/' + route);
+    assert.equal(req.method, kind === 'total' ? 'POST' : 'GET');
+    const fixed = {
+      device_platform: 'webapp',
+      aid: '6383',
+      channel: 'channel_pc_web',
+      update_version_code: '170400',
+      pc_client_type: '1',
+      version_code: '190500',
+      version_name: '19.5.0'
+    };
+    const params =
+      kind === 'collection'
+        ? { collects_id: '123', cursor, count: '30' }
+        : kind === 'author'
+          ? {
+              sec_user_id: 'fixture_author',
+              max_cursor: cursor,
+              count: '30',
+              locate_query: 'false',
+              publish_video_strategy_type: '2'
+            }
+          : {};
+    assert.deepEqual(Object.fromEntries(url.searchParams), { ...fixed, ...params });
+    assert.equal(req.body, kind === 'total' ? 'cursor=' + cursor + '&count=30' : null);
     assert.deepEqual(page.source, { kind, id });
     assert.equal(page.works[0].id, '7345612390836712343');
     assert.equal(page.works[0].music.id, '7345612390836712347');
@@ -267,6 +299,7 @@ test(
     const [code] = await once(child, 'exit');
     assert.equal(code, 0, output);
     assert.match(output, /SOURCE_DESKTOP_VERIFIED/);
+    assert.equal(provider.shown, 'fixture-render-token');
   }
 );
 test('changed provider session during self verification cannot persist an identity or credential', async (t) => {
@@ -300,44 +333,166 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-test('schema 3 acquires a verified rollback snapshot before adding the NAS source binding', async (t) => {
-  const { DatabaseSync } = await import('node:sqlite');
-  const { CURRENT_SCHEMA } = await import('../../server/library.mjs');
-  const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const library = openLibrary({ root, mode: 'init' }),
-    expectedId = library.libraryId;
-  library.close();
-  const dir = path.join(root, 'cangxia-server'),
-    file = path.join(dir, 'library.sqlite');
-  const db = new DatabaseSync(file);
-  db.exec("DROP TABLE source_account; PRAGMA user_version=3; INSERT INTO works VALUES('29','fixture','{}')");
-  db.close();
-  const bytes = fs.readFileSync(file);
-  const preview = inspectUpgrade(root, expectedId);
-  assert.equal(preview.state, 'migration-required');
-  assert.equal(preview.from, 3);
-  assert.deepEqual(fs.readFileSync(file), bytes);
-  const approval = {
-    from: 3,
-    to: CURRENT_SCHEMA,
-    libraryId: expectedId,
-    operationId: randomUUID(),
-    confirmed: true,
-    imageDigest: 'sha256:' + 'c'.repeat(64)
+for (const version of [3, 4])
+  test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { CURRENT_SCHEMA } = await import('../../server/library.mjs');
+    const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const library = openLibrary({ root, mode: 'init' }),
+      expectedId = library.libraryId;
+    library.close();
+    const dir = path.join(root, 'cangxia-server'),
+      file = path.join(dir, 'library.sqlite');
+    const db = new DatabaseSync(file);
+    db.exec(
+      version === 3
+        ? 'DROP TABLE source_account'
+        : "ALTER TABLE source_account DROP COLUMN profile_id; INSERT INTO source_account VALUES(1,'101','fixture')"
+    );
+    db.exec('PRAGMA user_version=' + version + "; INSERT INTO works VALUES('29','fixture','{}')");
+    db.close();
+    const bytes = fs.readFileSync(file);
+    const preview = inspectUpgrade(root, expectedId);
+    assert.equal(preview.state, 'migration-required');
+    assert.equal(preview.from, version);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    const approval = {
+      from: version,
+      to: CURRENT_SCHEMA,
+      libraryId: expectedId,
+      operationId: randomUUID(),
+      confirmed: true,
+      imageDigest: 'sha256:' + 'c'.repeat(64)
+    };
+    const receipt = await applyUpgrade({ ...approval, root, expectedId, approval });
+    const snapshot = new DatabaseSync(path.join(dir, receipt.snapshot, 'library.sqlite'), { readOnly: true });
+    assert.equal(snapshot.prepare('PRAGMA user_version').get().user_version, version);
+    snapshot.close();
+    const upgraded = openLibrary({ root, expectedId });
+    t.after(() => upgraded.close());
+    if (version === 4) {
+      const privateDir = path.join(dir, 'source-session');
+      fs.mkdirSync(privateDir, { mode: 0o700 });
+      fs.writeFileSync(path.join(privateDir, 'browser.json'), JSON.stringify({ cookies: [], origins: [] }), {
+        mode: 0o600
+      });
+      const services = createSessionService({ library: upgraded });
+      const who = { deviceId: 'fixture', accountId: 'operator' };
+      const grant = services.acquire(who, {
+        deviceId: 'fixture',
+        instanceId: randomUUID(),
+        operationId: randomUUID()
+      });
+      const gateway = createSourceBrowser({
+        library: upgraded,
+        root,
+        openProvider: () => {
+          throw Error('unreferenced legacy file used');
+        }
+      });
+      assert.equal(await gateway.recover(services.sourceSession(who, grant)), null);
+      await gateway.close();
+      services.close();
+    }
+    assert.deepEqual(
+      upgraded.read((conn) => [
+        conn.prepare("SELECT title FROM works WHERE id='29'").get().title,
+        conn.prepare('SELECT count(*) n FROM source_account').get().n
+      ]),
+      ['fixture', version === 4 ? 1 : 0]
+    );
+  });
+
+test('same UID reverified under a new provider session fences queued reads from the prior epoch', async (t) => {
+  const { source, provider, session } = setup(t);
+  let fingerprint = 'first';
+  provider.sessionKey = async () => fingerprint;
+  const first = await source.verifyAccount(session);
+  assert.equal((await source.verifyAccount(session)).authEpoch, first.authEpoch);
+  fingerprint = 'second';
+  const second = source.verifyAccount(session);
+  const queued = source.readSourcePage({
+    source: { kind: 'total', id: '__all__' },
+    cursor: '0',
+    authEpoch: first.authEpoch,
+    signal: session.signal
+  });
+  const [verified] = await Promise.all([second, assert.rejects(queued, { code: 'SOURCE_SESSION_LOST' })]);
+  assert.notEqual(verified.authEpoch, first.authEpoch);
+  assert.equal(provider.reads.length, 0);
+});
+
+test('typed details keep audio candidates, distinguish missing/private/deleted, and require matched filter evidence', async (t) => {
+  const { source, provider, session } = setup(t);
+  const { authEpoch } = await source.verifyAccount(session);
+  const id = '7345612390836712343';
+  const read = async (data) => {
+    provider.page = data;
+    return source.readDetail({ workId: id, authEpoch, signal: session.signal });
   };
-  const receipt = await applyUpgrade({ ...approval, root, expectedId, approval });
-  const snapshot = new DatabaseSync(path.join(dir, receipt.snapshot, 'library.sqlite'), { readOnly: true });
-  assert.equal(snapshot.prepare('PRAGMA user_version').get().user_version, 3);
-  snapshot.close();
-  const upgraded = openLibrary({ root, expectedId });
-  t.after(() => upgraded.close());
+  const media = await read({ aweme_detail: { ...fixtures.media.data.aweme_list[0], aweme_id: id } });
+  assert.equal(media.sourceStatus.state, 'available');
   assert.deepEqual(
-    upgraded.read((conn) => [
-      conn.prepare("SELECT title FROM works WHERE id='29'").get().title,
-      conn.prepare('SELECT count(*) n FROM source_account').get().n
-    ]),
-    ['fixture', 0]
+    media.audioSourceHints.sources.map((s) => s.kind),
+    ['music', 'work']
   );
+  assert.equal(media.audioSourceHints.workId, id);
+  for (const [raw, state] of [
+    [{ aweme_id: id }, 'unknown'],
+    [{ aweme_id: id, is_private: 1 }, 'unknown'],
+    [{ aweme_id: id, is_delete: 1 }, 'unavailable']
+  ]) {
+    const result = await read({ aweme_detail: raw });
+    assert.equal(result.sourceStatus.state, state);
+    assert.equal(result.remoteState, state);
+  }
+  const filter = {
+    status_code: 0,
+    aweme_detail: null,
+    filter_detail: { aweme_id: id, filter_reason: 'status_audit_self_see' }
+  };
+  const unavailable = await read(filter);
+  assert.equal(unavailable.id, id);
+  assert.equal(unavailable.sourceStatus.state, 'unavailable');
+  assert.equal(unavailable.statusOnly, true);
+  const unknown = await read({ ...filter, filter_detail: { aweme_id: id, filter_reason: 'unrecognized' } });
+  assert.equal(unknown.sourceStatus.state, 'unknown');
+  assert.equal((await read({ status_code: 0, aweme_detail: null })).sourceStatus.state, 'unknown');
+  await assert.rejects(read({ ...filter, filter_detail: { ...filter.filter_detail, aweme_id: '33' } }), {
+    code: 'SOURCE_PAGE_INVALID'
+  });
+  await assert.rejects(read({ aweme_detail: { aweme_id: '33', is_delete: 1 } }), {
+    code: 'SOURCE_PAGE_INVALID'
+  });
+});
+test('post-write rejection retains prior committed profile and leaves first failed binding unrecoverable', async (t) => {
+  const { source, provider, session, make } = setup(t);
+  const rejected = {
+    ...session,
+    write: (fn) =>
+      session.write((db) => {
+        fn(db);
+        throw Error('simulated transaction rollback');
+      })
+  };
+  provider.storage = async () => ({ cookies: [], origins: [], fixture: 'uncommitted' });
+  await assert.rejects(source.verifyAccount(rejected), /rollback/);
+  await source.close();
+  const second = make();
+  t.after(() => second.close());
+  assert.equal(await second.recover(session), null);
+  provider.storage = async () => ({ cookies: [], origins: [], fixture: 'first' });
+  await second.verifyAccount(session);
+  await second.close();
+  const third = make();
+  t.after(() => third.close());
+  provider.storage = async () => ({ cookies: [], origins: [], fixture: 'uncommitted' });
+  await assert.rejects(third.verifyAccount(rejected), /rollback/);
+  await third.close();
+  const restored = make();
+  t.after(() => restored.close());
+  await restored.recover(session);
+  assert.equal(provider.lastSaved.fixture, 'first');
 });

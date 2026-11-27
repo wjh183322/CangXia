@@ -11,7 +11,7 @@ import {
 } from './source-parser.mjs';
 import { openOfficialProvider } from './source-provider.mjs';
 import { SourceError } from './source-error.mjs';
-import { inspectLayout, syncDirectory, writeDurably } from './library.mjs';
+import { inspectLayout, isUuid, syncDirectory, writeDurably } from './library.mjs';
 
 const stale = () => new SourceError('SOURCE_SESSION_LOST', '来源会话已结束，请重新核验账号。');
 const loginRequired = () => new SourceError('LOGIN_REQUIRED', '请先使用抖音官方页面完成登录。');
@@ -20,7 +20,7 @@ const decimal = (v) => typeof v === 'string' && /^\d{1,40}$/.test(v);
 
 function privateStorage(root, libraryId) {
   // Outside the archive database and its migration snapshots.
-  function location() {
+  function directory() {
     const layout = inspectLayout(root, libraryId);
     const dir = path.join(layout.dir, 'source-session');
     try {
@@ -34,11 +34,31 @@ function privateStorage(root, libraryId) {
       (process.platform !== 'win32' && (stat.mode & 0o077 || stat.uid !== process.getuid()))
     )
       throw Error('NAS 来源会话目录权限无效。');
-    return path.join(dir, 'browser.json');
+    return dir;
+  }
+  function location(id) {
+    if (!isUuid(id)) throw Error('无效的 NAS 浏览器会话标识。');
+    return path.join(directory(), id + '.json');
   }
   return {
-    load() {
-      const file = location();
+    filesForLogout() {
+      const dir = directory();
+      return fs
+        .readdirSync(dir)
+        .filter((name) => name === 'browser.json' || (name.endsWith('.json') && isUuid(name.slice(0, -5))));
+    },
+    discardFiles(names) {
+      const dir = directory();
+      for (const name of names) {
+        if (name !== 'browser.json' && !(name.endsWith('.json') && isUuid(name.slice(0, -5))))
+          throw Error('来源会话文件标识无效。');
+        fs.rmSync(path.join(dir, name), { force: true });
+      }
+      if (names.length) syncDirectory(dir);
+    },
+    load(id) {
+      if (!id) return null;
+      const file = location(id);
       let st;
       try {
         st = fs.lstatSync(file);
@@ -55,21 +75,16 @@ function privateStorage(root, libraryId) {
         throw Error('NAS 来源会话文件无效。');
       return JSON.parse(fs.readFileSync(file, 'utf8'));
     },
-    save(state) {
-      const file = location(),
-        tmp = path.join(path.dirname(file), randomUUID() + '.tmp');
+    stage(id, state) {
+      const file = location(id);
       const data = JSON.stringify(state);
       if (Buffer.byteLength(data) > 8 * 1024 * 1024) throw Error('来源会话过大。');
-      try {
-        writeDurably(tmp, data);
-        fs.renameSync(tmp, file);
-        syncDirectory(path.dirname(file));
-      } finally {
-        fs.rmSync(tmp, { force: true });
-      }
+      writeDurably(file, data);
+      syncDirectory(path.dirname(file));
     },
-    clear() {
-      const file = location();
+    discard(id) {
+      if (!id) return;
+      const file = location(id);
       fs.rmSync(file, { force: true });
       syncDirectory(path.dirname(file));
     }
@@ -78,7 +93,7 @@ function privateStorage(root, libraryId) {
 function requestFor(source, cursor) {
   source = validateSource(source);
   if (!decimal(cursor)) throw new SourceError('SOURCE_PAGE_INVALID', '来源游标无效。');
-  const count = 20;
+  const count = 30;
   if (source.kind === 'total')
     return apiRequest('/aweme/v1/web/aweme/listcollection/', { method: 'POST', form: { cursor, count } });
   if (source.kind === 'collection')
@@ -128,7 +143,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
     if (slot?.session.signal === session.signal) return slot;
     await retire(slot);
     guard(session);
-    const saved = storage.load();
+    const saved = storage.load(bound(session)?.profile_id);
     if (recoveryOnly && !saved) return null;
     const current = { session, end: new AbortController(), identity: null, view: null };
     current.stop = () => {
@@ -148,7 +163,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
   }
   function bound(session) {
     return session.read((db) =>
-      db.prepare('SELECT uid,nickname FROM source_account WHERE singleton=1').get()
+      db.prepare('SELECT uid,nickname,profile_id FROM source_account WHERE singleton=1').get()
     );
   }
   async function identify(current, signal) {
@@ -181,20 +196,39 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
     const state = await current.provider.storage();
     if (sessionKey !== (await current.provider.sessionKey())) throw stale();
     guard(current.session);
-    current.session.write((db) => {
-      const row = db.prepare('SELECT uid FROM source_account WHERE singleton=1').get();
-      if (row && row.uid !== identity.uid) throw wrong();
-      db.prepare(
-        'INSERT INTO source_account VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET nickname=excluded.nickname'
-      ).run(identity.uid, identity.nickname);
-      storage.save(state);
-    });
+    const profileId = randomUUID();
+    let prior;
+    try {
+      prior = current.session.write((db) => {
+        const row = db.prepare('SELECT uid,profile_id FROM source_account WHERE singleton=1').get();
+        if (row && row.uid !== identity.uid) throw wrong();
+        storage.stage(profileId, state);
+        db.prepare(
+          'INSERT INTO source_account(singleton,uid,nickname,profile_id) VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET nickname=excluded.nickname,profile_id=excluded.profile_id'
+        ).run(identity.uid, identity.nickname, profileId);
+        return row?.profile_id;
+      });
+    } catch (error) {
+      // After an ambiguous COMMIT, preserve files unless the durable pointer is known.
+      try {
+        if (
+          library.read(
+            (db) => db.prepare('SELECT profile_id FROM source_account WHERE singleton=1').get()?.profile_id
+          ) !== profileId
+        )
+          storage.discard(profileId);
+      } catch {}
+      throw error;
+    }
+    storage.discard(prior);
+    const sameSession = previous?.uid === identity.uid && current.sessionKey === sessionKey;
     current.sessionKey = sessionKey;
     current.identity = {
       ...identity,
-      authEpoch: previous?.uid === identity.uid ? previous.authEpoch : randomUUID()
+      authEpoch: sameSession ? previous.authEpoch : randomUUID()
     };
     current.view = null;
+    current.provider.endLogin();
     return { ...current.identity };
   }
   async function login(session, id, action, value) {
@@ -210,7 +244,14 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
         await retire(current);
         return {};
       }
-      if (action === 'refresh') await current.provider.refresh();
+      if (action === 'open' || action === 'refresh') {
+        const viewId = current.view;
+        await current.provider.beginLogin(() => {
+          guard(session);
+          if (current !== slot || current.view !== viewId) throw stale();
+        });
+      }
+      if (action === 'shown') return current.provider.qrShown(value);
       if (action === 'manual') await current.provider.manual(value);
       const result = await current.provider.loginView();
       guard(session);
@@ -235,6 +276,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
         try {
           if ((await current.provider.sessionKey()) !== current.sessionKey) throw stale();
           await identify(current, stop);
+          if ((await current.provider.sessionKey()) !== current.sessionKey) throw stale();
         } catch (e) {
           if (e.code !== 'SOURCE_RATE_LIMITED') current.identity = null;
           throw e;
@@ -265,13 +307,22 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
     openLogin: (session) => login(session, null, 'open'),
     loginView: (session, id) => login(session, id, 'view'),
     refreshLogin: (session, id) => login(session, id, 'refresh'),
+    qrShown: (session, id, token) => login(session, id, 'shown', token),
     manualLogin: (session, id, value) => login(session, id, 'manual', value),
     cancelLogin: (session, id) => login(session, id, 'close'),
     logout: (session) =>
       serial(async () => {
         guard(session);
-        storage.clear();
-        await retire(slot);
+        const prior = session.write((db) => {
+          const files = storage.filesForLogout();
+          db.exec('UPDATE source_account SET profile_id=NULL WHERE singleton=1');
+          return files;
+        });
+        try {
+          storage.discardFiles(prior);
+        } finally {
+          await retire(slot);
+        }
         return {};
       }),
     async readSourcePage({ source, cursor, authEpoch, signal }) {

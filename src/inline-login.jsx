@@ -80,7 +80,14 @@ export function ServerInlineLogin({ api, onSuccess }) {
     <div className="login-panel qr-login-body">
       {view.image && (
         <div className="qr-image-box">
-          <img src={view.image} alt="抖音官方登录二维码" />
+          <img
+            key={view.imageToken}
+            src={view.image}
+            alt="抖音官方登录二维码"
+            onLoad={() => {
+              if (view.imageToken) void api.sourceQrShown(view.viewId, view.imageToken).catch(() => {});
+            }}
+          />
         </div>
       )}
       <p role="status">{error || loginMessages[view.phase]}</p>

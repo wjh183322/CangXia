@@ -14,6 +14,14 @@ const origin = 'https://www.douyin.com',
 const selfRoute = '/aweme/v1/web/user/profile/self/';
 const storageHelper =
   /^\/obj\/uc-assets\/zt\/@byted\/x-storage-web\/(4\.0\.5|4\.0\.7|4\.0\.8)\/dist\/latest\/index\.html$/;
+const bootstrapReads = new Set([
+  selfRoute,
+  '/aweme/v1/web/social/count',
+  '/aweme/v1/web/solution/resource/list/',
+  '/aweme/v1/web/get/user/settings/',
+  '/aweme/v1/web/query/user/'
+]);
+const assetTypes = new Set(['script', 'stylesheet', 'font', 'image']);
 const staticHosts = [
   'douyincdn.com',
   'douyinpic.com',
@@ -32,7 +40,7 @@ const sourceFailure = () =>
   new SourceError('SOURCE_BROWSER', 'NAS 无法打开抖音官方页面，请检查浏览器和网络。');
 const unsupported = () => new SourceError('MANUAL_UNAVAILABLE', '当前验证控件已变化，请重新查看抖音的提示。');
 
-function allowRequest(request, page) {
+async function allowRequest(request, page, authorize) {
   const url = new URL(request.url());
   if (url.protocol !== 'https:' || url.port || url.username || url.password) return false;
   const frame = request.frame();
@@ -45,6 +53,8 @@ function allowRequest(request, page) {
     if (main) return official(url);
     return (
       frame.parentFrame() === page.mainFrame() &&
+      (['', 'about:blank'].includes(frame.url()) ||
+        (new URL(frame.url()).origin === url.origin && storageHelper.test(new URL(frame.url()).pathname))) &&
       url.origin === 'https://lf-zt.douyin.com' &&
       storageHelper.test(url.pathname)
     );
@@ -59,18 +69,14 @@ function allowRequest(request, page) {
   )
     return false;
   if (url.origin === origin && main) {
-    if (method === 'GET') return true;
-    if (method === 'POST')
-      return (
-        url.pathname === '/aweme/v1/web/aweme/listcollection/' ||
-        /^\/passport\/web\/(?:check_qrconnect|send_code|validate_code|verify|sms_login)\/?$/.test(
-          url.pathname
-        )
-      );
+    if (assetTypes.has(type)) return method === 'GET' && !url.pathname.startsWith('/passport/');
+    if (!['fetch', 'xhr'].includes(type) || request.redirectedFrom()) return false;
+    if (method === 'GET' && bootstrapReads.has(url.pathname)) return true;
+    return authorize(request, url, method);
   }
   return (
     method === 'GET' &&
-    ['script', 'stylesheet', 'font', 'image'].includes(type) &&
+    assetTypes.has(type) &&
     staticHosts.some((host) => url.hostname === host || url.hostname.endsWith('.' + host))
   );
 }
@@ -150,11 +156,91 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
     signal.throwIfAborted();
     const page = await context.newPage();
     let key = 'cx' + randomUUID(),
-      manualPanel;
+      manualPanel,
+      login,
+      pendingRead;
     page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame()) {
-        key = 'cx' + randomUUID();
-        manualPanel = null;
+      if (frame !== page.mainFrame()) return;
+      key = 'cx' + randomUUID();
+      manualPanel = null;
+      if (login?.opening) {
+        login.opening = false;
+        login.document = key;
+      } else login = null;
+    });
+    function live() {
+      signal.throwIfAborted();
+      if (!login || login.document !== key || !official(new URL(page.url()))) throw unsupported();
+      login.check();
+      return login;
+    }
+    async function bitmap() {
+      const panel = await page.evaluate(panelScript, { key, action: 'locate' });
+      if (!panel?.id || panel.challenge) return null;
+      const qr = await page.evaluate(loginQrRegion, { key, panel, encode: true, maxBitmapSize: 512 });
+      return qr?.png ? { png: qr.png, hash: createHash('sha256').update(qr.png).digest('hex') } : null;
+    }
+    async function authorize(request, url, method) {
+      if (!url.pathname.startsWith('/passport/')) {
+        if (
+          pendingRead?.method !== method ||
+          pendingRead.url !== url.href ||
+          pendingRead.body !== request.postData()
+        )
+          return false;
+        pendingRead.stop.throwIfAborted();
+        pendingRead = null;
+        return true;
+      }
+      const view = live(),
+        route = url.pathname.replace(/\/$/, '');
+      if (route === '/passport/web/get_qrcode') {
+        if (method !== 'GET' || view.issueRequest || Date.now() >= view.openUntil) return false;
+        view.issueRequest = request;
+        return true;
+      }
+      if (method !== 'POST' || (request.postDataBuffer()?.length ?? 0) > 8192) return false;
+      if (route === '/passport/web/check_qrconnect') {
+        const mime = request.headers()['content-type'] || '';
+        if (
+          request.resourceType() !== 'xhr' ||
+          !/^application\/x-www-form-urlencoded(?:;\s*charset=utf-8)?$/i.test(mime) ||
+          !request.postDataBuffer()?.length ||
+          !view.shown ||
+          view.remaining <= 0 ||
+          Date.now() >= view.pollUntil
+        )
+          return false;
+        const state = await page.evaluate(stateScript);
+        if (!['scanned', 'connecting'].includes(state.phase) && (await bitmap())?.hash !== view.shown)
+          return false;
+        if (live() !== view || !view.shown || view.remaining <= 0 || Date.now() >= view.pollUntil)
+          return false;
+        view.remaining--;
+        return true;
+      }
+      const action = view.manual;
+      if (!action || Date.now() >= action.until || !action.routes.includes(route)) return false;
+      const panel = await page.evaluate(panelScript, { key, action: 'locate' });
+      if (
+        live() !== view ||
+        view.manual !== action ||
+        !panel?.challenge ||
+        panel.id !== action.node ||
+        Date.now() >= action.until
+      )
+        return false;
+      view.manual = null;
+      return true;
+    }
+    page.on('response', (response) => {
+      const view = login;
+      if (view?.issueRequest !== response.request()) return;
+      view.issued =
+        response.status() === 200 && /^application\/json\b/i.test(response.headers()['content-type'] || '');
+      if (!view.issued) {
+        view.shown = null;
+        view.issueFailure = response.status() === 429 ? 'limited' : 'refused';
       }
     });
     const close = () => context.close().catch(() => {});
@@ -167,9 +253,19 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
     await context.route('**/*', async (route) => {
       let allowed = false;
       try {
-        allowed = allowRequest(route.request(), page);
+        allowed = await allowRequest(route.request(), page, authorize);
       } catch {}
-      await (allowed ? route.fallback() : route.abort()).catch(() => {});
+      let preserveBlank = false;
+      if (!allowed)
+        try {
+          const req = route.request(),
+            frame = req.frame();
+          preserveBlank =
+            req.isNavigationRequest() &&
+            frame.parentFrame() === page.mainFrame() &&
+            ['', 'about:blank'].includes(frame.url());
+        } catch {}
+      await (allowed ? route.fallback() : route.abort(preserveBlank ? 'aborted' : undefined)).catch(() => {});
     });
     await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
     let clicked = false;
@@ -192,6 +288,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
       const requestKey = 'cx' + randomUUID();
       const cancel = () => void page.evaluate((k) => window[k]?.abort(), requestKey).catch(() => {});
       stop.throwIfAborted();
+      pendingRead = { ...request, stop };
       stop.addEventListener('abort', cancel, { once: true });
       try {
         const result = await abortable(
@@ -202,6 +299,7 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
         if (result.error) throw sourceFailure();
         return result;
       } finally {
+        pendingRead = null;
         stop.removeEventListener('abort', cancel);
       }
     }
@@ -236,12 +334,53 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
         return validAccountIdentity(identity) ? identity : null;
       },
       storage: () => fixed(() => context.storageState()),
+      beginLogin: (check) =>
+        fixed(async () => {
+          check();
+          login = { check, opening: true, openUntil: Date.now() + 30000, remaining: 24 };
+          clicked = false;
+          await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          live();
+        }),
+      endLogin: () => {
+        login = null;
+        manualPanel = null;
+      },
+      qrShown: (token) =>
+        fixed(async () => {
+          const view = live();
+          if (
+            !view.issued ||
+            view.token !== token ||
+            !view.image ||
+            (await bitmap())?.hash !== view.image ||
+            live() !== view
+          )
+            throw unsupported();
+          view.shown = view.image;
+          view.pollUntil ??= Date.now() + 45000;
+          return {};
+        }),
       loginView: () =>
         fixed(async () => {
+          const view = live();
+          if (view.issueFailure === 'limited') return { phase: 'limited' };
+          if (view.issueFailure)
+            throw new SourceError('SOURCE_REFUSED', '抖音未签发登录二维码，请检查官方登录要求。');
           const state = await page.evaluate(stateScript);
-          if (['limited', 'expired', 'scanned'].includes(state.phase)) return { phase: state.phase };
+          if (['limited', 'expired', 'scanned'].includes(state.phase)) {
+            if (state.phase !== 'scanned') {
+              view.shown = null;
+              view.image = null;
+              view.issued = false;
+              view.manual = null;
+            }
+            return { phase: state.phase };
+          }
           const panel = await page.evaluate(panelScript, { key, action: 'locate' });
           if (state.phase === 'verification' || panel?.challenge) {
+            view.shown = null;
+            view.image = null;
             const manual = panel?.challenge ? await page.evaluate(smsControls, { key, panel }) : null;
             if (manual && (manual.code || manual.send)) {
               if (manualPanel?.node !== panel.id || manualPanel.key !== key)
@@ -252,9 +391,18 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
             return { phase: 'verification', manual: null };
           }
           manualPanel = null;
-          if (panel?.id) {
-            const qr = await page.evaluate(loginQrRegion, { key, panel, encode: true, maxBitmapSize: 512 });
-            if (qr?.png) return { phase: 'ready', image: 'data:image/png;base64,' + qr.png };
+          if (panel?.id && view.issued) {
+            if (view.remaining <= 0 || (view.pollUntil && Date.now() >= view.pollUntil))
+              return { phase: 'expired' };
+            const qr = await bitmap();
+            if (qr && live() === view) {
+              if (view.image !== qr.hash) {
+                view.image = qr.hash;
+                view.shown = null;
+                view.token = randomUUID();
+              }
+              return { phase: 'ready', image: 'data:image/png;base64,' + qr.png, imageToken: view.token };
+            }
           }
           if (panel?.loginEntry === 'ready' && !clicked) {
             const result = await page.evaluate(panelScript, { key, action: 'open' });
@@ -267,12 +415,9 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
           ) {
             return { phase: 'connecting', signedIn: true };
           }
+          if (!view.issued && Date.now() >= view.openUntil)
+            throw new SourceError('SOURCE_TIMEOUT', '等待抖音二维码超时，请刷新。');
           return { phase: 'loading' };
-        }),
-      refresh: () =>
-        fixed(async () => {
-          await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          clicked = false;
         }),
       manual: (command) =>
         fixed(async () => {
@@ -288,14 +433,27 @@ export async function openOfficialProvider(saved, signal, { createContext = laun
             throw unsupported();
           const panel = await page.evaluate(panelScript, { key, action: 'locate' });
           const approved = manualPanel;
-          manualPanel = null;
-          if (
-            !panel?.challenge ||
-            panel.id !== approved?.node ||
-            key !== approved.key ||
-            !(await page.evaluate(smsControls, { key, panel, command: { ...command, panelId: panel.id } }))
-          )
+          const view = live();
+          if (!approved || !panel?.challenge || panel.id !== approved.node || key !== approved.key)
             throw unsupported();
+          view.manual = {
+            node: approved.node,
+            until: Date.now() + 3000,
+            routes:
+              command.action === 'send'
+                ? ['/passport/web/send_code']
+                : ['/passport/web/validate_code', '/passport/web/verify', '/passport/web/sms_login']
+          };
+          manualPanel = null;
+          try {
+            if (
+              !(await page.evaluate(smsControls, { key, panel, command: { ...command, panelId: panel.id } }))
+            )
+              throw unsupported();
+          } catch (error) {
+            view.manual = null;
+            throw error;
+          }
         }),
       close
     };
