@@ -1,4 +1,4 @@
-name: cangxia-server-041-rc
+name: cangxia-server
 x-image: &image ghcr.io/wjh183322/cangxia-server@sha256:aedc12ea59861c7d36b10686719cff2c0fe05df8ca5b595814469bd43642e4a4
 
 services:

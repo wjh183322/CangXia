@@ -10,7 +10,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("address", type=IPv4Address)
 parser.add_argument("output", type=Path)
 args = parser.parse_args()
-project = "cangxia-server-041-rc"
+project = "cangxia-server"
 files = {
     name: (source / name).read_text(encoding="utf-8").replace("NAS_HOST", str(args.address)).encode()
     for name in ["compose.yaml", "安装说明.txt"]

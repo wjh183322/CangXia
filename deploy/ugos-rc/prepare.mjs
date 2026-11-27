@@ -13,7 +13,7 @@ if (fs.existsSync('/install/initialized')) {
 } else {
   const ticket = '/install/first-install';
   const info = fs.lstatSync(ticket);
-  if (!info.isFile() || info.nlink !== 1 || fs.readFileSync(ticket, 'utf8').trim() !== 'cangxia-server-041-rc') {
+  if (!info.isFile() || info.nlink !== 1 || fs.readFileSync(ticket, 'utf8').trim() !== 'cangxia-server') {
     throw Error('未找到有效的首次安装标记。');
   }
   for (const dir of storage) {

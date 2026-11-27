@@ -3,7 +3,7 @@ set -euo pipefail
 archive="$RUNNER_TEMP/kit.zip"
 python3 deploy/ugos-rc/package.py 127.0.0.1 "$archive"
 unzip -q "$archive" -d "$RUNNER_TEMP/ugos-check"
-cd "$RUNNER_TEMP/ugos-check/cangxia-server-041-rc"
+cd "$RUNNER_TEMP/ugos-check/cangxia-server"
 docker compose config --quiet
 trap 'docker compose ps -a; docker compose logs --tail 10; docker compose down' EXIT
 
