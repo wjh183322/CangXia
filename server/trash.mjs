@@ -363,15 +363,13 @@ export function createTrashAdapter({ layout, bin }) {
         assertObserved(file, expected, before);
         return { ...state, ...before };
       }
-      async function settled() {
+      if (!stat(a)) {
+        if (options.allowSettled === false) throw conflict();
         const before = observation();
+        // Linux resolves b through the pinned directory descriptor until the digest and final path check finish.
         if (stat(a) || !(await matches(b, file))) throw conflict();
         assertObserved(file, expected, before);
         return before;
-      }
-      if (!stat(a)) {
-        if (options.allowSettled === false) throw conflict();
-        return settled();
       }
       const before = observation();
       if (stat(b) || !(await matches(a, file))) throw conflict();

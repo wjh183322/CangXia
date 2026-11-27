@@ -695,3 +695,17 @@ test('legacy partially restored batch reconciles its in-flight restore item and 
   assert.equal(f.query('removal-status', { token: parent }).state, 'restored');
   assert.equal(f.store.resources('11').length, 1);
 });
+
+test('adapter replays an already moved item and verifies the canonical paths before closing their handles', async t=>{
+  const f=fixture(t),adapter=createTrashAdapter({layout:f.layout,bin:f.bin});
+  t.after(()=>adapter.close());
+  const binding=adapter.binding(),parent=JSON.parse(f.store.db.prepare('SELECT body FROM archive_homes').get().body).identity;
+  const file={relative_path:'folder/one/video.mp4',parent,...f.proof};
+  for(const method of ['trash','restore']){
+    const moved=await adapter[method](file,binding);
+    const resumed=await adapter[method](file,binding,{paths:moved.paths});
+    assert.deepEqual(resumed,moved);
+    adapter.assertObserved(file,binding,resumed);
+  }
+  assert.equal(fs.readFileSync(f.original,'utf8'),'synthetic bytes');
+});
