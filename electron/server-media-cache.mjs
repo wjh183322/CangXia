@@ -30,6 +30,7 @@ export class ServerMediaCache {
     this.pins = new Map();
     this.pending = new Map();
     this.reserved = 0;
+    this.overBudget = new Set();
   }
   limits() {
     return {
@@ -53,12 +54,14 @@ export class ServerMediaCache {
       if (!validCacheLimit(input?.[k])) throw Error('缓存额度应为 16 至 16384 MiB。');
     for (const k of Object.keys(defaults)) {
       this.db.prepare('INSERT OR REPLACE INTO limits VALUES(?,?)').run(k, input[k]);
-      this.trim(k, input[k]);
+      if (this.trim(k, input[k])) this.overBudget.delete(k);
+      else this.overBudget.add(k);
     }
     return this.summary();
   }
   trim(scope, limit) {
     let size = this.db.prepare('SELECT coalesce(sum(size),0) AS n FROM objects WHERE scope=?').get(scope).n;
+    if (size <= limit) return true;
     for (const row of this.db
       .prepare('SELECT key,size FROM objects WHERE scope=? ORDER BY touched')
       .all(scope)) {
@@ -86,7 +89,11 @@ export class ServerMediaCache {
       done = true;
       const n = this.pins.get(key) - 1;
       if (n) this.pins.set(key, n);
-      else this.pins.delete(key);
+      else {
+        this.pins.delete(key);
+        for (const scope of this.overBudget)
+          if (this.trim(scope, this.limits()[scope])) this.overBudget.delete(scope);
+      }
     };
     return new ReadableStream({
       pull: async (controller) => {

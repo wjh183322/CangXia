@@ -55,7 +55,7 @@ function pinnedAgent(config,stop) {
   };
   return agent;
 }
-export async function pinnedMedia(config, grant, resource, {range,head=false,signal}={}) {
+export async function pinnedMedia(config, grant, resource, {range,head=false,guard=false,signal}={}) {
   const agent=pinnedAgent(config,signal),url=new URL('/v1/media',config.url);
   url.searchParams.set('id',resource.resourceId);
   url.searchParams.set('version',resource.version);
@@ -64,6 +64,7 @@ export async function pinnedMedia(config, grant, resource, {range,head=false,sig
       authorization:'Bearer '+config.token,'x-cangxia-device':config.deviceId,
       'x-cangxia-protocol':String(serverIdentity.protocolVersion),
       'x-cangxia-grant':Buffer.from(JSON.stringify(grant)).toString('base64url'),
+      ...(guard?{'x-cangxia-media-check':'1'}:{}),
       ...(range?{range}:{})
     }},res=>{
       res.once('close',()=>agent.destroy());

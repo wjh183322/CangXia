@@ -51,9 +51,10 @@ export function attachMedia(work, library) {
     ...(assets ? { localRecord: { assets, hdCover: work.hdCover } } : {})
   };
 }
-function guardedStream(stream, signal, validate) {
+function guardedStream(stream, signal, validate, groupBytes = 0) {
   const reader = stream.getReader();
   let watch,
+    delivered = false,
     timer,
     closed = false;
   const dispose = () => {
@@ -76,16 +77,32 @@ function guardedStream(stream, signal, validate) {
       async pull(controller) {
         try {
           signal.throwIfAborted();
-          const { done, value } = await reader.read();
-          signal.throwIfAborted();
-          if (done) {
+          const first = await reader.read();
+          if (first.done) {
             dispose();
             controller.close();
-          } else controller.enqueue(value);
+            return;
+          }
+          const chunks = [first.value];
+          let bytes = first.value.byteLength;
+          while (delivered && bytes < groupBytes) {
+            const next = await reader.read();
+            if (next.done) break;
+            bytes += next.value.byteLength;
+            chunks.push(next.value);
+          }
+          // The NAS may already have finished writing every byte to the transport.
+          // Reauthorize at the last handoff before the consumer can see these bytes.
+          await validate();
+          signal.throwIfAborted();
+          if (closed) return;
+          delivered = true;
+          controller.enqueue(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, bytes));
         } catch (e) {
           if (!closed) {
             dispose();
             controller.error(e);
+            await reader.cancel().catch(() => {});
           }
         }
       },
@@ -160,13 +177,13 @@ export class ServerMedia {
       throw e;
     }
   }
-  async raw(item, { signal, range, head = false }) {
+  async raw(item, { signal, range, head = false, guard = false }) {
     const c = this.client,
       epoch = c.epoch;
     c.assert(epoch);
     let res;
     try {
-      res = await pinnedMedia(c.config, c.grant, item, { signal, range, head });
+      res = await pinnedMedia(c.config, c.grant, item, { signal, range, head, guard });
       c.assert(epoch);
     } catch (e) {
       res?.destroy();
@@ -225,19 +242,41 @@ export class ServerMedia {
   async response(item, { library, signal, range, head, scope }) {
     const key = JSON.stringify([library, item.resourceId, item.version]);
     const present = scope && this.cache.get(key);
-    const verify = async () => {
-      const check = await this.raw(item, { signal, head: true });
+    let state;
+    const probe = async (cacheEntry) => {
+      const response = await this.raw(item, { signal, head: true, guard: !cacheEntry });
       try {
-        return (
-          check.statusCode === 200 &&
-          check.headers.etag === present.etag &&
-          Number(check.headers['content-length']) === present.size
-        );
+        const stamp = response.headers['x-cangxia-media-state'];
+        if (cacheEntry) {
+          if (
+            response.statusCode !== 200 ||
+            response.headers.etag !== cacheEntry.etag ||
+            Number(response.headers['content-length']) !== cacheEntry.size
+          )
+            return false;
+          state = stamp;
+        } else if (item.version.startsWith('source-')) {
+          if (response.statusCode !== 204 || !state || stamp !== state)
+            throw Error('来源媒体或使用权已变化。');
+        } else if (
+          response.statusCode !== 200 ||
+          response.headers.etag !== '"' + item.version.split('-')[1] + '"'
+        )
+          throw Error('媒体版本已更换。');
+        return true;
       } finally {
-        check.destroy();
+        response.destroy();
       }
     };
-    if (present && (await verify())) {
+    let checking;
+    const validate = () => {
+      signal.throwIfAborted();
+      checking ??= probe().finally(() => {
+        checking = null;
+      });
+      return checking;
+    };
+    if (present && (await probe(present))) {
       let slice;
       try {
         slice = parseRange(range, present.size);
@@ -253,22 +292,13 @@ export class ServerMedia {
           ? { 'content-range': `bytes ${slice.start}-${slice.end}/${present.size}` }
           : {})
       };
-      let checked = performance.now(),
-        pending;
-      const validate = async () => {
-        signal.throwIfAborted();
-        if (performance.now() - checked < 500) return;
-        pending ??= verify()
-          .then((current) => {
-            if (!current) throw Error('媒体版本已更换。');
-            checked = performance.now();
-          })
-          .finally(() => {
-            pending = null;
-          });
-        await pending;
-      };
-      const body = head ? null : guardedStream(this.cache.reader(key, slice, validate), signal, validate);
+      const body = head
+        ? null
+        : guardedStream(
+            this.cache.reader(key, slice, () => signal.throwIfAborted()),
+            signal,
+            validate
+          );
       return new Response(body, { status: slice.status, headers });
     }
     const res = await this.raw(item, { signal, range, head }),
@@ -289,7 +319,10 @@ export class ServerMedia {
     const size = Number(headers['content-length']),
       whole = res.statusCode === 200 || headers['content-range'] === `bytes 0-${size - 1}/${size}`;
     const capture = whole && this.cache.reservation(key, scope, size, headers.etag, headers['content-type']);
-    let body = Readable.toWeb(res);
+    state = res.headers['x-cangxia-media-state'];
+    let body = Readable.toWeb(res, {
+      strategy: { highWaterMark: 128 * 1024, size: (chunk) => chunk.byteLength }
+    });
     if (capture) {
       res.once('close', () => {
         if (!res.complete) capture.close();
@@ -310,7 +343,10 @@ export class ServerMedia {
         { signal }
       );
     }
-    return new Response(guardedStream(body, signal), { status: res.statusCode, headers });
+    return new Response(guardedStream(body, signal, validate, Number.isSafeInteger(size) ? 256 * 1024 : 0), {
+      status: res.statusCode,
+      headers
+    });
   }
   prepare(directory, selection, includeCover) {
     if (!selection || !Number.isSafeInteger(selection.confirmedCount) || selection.confirmedCount < 1)

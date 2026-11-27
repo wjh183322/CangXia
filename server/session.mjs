@@ -88,10 +88,19 @@ export function createSessionService({
   const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay, archive: downloads?.archive });
   const exportsByGrant = new Map();
-  function confirmExport(db,ids,{grant}) {
+  function exportWork(db,id){
+    const work=catalogueDetail(db,{id});
+    if(!work)throw invalid();
+    const positions=new Set(work.images.map((image,i)=>image.index??i));
+    for(const asset of work.media)if(/^image-\d+$/.test(asset.key))positions.add(Number(asset.key.slice(6)));
+    const images=[...positions].sort((a,b)=>a-b).map(index=>({index}));
+    return {id,name:work.name,type:work.type,author:work.author,images,media:work.media};
+  }
+  function confirmExport(db,ids,{grant,selection}) {
     const token=randomUUID();
-    exportsByGrant.set(token,{generation:grant.generation,ids});
-    return {token,count:ids.length};
+    const entries=ids.map(id=>({id,digest:contentHash(exportWork(db,id))}));
+    exportsByGrant.set(token,{generation:grant.generation,revision:selection.revision,entries});
+    return {token,count:ids.length,revision:selection.revision};
   }
   if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
     'flat-download':confirmExport, 'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),'repair-cover':(db,ids)=>downloads.enqueue(db,ids,'repair-cover'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
@@ -159,13 +168,15 @@ export function createSessionService({
       'export-page': (db,{token,offset},{grant})=>{
         const batch=exportsByGrant.get(token);
         if(!batch || batch.generation!==grant.generation || !Number.isSafeInteger(offset) || offset<0) throw invalid();
-        const page=batch.ids.slice(offset,offset+64);
-        if(offset+page.length>=batch.ids.length)exportsByGrant.delete(token);
-        return page.map(id=>{
-          const work=catalogueDetail(db,{id});
-          if(!work)throw invalid();
-          return {id,name:work.name,type:work.type,author:work.author,images:work.images,media:work.media};
+        const stale=()=>failure(409,'STALE_SELECTION','导出清单已变化，请重新确认选择。');
+        if(batch.revision!==catalogueRevision(db))throw stale();
+        const page=batch.entries.slice(offset,offset+64).map(entry=>{
+          const work=exportWork(db,entry.id);
+          if(contentHash(work)!==entry.digest)throw stale();
+          return work;
         });
+        if(offset+page.length>=batch.entries.length)exportsByGrant.delete(token);
+        return page;
       },
       'work-detail': catalogueDetail,
       'list-works': listWorks,

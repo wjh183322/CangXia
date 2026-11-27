@@ -108,7 +108,7 @@ async function fixture(t, { audioBytes = music } = {}) {
     },
     fetchAsset: async (url, options) => {
       assert.ok(url.startsWith(base));
-      if (url === base + 'remote' && remote) return remote(options);
+      if (url.startsWith(base + 'remote') && remote) return remote(options, url);
       const [body, mime] = url.endsWith('audio')
         ? [audioBytes, 'audio/wav']
         : url.endsWith('video')
@@ -176,6 +176,7 @@ async function fixture(t, { audioBytes = music } = {}) {
   return {
     root,
     directory,
+    server,
     config,
     library,
     downloads,
@@ -541,4 +542,261 @@ test('an unread cached response revokes on change and a different library cannot
     ),
     png
   );
+});
+test('unconsumed cache misses cannot release buffered bytes after the pinned NAS response finishes and its version changes', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const { client, manager } = f;
+  for (const mode of ['whole', 'range', 'lease', 'foreign']) {
+    const item = (await client.query('work-detail', { id: '41' })).media.find((m) => m.key === 'video');
+    const finished = new Promise((resolve) =>
+      f.server.once('request', (req, res) => {
+        assert.equal(req.method, 'GET');
+        res.once('finish', resolve);
+      })
+    );
+    const response = await manager.protocol(
+      new Request(mediaURL(client.grant.libraryId, item), {
+        headers: mode === 'range' ? { range: 'bytes=30-74' } : {}
+      }),
+      client.epoch
+    );
+    assert.equal(response.status, mode === 'range' ? 206 : 200);
+    await finished;
+    const row = f.downloads.store.resources('41').find((a) => a.key === 'video');
+    const file = path.join(f.downloads.layout.media, row.relative_path);
+    if (mode === 'foreign') {
+      fs.renameSync(file, file + '.held');
+      fs.writeFileSync(file, mp4);
+    } else if (mode === 'lease') await client.release();
+    else
+      f.library.write((db) =>
+        db.prepare('UPDATE archive_assets SET revision=revision+1 WHERE id=?').run(item.resourceId)
+      );
+    try {
+      await assert.rejects(response.body.getReader().read());
+    } finally {
+      if (mode === 'lease') await f.connect();
+      if (mode === 'foreign') {
+        fs.unlinkSync(file);
+        fs.renameSync(file + '.held', file);
+      }
+    }
+  }
+});
+test('export pages check confirmed versions before the first and after the 64th manifest', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  f.library.write((db) => {
+    for (let i = 0; i < 64; i++) {
+      const id = String(100 + i);
+      db.prepare('INSERT INTO works VALUES(?,?,?)').run(
+        id,
+        'fixture ' + id,
+        JSON.stringify({ type: 'images', author: { uid: '42', nickname: '样本' }, images: [] })
+      );
+      db.prepare("INSERT INTO source_members VALUES('total',?,?,0)").run(id, 3 + i);
+    }
+  });
+  async function confirm() {
+    const list = await f.client.query('list-works', { source: 'total' });
+    return f.client.command({
+      kind: 'catalogue-action',
+      entityVersion: 0,
+      operationId: randomUUID(),
+      payload: {
+        action: 'flat-download',
+        selection: {
+          source: 'total',
+          scope: list.scope,
+          revision: list.revision,
+          all: true,
+          ids: [],
+          confirmedCount: list.total
+        }
+      }
+    });
+  }
+  const get = (r, offset) => f.client.query('export-page', { token: r.token, offset });
+  let receipt = await confirm();
+  assert.equal(receipt.count, 67);
+  f.library.write((db) => db.prepare("UPDATE works SET title='updated' WHERE id='163'").run());
+  await assert.rejects(get(receipt, 0), /重新确认/);
+  receipt = await confirm();
+  assert.equal((await get(receipt, 0)).length, 64);
+  f.library.write((db) => db.exec("INSERT INTO work_tags VALUES('41','fresh')"));
+  await assert.rejects(get(receipt, 64), /重新确认/);
+  receipt = await confirm();
+  f.library.write((db) => db.exec("UPDATE archive_assets SET revision=revision+1 WHERE id='41:video'"));
+  await assert.rejects(get(receipt, 0), /重新确认/);
+  assert.deepEqual(fs.readdirSync(f.directory), []);
+});
+test('album detail and flat export retain numeric order when earlier pictures are registered only', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  f.library.write((db) =>
+    db.prepare("UPDATE works SET body=json_set(body,'$.images',json(?)) WHERE id='42'").run(
+      JSON.stringify([
+        { index: 2, urls: [base + 'img2'] },
+        { index: 1, urls: [base + 'img1'] }
+      ])
+    )
+  );
+  const detail = await f.client.query('work-detail', { id: '42' });
+  assert.deepEqual(
+    detail.media.filter((a) => a.key.startsWith('image-')).map((a) => a.key),
+    ['image-0', 'image-1', 'image-2']
+  );
+  const list = await f.client.query('list-works', { source: 'total' });
+  const selection = {
+    source: 'total',
+    scope: list.scope,
+    revision: list.revision,
+    all: false,
+    ids: ['42'],
+    confirmedCount: 1
+  };
+  const { id } = await f.manager.start(f.manager.prepare(f.directory, selection, false).token, true);
+  await f.manager.queue.waitForIdle();
+  const job = f.manager.queue.get(id).jobs[0];
+  assert.equal(job.state, 'complete', job.message);
+  assert.deepEqual(
+    job.targets.map((t) => t.key),
+    ['image-0', 'image-1', 'image-2']
+  );
+  assert.deepEqual(
+    [...job.results.values()].map((r) => path.basename(r.file)),
+    ['0001_样本_42_01.png', '0001_样本_42_02.png', '0001_样本_42_03.png']
+  );
+});
+test('lowered cache budget is enforced on final reader release without another cache request', async (t) => {
+  const f = await fixture(t),
+    cache = f.manager.cache,
+    unit = 1048576;
+  const pin = (key) => {
+    const w = cache.reservation(key, 'cover', 9 * unit, '"etag"', 'image/png');
+    w.append(Buffer.alloc(9 * unit));
+    w.commit();
+    return cache.reader(key, { start: 0, end: 9 * unit - 1 }, async () => {}).getReader();
+  };
+  const first = pin('a'),
+    second = pin('b');
+  cache.setLimits({ audio: 16 * unit, cover: 16 * unit });
+  assert.equal(cache.summary().used.cover, 18 * unit);
+  await first.cancel();
+  assert.equal(cache.summary().used.cover, 9 * unit);
+  await second.cancel();
+});
+async function contents(res) {
+  const chunks = [];
+  for await (const b of res) chunks.push(b);
+  return Buffer.concat(chunks);
+}
+test('octet-stream WAV and MP4 use checked signatures, fallback candidates and a bounded independent seek prefix', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const visits = [];
+  f.library.write((db) => {
+    db.prepare("UPDATE works SET body=? WHERE id='43'").run(
+      JSON.stringify({
+        type: 'video',
+        author: { uid: '42' },
+        videoUrls: [base + 'remote-vbad', base + 'remote-vgood']
+      })
+    );
+    db.prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?').run(
+      JSON.stringify({
+        music: { id: '77' },
+        sources: [{ kind: 'music', urls: [base + 'remote-abad', base + 'remote-agood'] }]
+      }),
+      '42'
+    );
+  });
+  f.setRemote(({ headers }, url) => {
+    const range = new Headers(headers).get('range');
+    visits.push([url.slice(base.length), range]);
+    const buf = url.endsWith('bad')
+      ? Buffer.from('<html>missing media</html>')
+      : url.includes('-v')
+        ? mp4
+        : music;
+    if (url.endsWith('bad'))
+      return new Response(buf, { headers: { 'content-type': 'application/octet-stream' } });
+    const part = parseRange(range, buf.length);
+    return new Response(buf.subarray(part.start, part.end + 1), {
+      status: part.status,
+      headers: {
+        etag: '"asset"',
+        'content-type': 'application/octet-stream',
+        'content-length': String(part.length),
+        ...(part.status === 206 ? { 'content-range': `bytes ${part.start}-${part.end}/${buf.length}` } : {})
+      }
+    });
+  });
+  for (const [id, key, bytes, mime] of [
+    ['43', 'video', mp4, 'video/mp4'],
+    ['42', 'audio', music, 'audio/wav']
+  ]) {
+    const work = await f.client.query('work-detail', { id }),
+      item = work.media.find((m) => m.key === key);
+    let res = await pinnedMedia(f.client.config, f.client.grant, item, {
+      range: 'bytes=100-110',
+      signal: f.client.signal()
+    });
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.headers['content-type'], mime);
+    assert.deepEqual(await contents(res), bytes.subarray(100, 111));
+    res = await pinnedMedia(f.client.config, f.client.grant, item, { signal: f.client.signal() });
+    assert.deepEqual(await contents(res), bytes);
+  }
+  assert.ok(visits.some(([url, range]) => url === 'remote-vgood' && range === 'bytes=0-127'));
+  assert.ok(visits.some(([url, range]) => url === 'remote-agood' && range === 'bytes=0-127'));
+  f.setRemote(() => new Response('<html>wrong</html>', { headers: { 'content-type': 'video/mp4' } }));
+  const item = (await f.client.query('work-detail', { id: '43' })).media.find((m) => m.key === 'video');
+  const denied = await pinnedMedia(f.client.config, f.client.grant, item, { signal: f.client.signal() });
+  assert.equal(denied.statusCode, 404);
+  denied.resume();
+});
+test('many remote chunks share a parsed work until a committed source identity change interrupts the live stream', async (t) => {
+  const f = await fixture(t);
+  await f.connect();
+  const setHints = (name) =>
+    f.library.write((db) =>
+      db
+        .prepare('UPDATE source_audio_hints SET body=? WHERE work_id=?')
+        .run(JSON.stringify({ music: { id: '77' }, sources: [{ kind: 'music', urls: [base + name] }] }), '42')
+    );
+  setHints('remote-stream');
+  let lookups = 0,
+    iterations = 0;
+  const original = f.downloads.store.work;
+  f.downloads.store.work = (id) => {
+    lookups++;
+    return original(id);
+  };
+  const bytes = wav(512 * 1024);
+  f.setRemote(({ signal }) => {
+    let pos = 0;
+    return new Response(
+      new ReadableStream({
+        async pull(controller) {
+          await new Promise((r) => setTimeout(r, 2));
+          if (signal.aborted) return controller.error(Error('aborted'));
+          if (pos === bytes.length) return controller.close();
+          const end = Math.min(pos + 1024, bytes.length);
+          controller.enqueue(bytes.subarray(pos, end));
+          pos = end;
+          iterations++;
+          if (iterations === 35) setHints('different');
+        }
+      }),
+      { headers: { 'content-type': 'audio/wav', 'content-length': String(bytes.length) } }
+    );
+  });
+  const item = (await f.client.query('work-detail', { id: '42' })).media.find((m) => m.key === 'audio');
+  const response = await pinnedMedia(f.client.config, f.client.grant, item, { signal: f.client.signal() });
+  assert.equal(response.statusCode, 200);
+  await assert.rejects(contents(response));
+  assert.ok(iterations >= 35);
+  assert.ok(lookups <= 3, `expected reuse across ${iterations} chunks, observed ${lookups} decoded works`);
 });
