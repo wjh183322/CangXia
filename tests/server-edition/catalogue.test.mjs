@@ -9,6 +9,7 @@ import { discoveryReads } from '../../server/read-sources.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { selectWorks } from '../../electron/filter.mjs';
 import { creatorIndex } from '../../shared/creators.mjs';
+import {contentHash} from '../../shared/backup-protocol.mjs';
 
 const first = 9007199254740993123n;
 function fixture(t, n = 55, catalogueActions = {}, source) {
@@ -175,6 +176,10 @@ test('facets search beyond the first page, media only ordering, and detail expos
   assert.deepEqual(query('list-works', { source: 'total', filter: { downloaded: 'complete' } }).ids, []);
   library.write((db) => {
     db.prepare("INSERT INTO download_jobs VALUES('job',?,'complete')").run(works[2].id);
+    db.prepare("INSERT INTO download_jobs VALUES('untyped-job',?,'complete')").run(works[4].id);
+    db.exec("INSERT INTO archive_assets VALUES('f2','video','video','video/mp4',1)");
+    db.prepare("INSERT INTO file_commits VALUES('verified',?,'f2','registered',?,1)").run(works[2].id,
+      JSON.stringify({size:100,sha256:'a'.repeat(64),resourceIdentity:contentHash({workId:works[2].id,key:'video',kind:'video',sourceIdentity:null}),observationIdentity:null}));
     db.prepare("UPDATE works SET body=json_set(body,'$.localStatus','checking') WHERE id=?").run(works[0].id);
   });
   assert.deepEqual(query('list-works', { source: 'total', filter: { downloaded: 'complete' } }).ids, [

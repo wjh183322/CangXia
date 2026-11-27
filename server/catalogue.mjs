@@ -1,3 +1,4 @@
+import {hasMedia,checking,complete,savedStatus,installDownloadStatus} from './download-resources.mjs';
 import {mediaList,displayCover} from './media.mjs';
 import { createHmac } from 'node:crypto';
 import {
@@ -65,22 +66,13 @@ function pageNumber(input) {
 const srcState =
   "CASE WHEN json_extract(w.body,'$.remoteState')='unavailable' THEN 'unavailable' ELSE coalesce(json_extract(w.body,'$.sourceStatus.state'),'unchecked') END";
 const bytes = '(SELECT sum(size) FROM media_files WHERE work_id=w.id)';
-const hasMedia =
-  "EXISTS(SELECT 1 FROM media_files WHERE work_id=w.id AND lower(relative_path) NOT LIKE '%.json')";
-// An archive may contain only a cover or a subset of an album. Count registered primary assets.
-const videoFiles =
-  "(SELECT count(*) FROM media_files WHERE work_id=w.id AND lower(relative_path) GLOB '*.mp4')";
-const imageFiles =
-  "(SELECT count(*) FROM media_files WHERE work_id=w.id AND (lower(relative_path) GLOB '*.jpg' OR lower(relative_path) GLOB '*.jpeg' OR lower(relative_path) GLOB '*.webp' OR lower(relative_path) GLOB '*.png' OR lower(relative_path) GLOB '*.avif') AND lower(relative_path) NOT LIKE '%cover%')";
-const savedStatus="coalesce((SELECT status FROM maintenance_file_state WHERE work_id=w.id),json_extract(w.body,'$.localStatus'),'')";
-const checking = savedStatus+" IN ('checking','unknown')";
-const complete = `NOT (${checking}) AND ${savedStatus}<>'partial' AND EXISTS(SELECT 1 FROM download_jobs d WHERE d.work_id=w.id AND d.state='complete' AND d.id NOT LIKE 'audio:%' AND d.id NOT LIKE 'hd:%') AND CASE WHEN json_extract(w.body,'$.type')='images' THEN json_array_length(w.body,'$.images')>0 AND ${imageFiles}>=json_array_length(w.body,'$.images') ELSE ${videoFiles}>0 END`;
 const resolvedPerson = `cx_person(p.person,coalesce(
   (SELECT body FROM source_creator_profiles WHERE id='uid:'||json_extract(p.person,'$.uid')),
   (SELECT body FROM source_creator_profiles WHERE json_extract(body,'$.secUid')=nullif(json_extract(p.person,'$.secUid'),'') LIMIT 1)
 ))`;
 const people = `SELECT ${resolvedPerson} AS person FROM catalogue_people p WHERE p.work_id=w.id`;
 function installFunctions(db) {
+  installDownloadStatus(db);
   db.function('cx_person', { deterministic: true }, (raw, body) => {
     const person = JSON.parse(raw);
     return JSON.stringify(

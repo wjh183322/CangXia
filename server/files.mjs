@@ -1173,6 +1173,7 @@ export async function resolveResource({
     mtimeNs: proof.mtimeNs,
     registeredChangeNs: proof.registeredChangeNs,
     resourceIdentity: proof.resourceIdentity,
+    legacyObservation:proof.legacyObservation,
     observationIdentity: proof.observationIdentity,
     ...proof.dimensions
   };

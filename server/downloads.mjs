@@ -2,7 +2,6 @@ import {getJob,putJob as put,fenceUnavailable} from './download-records.mjs';
 import {inspectInventory} from './maintenance-inventory.mjs';
 import {sharedRepairPeers,needsResourceWork} from './maintenance-queue.mjs';
 import {removalOwnsFiles} from './removal.mjs';
-import { planDownloads } from '../electron/download-selection.mjs';
 import { createArchive } from './archive.mjs';
 import { assessCover } from './covers.mjs';
 import { comparableResolution } from '../electron/hd-cover.mjs';
@@ -12,7 +11,8 @@ import { open } from 'node:fs/promises';
 import path from 'node:path';
 import { crc32 } from 'node:zlib';
 import { contentHash } from '../shared/backup-protocol.mjs';
-import { isMediaURL } from '../electron/model.mjs';
+import {validMediaTarget, candidateDigest, coverObject, freeze, wantedResources, matchesSavedTarget, downloadStatus, installDownloadStatus} from './download-resources.mjs';
+export {candidateDigest,wantedResources} from './download-resources.mjs';
 import { imageDimensions } from '../electron/media-info.mjs';
 import { transferAsset } from '../electron/resumable-transfer.mjs';
 import { SourceError } from './source-error.mjs';
@@ -43,23 +43,6 @@ import {
 } from './files.mjs';
 
 const redirectCodes = [301, 302, 303, 307, 308];
-const protectedQuery = new Set([
-  'authorization',
-  'cookie',
-  'setcookie',
-  'sessionid',
-  'sessionidss',
-  'uidtt',
-  'uidttss',
-  'sidguard',
-  'sidtt',
-  'mstoken',
-  'password',
-  'accesstoken',
-  'refreshtoken',
-  'passportcsrftoken',
-  'passportcsrftokendefault'
-]);
 const mediaTypes = new Map([
   ['image/jpeg', '.jpg'],
   ['image/png', '.png'],
@@ -78,119 +61,6 @@ const notAvailable = () => failure('NAS_MEDIA_UNAVAILABLE', '此资源没有可�
 const retryableStatus = new Set([401, 403, 404, 410]);
 const sourceRetry = (error) =>
   retryableStatus.has(error?.httpStatus) || error?.code === 'NAS_MEDIA_UNAVAILABLE';
-
-function validMediaTarget(value, base) {
-  try {
-    const url = new URL(value, base);
-    const credential = [...url.searchParams.keys()].some((key) =>
-      protectedQuery.has(key.toLowerCase().replace(/[^a-z0-9]/g, ''))
-    );
-    if (
-      url.protocol === 'https:' &&
-      !url.username &&
-      !url.password &&
-      !url.port &&
-      !url.hash &&
-      !credential &&
-      url.href.length <= 8192 &&
-      isMediaURL(url.href)
-    )
-      return url.href;
-  } catch {
-    /* return a fixed error without the signed address */
-  }
-  throw failure('NAS_MEDIA_TARGET', 'The target is outside the secure source media allowlist.');
-}
-
-function candidateList(urls) {
-  return [...new Set(urls ?? [])];
-}
-
-export function candidateDigest(urls) {
-  if (!urls.length) return null;
-  const objects = urls.map((address) => {
-    const url = new URL(validMediaTarget(address));
-    for (const field of ['x-signature', 'x-expires']) url.searchParams.delete(field);
-    url.searchParams.sort();
-    return url.href;
-  });
-  return contentHash([...new Set(objects)].sort());
-}
-
-function coverObject(address) {
-  const url = new URL(validMediaTarget(address));
-  for (const field of ['x-signature', 'x-expires', 'l', 'from', 's', 'lk3s']) url.searchParams.delete(field);
-  url.searchParams.sort();
-  return contentHash(url.pathname + '?' + url.searchParams.toString());
-}
-
-export function wantedResources(work, audioOnly) {
-  if (audioOnly) {
-    const source = work.audioSourceHints;
-    if (work.type !== 'images' || !work.music?.id || (source?.music?.id && source.music.id !== work.music.id))
-      throw needsReview();
-    return [
-      {
-        key: 'audio',
-        name: '配乐',
-        kind: 'audio',
-        sourceIdentity: 'music:' + work.music.id,
-        candidates: candidateList(source?.sources?.filter((s) => ['music','work'].includes(s.kind)).sort((a,b)=>Number(b.kind==='music')-Number(a.kind==='music')).flatMap((s) => s.urls))
-      }
-    ];
-  }
-  const identities = work.mediaQuality?.identities ?? {};
-  const entry = (key, name, kind, candidates, sourceIdentity) => ({
-    key,
-    name,
-    kind,
-    candidates: candidateList(candidates),
-    sourceIdentity: sourceIdentity || null
-  });
-  if (work.type === 'images' || identities.imageCount) {
-    const byIndex = new Map((work.images ?? []).map((image) => [image.index, image]));
-    const count = identities.imageCount ?? byIndex.size;
-    if (!Number.isInteger(count) || count < 1) throw needsReview();
-    return Array.from({ length: count }, (_, index) =>
-      entry(
-        'image-' + index,
-        '图片-' + String(index + 1).padStart(3, '0'),
-        'image',
-        byIndex.get(index)?.urls,
-        identities.images?.[index]
-      )
-    );
-  }
-  // The normalized source keeps video quality and original-image candidates in priority order.
-  const cover = [...(work.coverVariants ?? [])].sort(
-    (a, b) => Number(b.width) * Number(b.height) - Number(a.width) * Number(a.height)
-  );
-  return [
-    entry('video', '视频', 'video', work.videoUrls, identities.video),
-    entry(
-      'cover',
-      '单图',
-      'image',
-      [...cover.flatMap((variant) => variant.urls), ...(work.coverUrls ?? [])],
-      identities.cover
-    )
-  ];
-}
-
-function freeze(work, audioOnly) {
-  const targets = wantedResources(work, audioOnly);
-  const expected = targets.map(({ candidates, ...target }) => ({
-    ...target,
-    identity: contentHash({
-      workId: work.id,
-      key: target.key,
-      kind: target.kind,
-      sourceIdentity: target.sourceIdentity
-    })
-  }));
-  const candidates = Object.fromEntries(targets.map((target) => [target.key, target.candidates]));
-  return { expected, candidates };
-}
 
 function hdSourceProof(db, workId) {
   const hdInputs = {},
@@ -525,45 +395,38 @@ function queueState(db,audioOnly=false) {
       .map((r) => publicJob(JSON.parse(r.body)))
   };
 }
-function preview(db, ids) {
-  const groups = { unsaved: [], partial: [], complete: [], unavailable: [], checking: [] };
-  const selected = [...new Set(ids)],
-    bases = new Map(),
-    locals = new Map(),
-    fileStates = new Map(),
-    jobs = [];
-  const files = db.prepare(
-    "SELECT 1 FROM media_files WHERE work_id=? AND lower(relative_path) NOT LIKE '%.json' LIMIT 1"
-  );
-  const completed = db.prepare(
-    "SELECT 1 FROM download_jobs WHERE work_id=? AND state='complete' AND id NOT LIKE 'audio:%' AND id NOT LIKE 'hd:%' LIMIT 1"
-  );
-  for (const id of selected) {
-    if (typeof id !== 'string' || !/^\d{1,40}$/.test(id)) throw invalid();
-    const work = recordedWork(db, id);
-    if (!work) throw invalid();
-    const saved=db.prepare('SELECT status FROM maintenance_file_state WHERE work_id=?').get(id)?.status??work.localStatus;
-    const group =
-      work.remoteState === 'unavailable'
-        ? 'unavailable'
-        : !files.get(id)
-          ? 'unsaved'
-          : ['checking', 'unknown'].includes(saved)
-            ? 'checking'
-            : saved!=='partial' && completed.get(id)
-              ? 'complete'
-              : 'partial';
-    groups[group].push(id);
-    bases.set(id, work);
-    if (!['unsaved', 'unavailable'].includes(group)) {
-      locals.set(id, { hasMedia: true });
-      fileStates.set(id, { root: 'NAS', status: group });
-    }
-    const job = getJob(db, id);
-    if (job && job.state !== 'cancelled') jobs.push(publicJob(job));
+function selectionRows(query) {
+  return `WITH selected AS (${query.sql}), statuses AS MATERIALIZED (
+    SELECT w.id,${downloadStatus} AS group_name,j.state AS job_state,m.body AS job_body
+    FROM selected s JOIN works w ON w.id=s.id LEFT JOIN download_jobs j ON j.id=w.id
+    LEFT JOIN download_manifests m ON m.id=j.id)`;
+}
+function previewQuery(db,query) {
+  installDownloadStatus(db);
+  const report={selected:0,unavailable:0,unsaved:0,partial:0,complete:0,checking:0,existing:0,excludedTasks:0};
+  for(const row of db.prepare(selectionRows(query)+` SELECT group_name,count(*) AS n,
+    count(*) FILTER(WHERE job_state IN ('queued','running','paused','pausing','awaiting-registration')) AS existing,
+    count(*) FILTER(WHERE job_state NOT IN ('complete','unavailable','cancelled') AND job_body IS NOT NULL) AS excluded
+    FROM statuses GROUP BY group_name`).all(...query.params)){
+    report.selected+=row.n;report[row.group_name]=row.n;
+    if(row.group_name==='unsaved')report.existing+=row.existing;
+    else report.excludedTasks+=row.excluded;
   }
-  const context = { root: 'NAS', fileStates, lightViews: { ready: true, bases, locals } };
-  return { groups, report: planDownloads(context, { jobs }, selected).report };
+  return report;
+}
+function explicitIds(ids) {
+  if(!Array.isArray(ids)||ids.some(id=>typeof id!=='string'||!/^\d{1,40}$/.test(id)))throw invalid();
+  const selected=[...new Set(ids)];
+  return {sql:'SELECT value AS id FROM json_each(?)',params:[JSON.stringify(selected)],count:selected.length};
+}
+function preview(db,ids) {
+  const q=explicitIds(ids);
+  installDownloadStatus(db);
+  const groups={unsaved:[],partial:[],complete:[],unavailable:[],checking:[]};
+  for(const row of db.prepare(selectionRows(q)+' SELECT id,group_name FROM statuses').iterate(...q.params))groups[row.group_name].push(row.id);
+  const report=previewQuery(db,q);
+  if(report.selected!==q.count)throw invalid();
+  return {groups,report};
 }
 
 export function createDownloads({
@@ -911,8 +774,7 @@ export function createDownloads({
     const observationIdentity = target.sourceIdentity ? null : candidateDigest(job.candidates[target.key]);
     const changed =
       !!existing &&
-      (existing.resourceIdentity !== target.identity ||
-        (!target.sourceIdentity && existing.observationIdentity !== observationIdentity));
+      !matchesSavedTarget(existing,target,job.candidates[target.key]);
     if (existing && !candidateOnly) {
       if (!existing.missing && !changed) return;
       change(job.id, (current) => {

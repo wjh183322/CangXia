@@ -8,6 +8,7 @@ import { reconcile } from './legacy-rehearsal.mjs';
 import { child, directory, disjoint, fileProof, segment, validateSeal } from './rehearsal-files.mjs';
 import { preserveBeforeRollback, verifyRestore } from './recovery.mjs';
 import { contentHash, validId } from '../shared/backup-protocol.mjs';
+import {freeze,legacyObservation} from './download-resources.mjs';
 export { sealSource } from './rehearsal-files.mjs';
 
 async function prepare({ sources, target, uid, imageDigest, guard = () => {} }) {
@@ -262,6 +263,13 @@ function populate(db, uid, rows, assets, media) {
     );
   }
   saveImportedDownloads(db, rows, assets);
+  const observations=new Map();
+  for(const row of rows.filter(r=>r.type==='work')){
+    try{
+      const {expected,candidates}=freeze(row.value,false);
+      observations.set(row.key,new Map(expected.map(t=>[t.key,legacyObservation(t,candidates[t.key])])));
+    }catch{ /* Old sparse works may have no provable expected resources. */ }
+  }
   const assetsByWork=new Map();
   for(const a of assets){
     const group=assetsByWork.get(a.work)??new Map();
@@ -291,6 +299,7 @@ function populate(db, uid, rows, assets, media) {
         mtimeNs: String(stat.mtimeNs),
         registeredChangeNs: String(stat.ctimeNs),
         ...(a.legacyCoverKey ? {legacyCoverKey:a.legacyCoverKey} : {}),
+        ...(observations.get(a.work)?.has(a.key)?{legacyObservation:observations.get(a.work).get(a.key)}:{}),
         ...(a.musicId
           ? {
               resourceIdentity: contentHash({

@@ -130,6 +130,29 @@ function model(t, works, options = {}) {
     file: (a) => path.join(d.layout.media, a.relative_path)
   };
 }
+test('typed keys and source identities drive filtered cards, preview and missing-only download after album growth',async t=>{
+  const work={...album('505',1),name:'cover band 现场'},fetched=[];
+  const f=model(t,[work],{fetchAsset:async url=>{fetched.push(url);return response();}});
+  const {listWorks}=await import('../../server/catalogue.mjs');
+  const state=()=>f.library.read(db=>({
+    complete:listWorks(db,{source:'all',filter:{downloaded:'complete'}},{grant:{proof:'fixture'}}).ids,
+    report:f.d.preview(db,[work.id])
+  }));
+  f.enqueue([work.id],'missing');await f.d.run();
+  assert.deepEqual(state().complete,[work.id]);
+  const first=f.assets(work.id).find(r=>r.key==='image-0'),firstPath=f.file(first),before=fs.statSync(firstPath,{bigint:true});
+  const grow={...work,images:album(work.id,2).images};
+  f.library.write(db=>db.prepare('UPDATE works SET body=? WHERE id=?').run(JSON.stringify(grow),work.id));
+  assert.deepEqual(state().complete,[]);assert.equal(state().report.partial,1);
+  assert.equal(f.enqueue([work.id],'missing').queued,1);await f.d.run();
+  assert.deepEqual(fetched,grow.images.map(row=>row.urls[0]));
+  assert.deepEqual(fs.readFileSync(f.file(f.assets(work.id).find(r=>r.key==='image-1'))),png);
+  assert.equal(fs.statSync(firstPath,{bigint:true}).ino,before.ino);
+  assert.deepEqual(state().complete,[work.id]);assert.equal(state().report.complete,1);
+  grow.images[0].urls=['https://p3.douyinpic.com/actually-different-object'];
+  f.library.write(db=>db.prepare('UPDATE works SET body=? WHERE id=?').run(JSON.stringify(grow),work.id));
+  assert.equal(state().report.partial,1);assert.deepEqual(state().complete,[]);
+});
 function killWriter(root, hook) {
   const child = spawnSync(
     process.execPath,
