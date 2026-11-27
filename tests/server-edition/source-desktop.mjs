@@ -100,13 +100,8 @@ app.whenReady().then(async () => {
       { kind: 'total', id: '__all__' },
       { kind: 'collection', id: '77' }
     ]) {
-      const command = {
-        kind: 'remove-membership',
-        payload: { source, workId: '9191' },
-        entityVersion: 0,
-        operationId: crypto.randomUUID()
-      };
-      await js(win, `window.cangxia.serverCommand(${JSON.stringify(command)})`);
+      const key=source.kind==='total'?'total':'folder:'+source.id;
+      await js(win,`(async()=>{const source=${JSON.stringify(key)},api=window.cangxia;const {revision,scope}=await api.listWorks({source});const {token}=await api.previewRemoval({scope:'membership',selection:{source,revision,scope,all:false,ids:['9191']}});await api.confirmRemoval({token});})()`);
     }
     await run();
     await click('查看读取日志');

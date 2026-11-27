@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { moveExclusive } from './files.mjs';
 import { failure } from './service-error.mjs';
@@ -16,6 +16,7 @@ const mount = (fd) =>
 function directory(file, createUnder) {
   if (!path.isAbsolute(file) || path.normalize(file) !== file) throw conflict();
   const { root } = path.parse(file);
+  const chain = [];
   let current = root,
     fd;
   try {
@@ -34,6 +35,8 @@ function directory(file, createUnder) {
         fs.closeSync(fd);
         fd = next;
       } else if (!fs.lstatSync(current).isDirectory()) throw conflict();
+      const node = linux ? fs.fstatSync(fd, { bigint: true }) : fs.lstatSync(current, { bigint: true });
+      chain.push({ ...id(node), mount: mount(fd) });
       if (createUnder && (current === createUnder.path || current.startsWith(createUnder.path + path.sep))) {
         const s = linux ? fs.fstatSync(fd, { bigint: true }) : fs.lstatSync(current, { bigint: true });
         if (
@@ -47,6 +50,7 @@ function directory(file, createUnder) {
     const stat = linux ? fs.fstatSync(fd, { bigint: true }) : fs.lstatSync(current, { bigint: true });
     return {
       dir: file,
+      chain,
       fd,
       ...id(stat),
       mount: mount(fd),
@@ -59,10 +63,39 @@ function directory(file, createUnder) {
     throw e;
   }
 }
-function directoryId(file) {
+function filesystemId(directory, mountFilesystems) {
+  if (!linux) return directory.dev;
+  if (!directory.mount) throw invalid('无法识别实际挂载。');
+  const prior = mountFilesystems.get(directory.dir);
+  if (prior?.mount === directory.mount && prior.dev === directory.dev) return prior.id;
+  {
+    const value = execFileSync('python3', ['-I', '-S', '-c', 'import os;print(os.fstatvfs(3).f_fsid)'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore', directory.fd],
+      timeout: 5000
+    }).trim();
+    if (!/^[0-9]+$/.test(value) || value === '0') throw invalid('文件系统未提供可核验的卷身份。');
+    const pinned = fs.openSync('/proc/self/fd/' + directory.fd, O_RDONLY | O_DIRECTORY);
+    if (prior) fs.closeSync(prior.fd);
+    mountFilesystems.set(directory.dir, {
+      id: value,
+      dev: directory.dev,
+      mount: directory.mount,
+      fd: pinned
+    });
+  }
+  return mountFilesystems.get(directory.dir).id;
+}
+function directoryId(file, mountFilesystems) {
   const d = directory(file);
   try {
-    return { path: file, dev: d.dev, ino: d.ino, mount: d.mount };
+    return {
+      path: file,
+      dev: d.dev,
+      ino: d.ino,
+      mount: d.mount,
+      filesystem: filesystemId(d, mountFilesystems)
+    };
   } finally {
     d.close();
   }
@@ -128,14 +161,15 @@ async function move(from, to, name) {
   fs.fsyncSync(to.fd);
 }
 export function createTrashAdapter({ layout, bin }) {
+  const mountFilesystems = new Map();
   function binding() {
     if (!bin)
       throw invalid(
         '请在 NAS 配置经厂商支持、可按原路径还原的回收目录映射 CANGXIA_RECYCLE_MEDIA_ROOT，然后验证绿联回收站。'
       );
     layout.assertCurrent();
-    const media = directoryId(layout.media),
-      recycle = directoryId(bin);
+    const media = directoryId(layout.media, mountFilesystems),
+      recycle = directoryId(bin, mountFilesystems);
     if (
       media.dev !== recycle.dev ||
       equal(media, recycle) ||
@@ -158,6 +192,20 @@ export function createTrashAdapter({ layout, bin }) {
     if (JSON.stringify(binding()) !== JSON.stringify(expected))
       throw invalid('回收站、挂载或服务身份已变更，请重新完成现场验证。');
   }
+  function sameVolume(previous, current) {
+    if (!previous || previous.method !== current.method || previous.service !== current.service) return false;
+    return ['media', 'recycle'].every((key) => {
+      const a = previous[key],
+        b = current[key];
+      return a?.filesystem && a.filesystem === b.filesystem && a.path === b.path && equal(a, b);
+    });
+  }
+  function consistentPaths(old, next, rebound) {
+    if (!rebound) return JSON.stringify(old) === JSON.stringify(next);
+    return ['original', 'recycled'].every(
+      (k) => old[k].length === next[k].length && old[k].every((dir, i) => equal(dir, next[k][i]))
+    );
+  }
   function components(file) {
     const parts = file.relative_path?.split('/');
     if (!parts?.length || parts.some((p) => !p || p === '.' || p === '..' || /[\\:\0]/.test(p)))
@@ -176,7 +224,84 @@ export function createTrashAdapter({ layout, bin }) {
       d.close();
     }
   }
-  async function access(file, expected, action) {
+  function stamp(st) {
+    return (
+      st &&
+      [
+        String(st.dev),
+        String(st.ino),
+        String(st.nlink),
+        String(st.mode),
+        String(st.size),
+        String(st.mtimeNs),
+        String(st.ctimeNs)
+      ].join(':')
+    );
+  }
+  // An unchanged singly-linked original is sufficient to abandon a deletion.
+  // Recheck its canonical path inside the receipt transaction, even if the bin has gone offline.
+  async function intactOriginal(file, expected, paths) {
+    const parts = components(file),
+      name = parts.pop(),
+      parent = path.join(layout.media, ...parts);
+    function openParent() {
+      layout.assertCurrent();
+      const media = directoryId(layout.media, mountFilesystems);
+      if (
+        !equal(media, expected.media) ||
+        media.path !== expected.media.path ||
+        (expected.media.filesystem && expected.media.filesystem !== media.filesystem)
+      )
+        throw conflict();
+      const d = directory(parent),
+        chain = d.chain.slice(-(parts.length + 1));
+      if (
+        !equal(d, file.parent) ||
+        chain.some((n) => n.mount !== media.mount || n.dev !== media.dev) ||
+        (paths &&
+          (paths.original.length !== chain.length || chain.some((n, i) => !equal(n, paths.original[i]))))
+      ) {
+        d.close();
+        throw conflict();
+      }
+      return d;
+    }
+    const d = openParent();
+    try {
+      const filePath = child(d, name),
+        before = stamp(stat(filePath));
+      if (!before || !(await matches(filePath, file))) return null;
+      return () => {
+        const current = openParent();
+        try {
+          if (stamp(stat(child(current, name))) !== before) throw conflict();
+        } finally {
+          current.close();
+        }
+      };
+    } finally {
+      d.close();
+    }
+  }
+  function assertObserved(file, expected, observed) {
+    check(expected);
+    const parts = components(file),
+      name = parts.pop();
+    for (const [side, root] of [
+      ['original', layout.media],
+      ['recycled', bin]
+    ]) {
+      const current = directory(path.join(root, ...parts));
+      try {
+        if (JSON.stringify(current.chain.slice(-(parts.length + 1))) !== JSON.stringify(observed.paths[side]))
+          throw invalid('原目录或回收子目录已被移动或替换。请按回执原路径找回并核对原目录，再重试。');
+        if (observed.stamps && stamp(stat(child(current, name))) !== observed.stamps[side]) throw conflict();
+      } finally {
+        current.close();
+      }
+    }
+  }
+  async function access(file, expected, action, options = {}) {
     check(expected);
     const parts = components(file);
     const name = parts.pop(),
@@ -187,27 +312,64 @@ export function createTrashAdapter({ layout, bin }) {
       recycled = directory(path.join(bin, ...parts), action === 'trash' ? expected.recycle : undefined);
       if (recycled.dev !== expected.recycle.dev || recycled.mount !== expected.recycle.mount)
         throw conflict();
+      const paths = {
+        original: formal.chain.slice(-(parts.length + 1)),
+        recycled: recycled.chain.slice(-(parts.length + 1))
+      };
+      if (
+        Object.entries(paths).some(([side, chain]) => {
+          const root = side === 'original' ? expected.media : expected.recycle;
+          return chain.some((d) => d.mount !== root.mount || d.dev !== root.dev);
+        })
+      )
+        throw conflict();
+      if (options.paths && !consistentPaths(options.paths, paths, options.rebound))
+        throw invalid('原路径或回收子目录身份与上次移动不符。请恢复原目录后重试。');
+      function observation() {
+        return {
+          paths,
+          stamps: { original: stamp(stat(child(formal, name))), recycled: stamp(stat(child(recycled, name))) }
+        };
+      }
       const source = action === 'trash' ? formal : recycled,
         dest = action === 'trash' ? recycled : formal;
       const a = child(source, name),
         b = child(dest, name);
       if (action === 'inspect') {
-        return {
+        const before = observation();
+        const state = {
           original: stat(b) ? ((await matches(b, file)) ? 'owned' : 'conflict') : 'missing',
           recycled: stat(a) ? ((await matches(a, file)) ? 'owned' : 'conflict') : 'missing'
         };
+        assertObserved(file, expected, before);
+        return { ...state, ...before };
       }
-      if (!stat(a) && (await matches(b, file))) return;
+      async function settled() {
+        const before = observation();
+        if (stat(a) || !(await matches(b, file))) throw conflict();
+        assertObserved(file, expected, before);
+        return before;
+      }
+      if (!stat(a)) {
+        if (options.allowSettled === false) throw conflict();
+        return settled();
+      }
+      const before = observation();
       if (stat(b) || !(await matches(a, file))) throw conflict();
-      check(expected);
+      assertObserved(file, expected, before);
+      options.beforeMove?.(paths);
+      assertObserved(file, expected, before);
       await move(source, dest, name);
+      assertObserved(file, expected, { paths });
+      const moved = observation();
       if (!(await matches(b, file))) {
         // An external rename raced the syscall. Return the displaced entry only to an empty slot.
         if (!stat(a) && stat(b)) await move(dest, source, name);
         throw conflict();
       }
       if (stat(a)) throw conflict();
-      check(expected);
+      assertObserved(file, expected, moved);
+      return moved;
     } finally {
       formal.close();
       recycled?.close();
@@ -217,8 +379,15 @@ export function createTrashAdapter({ layout, bin }) {
     binding,
     check,
     originalOccupied,
-    trash: (file, proof) => access(file, proof, 'trash'),
-    restore: (file, proof) => access(file, proof, 'restore'),
-    inspect: (file, proof) => access(file, proof, 'inspect')
+    intactOriginal,
+    assertObserved,
+    sameVolume,
+    close() {
+      for (const entry of mountFilesystems.values()) fs.closeSync(entry.fd);
+      mountFilesystems.clear();
+    },
+    trash: (file, proof, options) => access(file, proof, 'trash', options),
+    restore: (file, proof, options) => access(file, proof, 'restore', options),
+    inspect: (file, proof, options) => access(file, proof, 'inspect', options)
   };
 }

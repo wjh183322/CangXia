@@ -158,7 +158,11 @@ test('HTTPS linked batch restores each relation and reports one unique work, wit
   const first = await f.cmd('start-read', payload, operation);
   assert.deepEqual(await f.cmd('start-read', payload, operation), first);
   assert.equal((await f.done(first.jobId)).status, 'complete');
-  for (const source of [total, folder]) await f.cmd('remove-membership', { source, workId: A });
+  for(const key of ['total','folder:'+folder.id]){
+    const {revision,scope}=await f.client.query('list-works',{source:key});
+    const plan=await f.cmd('preview-removal',{scope:'membership',selection:{source:key,ids:[A],all:false,revision,scope}});
+    await f.cmd('confirm-removal',{token:plan.token});
+  }
   const next = await f.start(total, { followFolders: ['77'] });
   const batch = await f.done(next.jobId);
   assert.equal(batch.restoredRelations, 2);

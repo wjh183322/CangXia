@@ -120,7 +120,9 @@ test('real download and tag commands reconcile one copy, folder collisions, old 
   await f.d.run();
   const firstHome = path.dirname(f.file('metadata'));
   assert.equal(f.info().collectionId, '88');
-  f.command('remove-membership', { source: { kind: 'collection', id: '88' }, workId: '71' });
+  const {revision,scope}=f.query('list-works',{source:'folder:88'});
+  const removal=f.command('preview-removal',{scope:'membership',selection:{source:'folder:88',ids:['71'],all:false,revision,scope}});
+  f.command('confirm-removal',{token:removal.token});
   await f.d.run();
   assert.equal(path.dirname(f.file('metadata')), firstHome);
   assert.equal(fs.statSync(f.file('image-0'), { bigint: true }).ino, inode);

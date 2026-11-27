@@ -117,6 +117,11 @@ function summary(db, b, offset = 0) {
         state: row.state,
         title: data.title,
         path: data.file?.relative_path ?? null,
+        ...(data.file && {
+          sha256: data.file.sha256,
+          original: b.body.binding ? path.join(b.body.binding.media.path, data.file.relative_path) : null,
+          recycled: b.body.binding ? path.join(b.body.binding.recycle.path, data.file.relative_path) : null
+        }),
         size: data.file?.size ?? null
       };
     });
@@ -135,6 +140,10 @@ function summary(db, b, offset = 0) {
     total,
     done,
     restorable,
+    cancelling: !!b.body.cancelling,
+    cancelled: db
+      .prepare("SELECT count(*) n FROM removal_items WHERE token=? AND state='cancelled'")
+      .get(b.token).n,
     offset,
     items,
     created: b.created
@@ -223,6 +232,7 @@ export function createRemovalService({ library, files }) {
       files,
       relations,
       source,
+      protocol: 2,
       sourceUid: sourceAccount(db),
       binding,
       reason
@@ -272,7 +282,7 @@ export function createRemovalService({ library, files }) {
     if (prior.scope === 'membership')
       throw error('请重新读取对应来源；只有该来源返回作品并提交该页后才会恢复归属。');
     if (
-      !['done', 'paused'].includes(prior.state) ||
+      !['done', 'paused', 'cancelled'].includes(prior.state) ||
       (prior.state === 'paused' && active.has(token)) ||
       !['records', 'files'].includes(prior.scope)
     )
@@ -280,7 +290,7 @@ export function createRemovalService({ library, files }) {
     const completed = allItems(db, token).filter((i) => i.state === 'done');
     if (!completed.length) throw stale();
     const scope = 'restore-' + prior.scope,
-      body = { ...prior.body, parent: token, priorState: prior.state, reason: '' };
+      body = { ...prior.body, parent: token, priorState: prior.state, cancelling: false, reason: '' };
     if (prior.scope === 'files') {
       body.files = completed.length;
       body.count = new Set(completed.map((i) => i.work_id)).size;
@@ -304,7 +314,10 @@ export function createRemovalService({ library, files }) {
         }
     }
     const next = newBatch(db, owner, scope, body);
-    for (const item of completed) putItem(db, next, item.ordinal, item.work_id, item.body);
+    for (const item of completed) {
+      const { attempt, ...saved } = item.body;
+      putItem(db, next, item.ordinal, item.work_id, saved);
+    }
     return summary(db, batch(db, next, owner));
   }
   function restore(db, { payload: { token } }, owner) {
@@ -370,13 +383,21 @@ export function createRemovalService({ library, files }) {
         library.write((db) => {
           if (db.prepare("SELECT 1 FROM removal_items WHERE token=? AND state='ready' LIMIT 1").get(token))
             return;
-          mark(db, token, 'done', { ...b.body, reason: '' });
+          mark(db, token, b.body.cancelling ? 'cancelled' : 'done', { ...b.body, reason: '' });
           if (b.scope === 'restore-files') {
             const remaining = db
               .prepare("SELECT 1 FROM removal_items WHERE token=? AND state='ready' LIMIT 1")
               .get(b.body.parent);
             db.prepare('UPDATE removal_batches SET state=? WHERE token=?').run(
-              remaining ? 'paused' : 'restored',
+              remaining
+                ? 'paused'
+                : db
+                      .prepare("SELECT 1 FROM removal_items WHERE token=? AND state='done' LIMIT 1")
+                      .get(b.body.parent)
+                  ? b.body.priorState === 'cancelled'
+                    ? 'cancelled'
+                    : 'done'
+                  : 'restored',
               b.body.parent
             );
           }
@@ -398,11 +419,61 @@ export function createRemovalService({ library, files }) {
             if (restoring) free(db, f);
             else resource(db, f);
           }
-          library.read(guard);
-          await adapter[restoring ? 'restore' : 'trash'](f, b.body.binding);
-          files.store.fileHook('afterRemovalMove', { token, file: f, restoring });
+          const previous = item.body.attempt || item.body.receiptPaths;
+          const options = {
+            paths: previous,
+            rebound: !!b.body.previousBinding,
+            allowSettled: !!item.body.attempt || b.body.protocol !== 2,
+            beforeMove(paths) {
+              library.write((db) => {
+                guard(db);
+                item.body.attempt = paths;
+                db.prepare('UPDATE removal_items SET body=? WHERE token=? AND ordinal=?').run(
+                  JSON.stringify(item.body),
+                  token,
+                  item.ordinal
+                );
+              });
+            }
+          };
+          let observed;
+          if (b.body.cancelling) {
+            if (!restoring) {
+              const intact = await adapter.intactOriginal(f, b.body.binding, previous);
+              if (intact) {
+                library.write((db) => {
+                  intact();
+                  db.prepare("UPDATE removal_items SET state='cancelled' WHERE token=? AND ordinal=?").run(
+                    token,
+                    item.ordinal
+                  );
+                });
+                return;
+              }
+            }
+            observed = await adapter.inspect(f, b.body.binding, options);
+            const origin = restoring ? observed.recycled : observed.original,
+              destination = restoring ? observed.original : observed.recycled;
+            if (origin === 'owned') {
+              library.write((db) => {
+                adapter.assertObserved(f, b.body.binding, observed);
+                db.prepare("UPDATE removal_items SET state='cancelled' WHERE token=? AND ordinal=?").run(
+                  token,
+                  item.ordinal
+                );
+              });
+              return;
+            }
+            if (origin !== 'missing' || destination !== 'owned')
+              throw error('上次移动的结果仍待核对，请恢复原目录或回收位置后再次核对。');
+          } else {
+            library.read(guard);
+            observed = await adapter[restoring ? 'restore' : 'trash'](f, b.body.binding, options);
+            files.store.fileHook('afterRemovalMove', { token, file: f, restoring });
+          }
           library.write((db) => {
             guard(db);
+            adapter.assertObserved(f, b.body.binding, observed);
             if (restoring) {
               db.prepare("UPDATE removal_items SET state='restored' WHERE token=? AND ordinal=?").run(
                 b.body.parent,
@@ -432,7 +503,8 @@ export function createRemovalService({ library, files }) {
               db.prepare('DELETE FROM archive_assets WHERE id=?').run(f.id);
               db.prepare('DELETE FROM media_files WHERE id=?').run(f.id);
             }
-            db.prepare("UPDATE removal_items SET state='done' WHERE token=? AND ordinal=?").run(
+            db.prepare("UPDATE removal_items SET state='done',body=? WHERE token=? AND ordinal=?").run(
+              JSON.stringify({ ...item.body, receiptPaths: observed.paths }),
               token,
               item.ordinal
             );
@@ -454,12 +526,34 @@ export function createRemovalService({ library, files }) {
   }
   function control(db, { payload: { token, action } }, owner) {
     const b = batch(db, token, owner);
+    if (action === 'rebind') {
+      if (
+        !['files', 'restore-files'].includes(b.scope) ||
+        !['paused', 'done', 'cancelled'].includes(b.state) ||
+        active.has(token)
+      )
+        throw stale();
+      const current = verified(db),
+        previous = b.body.binding;
+      if (!adapter.sameVolume(previous, current) || JSON.stringify(previous) === JSON.stringify(current))
+        throw error('只能重新绑定已完成新验证的同一卷、原媒体目录、回收目录及服务身份。');
+      mark(db, token, b.state, { ...b.body, previousBinding: previous, binding: current });
+      return { token };
+    }
     if (
       !['files', 'restore-files'].includes(b.scope) ||
       !['running', 'paused'].includes(b.state) ||
-      !['pause', 'resume'].includes(action)
+      !['pause', 'resume', 'cancel'].includes(action)
     )
       throw stale();
+    if (action === 'cancel') {
+      if (b.state !== 'paused' || active.has(token)) throw error('请先暂停并等待当前文件完成核对。');
+      if (b.body.protocol === 2)
+        db.prepare(
+          "UPDATE removal_items SET state='cancelled' WHERE token=? AND state='ready' AND json_extract(body,'$.attempt') IS NULL"
+        ).run(token);
+      b.body.cancelling = true;
+    }
     mark(db, token, action === 'pause' ? 'paused' : 'running', { ...b.body, reason: '' });
     return { token };
   }
@@ -578,8 +672,29 @@ export function createRemovalService({ library, files }) {
     'start-trash-probe': startProbe,
     'control-trash-probe': controlProbe
   };
+  function receiptView(db, b, offset) {
+    const value = summary(db, b, offset);
+    if (
+      !b.body.binding ||
+      !['files', 'restore-files'].includes(b.scope) ||
+      !['done', 'paused', 'cancelled'].includes(b.state)
+    )
+      return value;
+    try {
+      const current = verified(db);
+      if (JSON.stringify(current) !== JSON.stringify(b.body.binding)) {
+        value.rebindRequired = !!adapter.sameVolume(b.body.binding, current);
+        value.reason = value.rebindRequired
+          ? '已验证同一个卷和目录的新挂载。请明确重新绑定此回执，处理文件时将再次核对身份和内容。'
+          : '卷、原目录、回收目录或服务身份不符，请找回原位置。';
+      }
+    } catch (e) {
+      value.reason = value.reason || e.message;
+    }
+    return value;
+  }
   const queries = {
-    'removal-status': (db, { token, offset }, owner) => summary(db, batch(db, token, owner), offset),
+    'removal-status': (db, { token, offset }, owner) => receiptView(db, batch(db, token, owner), offset),
     'removal-history': (db, { offset = 0 }, owner) => {
       if (!Number.isSafeInteger(offset) || offset < 0) throw stale();
       return db
@@ -587,7 +702,7 @@ export function createRemovalService({ library, files }) {
           "SELECT * FROM removal_batches WHERE account=? AND state<>'preview' ORDER BY created DESC,rowid DESC LIMIT 20 OFFSET ?"
         )
         .all(owner.who.accountId, offset)
-        .map((row) => summary(db, parse(row)));
+        .map((row) => receiptView(db, parse(row)));
     },
     'trash-status': (db, input, owner) => {
       const p = probe(db);
@@ -642,7 +757,7 @@ export function createRemovalService({ library, files }) {
     },
     close() {
       closed = true;
-      return Promise.allSettled([...active.values()]);
+      return Promise.allSettled([...active.values()]).finally(() => adapter?.close());
     }
   };
 }

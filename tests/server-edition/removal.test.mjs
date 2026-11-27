@@ -320,3 +320,223 @@ test('a normal downloaded album supports partial rollback while a foreign replac
   assert.equal(query('list-works', { source: 'media' }).total, 1);
   assert.equal(status(r.token)().state, 'restored');
 });
+
+async function verifyTestRecycle(f) {
+  const status = () => f.query('trash-status');
+  f.cmd('start-trash-probe', { supported: true, reference: 'test fixture', retention: 'test' });
+  const sample = await until(status, (p) => p.phase === 'await-native' && !p.busy);
+  fs.renameSync(sample.bin, sample.original);
+  f.cmd('control-trash-probe', { token: sample.token, action: 'verify', observed: true });
+  await until(status, (p) => p.verified && !p.busy);
+}
+
+for (const restoring of [false, true])
+  for (const swappedSide of ['original', 'recycled'])
+    test(
+      'receipt checks ' +
+        swappedSide +
+        ' canonical directory chain after ' +
+        (restoring ? 'restore' : 'trash'),
+      async (t) => {
+        let swap;
+        const f = fixture(t, (stage) => {
+          if (stage === 'afterRemovalMove' && swap) {
+            const replace = swap;
+            swap = null;
+            replace();
+          }
+        });
+        await verifyTestRecycle(f);
+        const r = f.preview('files');
+        const status = (token) => () => f.query('removal-status', { token });
+        const parent =
+          swappedSide === 'original' ? path.dirname(f.original) : path.join(f.bin, 'folder', 'one');
+        if (restoring) {
+          f.cmd('confirm-removal', { token: r.token });
+          await until(status(r.token), (p) => p.state === 'done');
+        }
+        const job = restoring ? f.cmd('preview-restore', { token: r.token }) : r;
+        swap = () => {
+          fs.renameSync(parent, parent + '.held');
+          fs.mkdirSync(parent);
+          fs.writeFileSync(path.join(parent, 'video.mp4'), 'foreign');
+        };
+        f.cmd(restoring ? 'restore-removal' : 'confirm-removal', { token: job.token });
+        const observed = await until(status(job.token), (p) => ['paused', 'done'].includes(p.state));
+        assert.equal(observed.state, 'paused');
+        assert.equal(f.store.resources('11').length, restoring ? 0 : 1);
+        assert.equal(fs.readFileSync(path.join(parent, 'video.mp4'), 'utf8'), 'foreign');
+        fs.renameSync(parent, parent + '.foreign');
+        fs.renameSync(parent + '.held', parent);
+        f.cmd('control-removal', { token: job.token, action: 'resume' });
+        await until(status(job.token), (p) => p.state === 'done');
+        assert.equal(f.store.resources('11').length, restoring ? 1 : 0);
+      }
+    );
+test('cancel a blocked deletion before any move without requiring the retired backend', async (t) => {
+  const f = fixture(t);
+  await verifyTestRecycle(f);
+  const r = f.preview('files');
+  fs.renameSync(f.original, f.original + '.outside');
+  f.cmd('confirm-removal', { token: r.token });
+  const status = () => f.query('removal-status', { token: r.token });
+  await until(status, (p) => p.state === 'paused');
+  fs.renameSync(f.bin, f.bin + '.retired');
+  f.cmd('control-removal', { token: r.token, action: 'cancel' });
+  await until(status, (p) => p.state === 'cancelled');
+  assert.equal(f.store.resources('11').length, 1);
+  const { removalOwnsFiles } = await import('../../server/removal.mjs');
+  assert.equal(removalOwnsFiles(f.store.db, '11'), false);
+});
+
+test('old public membership command cannot bypass confirmation or the removal history', (t) => {
+  const f = fixture(t);
+  assert.throws(
+    () => f.cmd('remove-membership', { source: { kind: 'total', id: '__all__' }, workId: '11' }),
+    { code: 'UNKNOWN_COMMAND' }
+  );
+  assert.equal(f.query('list-works', { source: 'total' }).total, 1);
+  assert.deepEqual(f.query('removal-history'), []);
+});
+
+for (const replaceRoot of [false, true])
+  test('restore old boot receipt after new proof; replaced recycle root ' + replaceRoot, async (t) => {
+    const f = fixture(t);
+    await verifyTestRecycle(f);
+    const r = f.preview('files');
+    f.cmd('confirm-removal', { token: r.token });
+    await until(
+      () => f.query('removal-status', { token: r.token }),
+      (p) => p.state === 'done'
+    );
+    // A reboot invalidates the original volatile proof. Leave it on the receipt.
+    f.library.write((db) => {
+      db.prepare(
+        "UPDATE removal_batches SET body=json_set(body,'$.binding.boot','previous-boot','$.binding.media.mount','previous-mount') WHERE token=?"
+      ).run(r.token);
+      db.exec(
+        "UPDATE trash_probe SET body=json_set(body,'$.binding.boot','previous-boot','$.binding.media.mount','previous-mount')"
+      );
+    });
+    assert.throws(() => f.cmd('control-removal', { token: r.token, action: 'rebind' }));
+    if (replaceRoot) {
+      fs.renameSync(f.bin, f.bin + '.original');
+      fs.mkdirSync(f.bin);
+    }
+    await verifyTestRecycle(f);
+    const before = f.cmd('preview-restore', { token: r.token });
+    assert.ok(before.reason);
+    if (replaceRoot) {
+      assert.throws(() => f.cmd('control-removal', { token: r.token, action: 'rebind' }));
+      assert.equal(fs.existsSync(f.original), false);
+      assert.equal(
+        fs.readFileSync(path.join(f.bin + '.original', 'folder', 'one', 'video.mp4'), 'utf8'),
+        'synthetic bytes'
+      );
+      return;
+    }
+    assert.ok(f.query('removal-status', { token: r.token }).rebindRequired);
+    f.cmd('control-removal', { token: r.token, action: 'rebind' });
+    const plan = f.cmd('preview-restore', { token: r.token });
+    assert.equal(plan.reason, '');
+    f.cmd('restore-removal', { token: plan.token });
+    await until(
+      () => f.query('removal-status', { token: plan.token }),
+      (p) => p.state === 'done'
+    );
+    assert.equal(fs.readFileSync(f.original, 'utf8'), 'synthetic bytes');
+  });
+
+test('cancel releases untouched works, reconciles the old-mount in-flight receipt and keeps its restore action', async (t) => {
+  let interrupt = true;
+  const f = fixture(t, (stage) => {
+    if (interrupt && stage === 'afterRemovalMove') {
+      interrupt = false;
+      throw Error('interrupt');
+    }
+  });
+  const another = path.join(path.dirname(f.original), 'different.mp4');
+  fs.writeFileSync(another, 'synthetic bytes');
+  const s = fs.statSync(another, { bigint: true });
+  f.library.write((db) => {
+    db.exec(
+      "INSERT INTO works VALUES('22','second','{}'); INSERT INTO media_files SELECT '22:video','22','folder/one/different.mp4',size,sha256 FROM media_files WHERE work_id='11';INSERT INTO archive_assets VALUES('22:video','video','video','video/mp4',1);INSERT INTO archive_homes SELECT '22',body FROM archive_homes WHERE work_id='11'"
+    );
+    db.prepare("INSERT INTO file_commits VALUES('second','22','22:video','registered',?,1)").run(
+      JSON.stringify({
+        ...f.proof,
+        identity: { dev: String(s.dev), ino: String(s.ino) },
+        mtimeNs: String(s.mtimeNs)
+      })
+    );
+  });
+  await verifyTestRecycle(f);
+  const { scope, revision } = f.query('list-works', { source: 'all' });
+  const r = f.cmd('preview-removal', {
+    scope: 'files',
+    selection: { scope, revision, all: true, ids: [], source: 'all' }
+  });
+  f.cmd('confirm-removal', { token: r.token });
+  const status = () => f.query('removal-status', { token: r.token });
+  await until(status, (v) => v.state === 'paused');
+  assert.equal(fs.existsSync(f.original), false);
+  f.library.write((db) => {
+    const b = JSON.parse(db.prepare('SELECT body FROM removal_batches WHERE token=?').get(r.token).body);
+    b.binding.boot = 'old-boot';
+    b.binding.media.mount = 'old-mount';
+    db.prepare('UPDATE removal_batches SET body=? WHERE token=?').run(JSON.stringify(b), r.token);
+    db.exec("UPDATE trash_probe SET body=json_set(body,'$.binding.boot','old-boot')");
+    const row = db
+        .prepare('SELECT ordinal,body FROM removal_items WHERE token=? AND work_id=?')
+        .get(r.token, '11'),
+      i = JSON.parse(row.body);
+    for (const dirs of Object.values(i.attempt)) for (const d of dirs) d.mount = 'old-mount';
+    db.prepare('UPDATE removal_items SET body=? WHERE token=? AND ordinal=?').run(
+      JSON.stringify(i),
+      r.token,
+      row.ordinal
+    );
+  });
+  f.cmd('control-removal', { token: r.token, action: 'cancel' });
+  const paused = await until(status, (v) => v.state === 'paused' && v.cancelling);
+  assert.equal(paused.cancelled, 1);
+  const { removalOwnsFiles } = await import('../../server/removal.mjs');
+  assert(!removalOwnsFiles(f.store.db, '22'));
+  assert(removalOwnsFiles(f.store.db, '11'));
+  assert.equal(fs.readFileSync(another, 'utf8'), 'synthetic bytes');
+  await verifyTestRecycle(f);
+  f.cmd('control-removal', { token: r.token, action: 'rebind' });
+  f.cmd('control-removal', { token: r.token, action: 'resume' });
+  const end = await until(status, (v) => v.state === 'cancelled');
+  assert.equal(end.restorable, 1);
+  assert.equal(f.store.resources('11').length, 0);
+  assert.equal(f.store.resources('22').length, 1);
+  const plan = f.cmd('preview-restore', { token: r.token });
+  assert.equal(plan.files, 1);
+  f.cmd('restore-removal', { token: plan.token });
+  await until(
+    () => f.query('removal-status', { token: plan.token }),
+    (v) => v.state === 'done'
+  );
+  assert.equal(fs.readFileSync(f.original, 'utf8'), 'synthetic bytes');
+});
+
+test('a persisted move intent can be cancelled using the verified intact original when the bin is gone', async (t) => {
+  const f = fixture(t, (stage) => {
+    if (stage === 'afterRemovalMove') throw Error('response lost');
+  });
+  await verifyTestRecycle(f);
+  const r = f.preview('files');
+  f.cmd('confirm-removal', { token: r.token });
+  const status = () => f.query('removal-status', { token: r.token });
+  await until(status, (p) => p.state === 'paused');
+  fs.renameSync(path.join(f.bin, 'folder', 'one', 'video.mp4'), f.original);
+  fs.renameSync(f.bin, f.bin + '.offline');
+  f.cmd('control-removal', { token: r.token, action: 'cancel' });
+  const result = await until(status, (p) => p.state !== 'running');
+  assert.equal(result.state, 'cancelled');
+  assert.equal(result.cancelled, 1);
+  assert.equal(result.restorable, 0);
+  assert.equal(f.store.resources('11').length, 1);
+  assert.equal(fs.readFileSync(f.original, 'utf8'), 'synthetic bytes');
+});

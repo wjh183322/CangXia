@@ -63,13 +63,17 @@ function fixture(t) {
     return store.commitSourcePage({ ...ticket, page: page(ticket, rows, next) });
   }
   const members = (source) => library.read((db) => orderedMemberships(db, source).map((row) => row.workId));
-  const remove = (source, workId, entityVersion = 0, operationId = randomUUID()) =>
-    sessions.command(who, grant, {
-      operationId,
-      kind: 'remove-membership',
-      entityVersion,
-      payload: { source, workId }
-    });
+  const previews=new Map();
+  function remove(source,workId,version=0,operationId=randomUUID()){
+    const key=source.kind==='total'?'total':'folder:'+source.id;
+    const snapshot=JSON.stringify([key,workId,version]);
+    if(!previews.has(snapshot)){
+      const view=sessions.query(who,grant,{kind:'list-works',payload:{source:key}});
+      const {token}=sessions.command(who,grant,{operationId:randomUUID(),entityVersion:0,kind:'preview-removal',payload:{scope:'membership',selection:{source:key,ids:[workId],all:false,revision:view.revision,scope:view.scope}}});
+      previews.set(snapshot,token);
+    }
+    return sessions.command(who,grant,{kind:'confirm-removal',entityVersion:0,operationId,payload:{token:previews.get(snapshot)}});
+  }
   return {
     root,
     library,
@@ -149,7 +153,7 @@ for (const first of [total, folder])
       f.library.read((db) => db.prepare('SELECT count(*) n FROM download_jobs').get().n),
       0
     );
-    assert.throws(() => f.remove(total, A, 0), { code: 'STALE_ENTITY' });
+    assert.throws(() => f.remove(total, A, 0), { code: 'REMOVAL_REVIEW' });
   });
 
 test('partial prefix and terminal order use original anchors across restart; cycles and changed generations reject', (t) => {

@@ -8,7 +8,6 @@ import { historyRuns, historyItems, jobSummary } from './read-history.mjs';
 import { archiveAuthor, boundIdentity, createSourceOperations } from './read-sources.mjs';
 import { createReadStore } from './read-store.mjs';
 import { failure } from './service-error.mjs';
-import { removeMembership } from './memberships.mjs';
 import { isUuid } from './library.mjs';
 
 export const ttlMs = 20_000;
@@ -155,10 +154,6 @@ export function createSessionService({
         const ids=confirmedSelection(db,selection,owner,{collect:true});
         if(!Object.hasOwn(catalogueActions,action))throw failure(409,'ACTION_UNAVAILABLE','当前服务尚未启用此操作，未处理任何作品。');
         return catalogueActions[action](db,ids,{...owner,selection,operationId:command.operationId});
-      },
-      'remove-membership': (db, { payload, entityVersion }) => {
-        if (Object.keys(payload).some((key) => !['source', 'workId'].includes(key))) throw invalid();
-        return removeMembership(db, { ...payload, expectedVersion: entityVersion });
       },
       ...removal.commands,
       ...commands
@@ -427,7 +422,7 @@ export function createSessionService({
       removal.wake(receipt);
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
-      if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','remove-membership','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
+      if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
       return receipt;
     },
     receipt(who, grant, operationId) {

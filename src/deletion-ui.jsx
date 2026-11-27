@@ -47,11 +47,12 @@ export function DeletionPendingPanel({Modal,api,storage,progress,revision,onClos
 }
 
 const removalNames={membership:'移除当前来源归属',records:'移除作品记录',files:'删除 NAS 文件','restore-records':'恢复作品记录','restore-files':'还原 NAS 文件'};
-const removalStates={preview:'等待确认',running:'正在处理',paused:'已暂停',done:'已完成',restoring:'正在还原',restored:'已还原'};
+const removalStates={preview:'等待确认',running:'正在处理',paused:'已暂停',done:'已完成',restoring:'正在还原',restored:'已还原',cancelled:'已结束剩余项目'};
 const sourceName=source=>source==='total'?'总收藏':source?.startsWith('folder:')?'收藏夹 '+source.slice(7):source?.startsWith('author:')?'作者 '+source.slice(7):'全部作品';
 export function ServerRemovalDialog({Modal,api,initial,onClose,onConfirm,onVerify}){
   const [plan,setPlan]=useState(initial),[busy,setBusy]=useState(false),[error,setError]=useState('');
   async function action(fn){setBusy(true);setError('');try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
+  const readOnly=initial.state!=='preview';
   async function confirm(){await api[plan.scope.startsWith('restore-')?'restoreRemoval':'confirmRemoval']({token:plan.token});await onConfirm();}
   return <Modal title={removalNames[plan.scope]} onClose={onClose} dismissible={!busy}>
     <div className="modal-content"><h3>{plan.count} 个作品</h3>
@@ -60,11 +61,11 @@ export function ServerRemovalDialog({Modal,api,initial,onClose,onConfirm,onVerif
       {plan.scope==='files'&&<p>将下列 {plan.files} 个登记文件移入已验证的 NAS 回收位置。所有来源共用这些文件。作品记录、{plan.relations} 条来源归属和本机缓存保留。</p>}
       {plan.scope==='restore-files'&&<p>将 {plan.files} 个文件还原至下列原路径。每个文件核对身份和 SHA-256；原路径已被占用时暂停。</p>}
       {plan.scope==='restore-records'&&<p>恢复作品在原来源和全部作品中的显示，保留已登记的标签、文件和次序。</p>}
-      {plan.items.map((i,n)=><p key={n}>{i.title} · {i.workId}{i.path&&<><br/>{i.path} · {i.size} 字节</>}</p>)}
+      {plan.items.map((i,n)=><p key={n}>{i.title} · {i.workId}{i.path&&<><br/>{i.path} · {i.size} 字节<br/>原路径：{i.original||'待核对'}<br/>回收位置：{i.recycled||'待核对'}<br/>SHA-256：{i.sha256}{readOnly&&<><br/>处理结果：{({ready:'待处理',done:'已完成',cancelled:'已取消',restored:'已还原'})[i.state]}</>}</>}</p>)}
       <div><button className="text-button" disabled={busy||!plan.offset} onClick={()=>action(async()=>setPlan(await api.removalStatus({token:plan.token,offset:plan.offset-20})))}>上一页</button>
       <button className="text-button" disabled={busy||plan.offset+20>=plan.total} onClick={()=>action(async()=>setPlan(await api.removalStatus({token:plan.token,offset:plan.offset+20})))}>下一页</button></div>
       {plan.reason&&<p role="alert">{plan.reason}</p>}{plan.scope==='files'&&plan.reason&&<button className="text-button" onClick={onVerify}>查看回收站验证</button>}{error&&<p role="alert">{error}</p>}
-    </div><footer className="modal-footer"><button className="button secondary" onClick={onClose} disabled={busy}>取消</button><button className="button danger solid" disabled={busy||!!plan.reason} onClick={()=>action(confirm)}>确认{removalNames[plan.scope]}</button></footer>
+    </div><footer className="modal-footer"><button className="button secondary" onClick={onClose} disabled={busy}>{readOnly?'返回记录':'取消'}</button>{!readOnly&&<button className="button danger solid" disabled={busy||!!plan.reason} onClick={()=>action(confirm)}>确认{removalNames[plan.scope]}</button>}</footer>
   </Modal>;
 }
 export function ServerRemovalHistory({Modal,api,onClose,onPlan}){
@@ -73,11 +74,12 @@ export function ServerRemovalHistory({Modal,api,onClose,onPlan}){
   async function action(fn){setBusy(true);try{setError('');await fn();setRefresh(n=>n+1);}catch(e){setError(e.message);}finally{setBusy(false);}}
   return <Modal title="删除与恢复记录" onClose={onClose}><div className="modal-content">
     {!rows.length&&<p>此页没有已确认的删除操作。</p>}{rows.map(b=><article key={b.token}><h3>{removalNames[b.scope]} · {removalStates[b.state]}</h3>
-    <p>{new Date(b.created).toLocaleString()} · {b.count} 个作品 · 已处理 {b.done}/{b.total} 项</p>
+    <p>{new Date(b.created).toLocaleString()} · {b.count} 个作品 · 已处理 {b.done}/{b.total} 项{b.cancelled>0&&' · 已取消 '+b.cancelled+' 项'}</p>
+    {['files','restore-files'].includes(b.scope)&&<button className="text-button" disabled={busy} onClick={()=>action(async()=>onPlan(await api.removalStatus({token:b.token})))}>查看文件路径及摘要</button>}
     {b.scope==='membership'&&<p>{sourceName(b.source)}。重新读取此来源可恢复平台仍返回的作品。</p>}
-    {b.reason&&<p role="alert">{b.reason}</p>}
-    {['done','paused'].includes(b.state)&&b.restorable>0&&['files','records'].includes(b.scope)&&<button className="button secondary" disabled={busy} onClick={()=>action(async()=>onPlan(await api.previewRestore({token:b.token})))}>预览恢复</button>}
-    {['paused','running'].includes(b.state)&&<button className="button secondary" disabled={busy} onClick={()=>action(()=>api.controlRemoval({token:b.token,action:b.state==='paused'?'resume':'pause'}))}>{b.state==='paused'?'重试剩余项目':'暂停后续项目'}</button>}</article>)}
+    {b.reason&&<p role="alert">{b.reason}</p>}{b.rebindRequired&&<button className="button secondary" disabled={busy} onClick={()=>action(()=>api.controlRemoval({token:b.token,action:'rebind'}))}>确认重新绑定已验证的同一卷和目录</button>}
+    {['done','paused','cancelled'].includes(b.state)&&b.restorable>0&&['files','records'].includes(b.scope)&&<button className="button secondary" disabled={busy} onClick={()=>action(async()=>onPlan(await api.previewRestore({token:b.token})))}>预览恢复</button>}
+    {['paused','running'].includes(b.state)&&<button className="button secondary" disabled={busy} onClick={()=>action(()=>api.controlRemoval({token:b.token,action:b.state==='paused'?'resume':'pause'}))}>{b.state==='paused'?(b.cancelling?'重新核对在途文件':'重试剩余项目'):'暂停后续项目'}</button>}{b.state==='paused'&&!b.cancelling&&<button className="button secondary" disabled={busy} onClick={()=>action(()=>api.controlRemoval({token:b.token,action:'cancel'}))}>取消剩余项目并核对在途文件</button>}</article>)}
     {error&&<p role="alert">{error}</p>}<button className="text-button" disabled={!offset} onClick={()=>setOffset(v=>v-20)}>上一页</button><button className="text-button" disabled={rows.length<20} onClick={()=>setOffset(v=>v+20)}>下一页</button>
     </div></Modal>;
 }
