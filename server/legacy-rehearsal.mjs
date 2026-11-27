@@ -26,7 +26,7 @@ const allowedSource =
 const allowedRun =
   'scope source startedAt endedAt finishedAt mode name status phase count checked rawCount countsVersion existing newWorks pages total oldCount newCount added restored filled frontAdded initialAdded reappeared notReturned historyCount hasPrevious baselineKnown warning outcome succeeded failed skipped paused pending complete running processed includeTotal batchState batchMessage hasReadSummary reason message readPhase saveFailed';
 const allowedNested = new Set(
-  'index urls width height source id uid secUid uniqueId nickname roleTitle avatar name state version title author duration mixPending clip begin end volume unit textExtra challenges hashtag_name hashtagName hashtag_id hashtagId start end type user_id text challenge_name cha_name cid desc sec_uid is_commerce count complete pages time identities imageOriginals imageCount videoPixels videoRanked videoBitRate videoObservedAt kind position reason code at status original url music signature observedAt value'.split(
+  'index urls width height source id uid secUid uniqueId nickname roleTitle avatar name state method checkedAt version title author duration mixPending clip begin end volume unit textExtra challenges hashtag_name hashtagName hashtag_id hashtagId start end type user_id text challenge_name cha_name cid desc sec_uid is_commerce count complete pages time identities imageOriginals imageCount videoPixels videoRanked videoBitRate videoObservedAt kind position reason code at status original url music signature observedAt value'.split(
     ' '
   )
 );
@@ -62,41 +62,56 @@ const metadataFields = new Set(
 );
 const nestedMetadata = new Set([
   ...allowedNested,
-  ...'textExtra challenges key file size width height source comparisons match score confidence algorithm frameIndex frameTime distance status mode method sha256'.split(
+  ...'textExtra challenges key file size width height source comparisons match score confidence algorithm seconds frame crop correlation videoWidth videoHeight frameIndex frameTime distance status mode method sha256'.split(
     ' '
   )
 ]);
-function nativeMetadata(source, proof, workId) {
-  if (proof.size > 8 * 1024 * 1024) return false;
+function metadataIssue(source, proof, workId) {
+  if (proof.size > 8 * 1024 * 1024) return '作品信息 JSON 超过核验上限';
   let value;
   try {
     value = JSON.parse(fs.readFileSync(child(source.directory, proof.relative), 'utf8'));
   } catch {
-    return false;
+    return '作品信息 JSON 无法解析';
   }
-  function plain(v) {
-    if (Array.isArray(v)) return v.every(plain);
-    if (v && typeof v === 'object')
-      return Object.entries(v).every(([k, x]) => nestedMetadata.has(k) && plain(x));
-    if (typeof v === 'string' && (/^(?:[a-z]:[\\/]|file:|\\\\)/i.test(v) || /^https?:\/\/[^/]*@/.test(v)))
-      return false;
-    return true;
+  if (value?.schemaVersion !== 1 || value.workId !== workId) return '作品信息 JSON 的格式版本或作品身份不符';
+  function inspect(v, field, allowed) {
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        const why = inspect(item, field + '[]', nestedMetadata);
+        if (why) return why;
+      }
+    } else if (v && typeof v === 'object') {
+      for (const [key, x] of Object.entries(v)) {
+        const label =
+          (field ? field + '.' : '') + (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) ? key : '[未知字段]');
+        if (!allowed.has(key)) return '作品信息 JSON 未支持字段 ' + label;
+        const why = inspect(x, label, nestedMetadata);
+        if (why) return why;
+      }
+    } else if (
+      typeof v === 'string' &&
+      (/^(?:[a-z]:[\\/]|file:|\\\\)/i.test(v) ||
+        /^https?:\/\/[^/]*@/.test(v) ||
+        /\bBearer\s+[\w.-]+/i.test(v))
+    ) {
+      return '作品信息 JSON 字段含设备路径或认证信息 ' + field;
+    }
+    return null;
   }
-  return (
-    value?.schemaVersion === 1 &&
-    value.workId === workId &&
-    Object.entries(value).every(([k, v]) => metadataFields.has(k) && plain(v)) &&
-    (!value.assets ||
-      (Array.isArray(value.assets) &&
-        value.assets.every((a) => {
-          try {
-            segment(a.file);
-            return true;
-          } catch {
-            return false;
-          }
-        })))
-  );
+  const why = inspect(value, '', metadataFields);
+  if (why) return why;
+  if (value.assets !== undefined) {
+    if (!Array.isArray(value.assets)) return '作品信息 JSON 的 assets 清单无效';
+    for (const row of value.assets) {
+      try {
+        segment(row.file);
+      } catch {
+        return '作品信息 JSON 的 assets[].file 文件名不安全';
+      }
+    }
+  }
+  return null;
 }
 
 export async function reconcile(sources, uid) {
@@ -108,7 +123,9 @@ export async function reconcile(sources, uid) {
     objectFiles = new Map(),
     unlinked = new Map(),
     versions = new Map(),
-    legacyFlags = [];
+    legacyFlags = [],
+    membershipMarkers = [],
+    positiveMemberships = new Map();
   function issue(source, type, key, reason) {
     conflicts.push({ source, type, key: String(key), reason });
   }
@@ -137,6 +154,7 @@ export async function reconcile(sources, uid) {
       revision: record.revision,
       generation: record.generation,
       deleted: !!record.deleted,
+      dataRevision: record.dataRevision ?? null,
       lineage,
       origin
     });
@@ -168,7 +186,15 @@ export async function reconcile(sources, uid) {
         files
       });
     }
-    function entry(table, key, b) {
+    function entry(table, key, b, recordRevision) {
+      if (recordRevision !== undefined && ['members', 'author_members'].includes(table)) {
+        const data = { table, key, origin, historical, lineage: sourceId, recordRevision };
+        if (!b) {
+          membershipMarkers.push(data);
+          return;
+        }
+        if (!historical) positiveMemberships.set(ident(origin, ident(table, key)), data);
+      }
       if (!b) {
         protect(table, key, '旧备份含删除回执');
         issue(origin, table, key, '旧备份显式删除，其他副本同项暂存候选');
@@ -324,7 +350,7 @@ export async function reconcile(sources, uid) {
             if (r.id === 'account') account = b?.value;
             return;
           }
-          entry(r.kind, r.id, b);
+          entry(r.kind, r.id, b, r.revision);
         });
         rows('objects', 'SELECT * FROM objects ORDER BY sha', (r) => {
           const f = files.get('objects/' + r.sha);
@@ -333,7 +359,15 @@ export async function reconcile(sources, uid) {
           else if (!f || f.sha256 !== r.sha || f.size !== r.size)
             issue(origin, 'object', r.sha, '已登记的对象缺失或变动');
         });
-        rows('scope_state', 'SELECT * FROM scope_state', (r) => {
+        // Scope revisions and catalogue revisions are independent counters. The operation ID
+        // in the actual backup commit is the durable link from a scope decision to its data write.
+        const hasRequests =
+          names.includes('commits') &&
+          db.prepare("SELECT 1 FROM pragma_table_info('commits') WHERE name='request'").get();
+        const scopeRows = hasRequests
+          ? 'SELECT s.*,c.revision dataRevision FROM scope_state s LEFT JOIN commits c ON c.request=s.operation_id'
+          : 'SELECT * FROM scope_state';
+        rows('scope_state', scopeRows, (r) => {
           version({ workId: r.work_id, kind: r.kind, sourceId: r.source_id }, r, sourceId, origin);
         });
       } else {
@@ -547,6 +581,50 @@ export async function reconcile(sources, uid) {
           '已按同库较新的范围版本 ' + latest.revision + ' 判定'
         );
   }
+  for (const marker of membershipMarkers) {
+    const { table, key, origin, lineage, recordRevision } = marker;
+    const split = key.lastIndexOf(':'),
+      source = key.slice(0, split),
+      workId = key.slice(split + 1);
+    const scopeId = JSON.stringify([
+      lineage,
+      workId,
+      table === 'members' ? 'account' : 'author',
+      table === 'members' ? '__all__' : source
+    ]);
+    const observations = versions.get(scopeId) ?? [];
+    const deletion =
+      marker.historical &&
+      Number.isSafeInteger(recordRevision) &&
+      observations.find((v) => v.origin === origin && v.deleted && v.dataRevision === recordRevision);
+    const replacement =
+      deletion &&
+      restored.has(scopeId) &&
+      observations.find((v) => {
+        if (
+          v.deleted ||
+          !v.origin.startsWith('nas#') ||
+          v.generation <= deletion.generation ||
+          v.revision <= deletion.revision ||
+          !Number.isSafeInteger(v.dataRevision) ||
+          v.dataRevision <= recordRevision
+        )
+          return false;
+        const positive = positiveMemberships.get(ident(v.origin, ident(table, key)));
+        return (
+          positive &&
+          positive.lineage === lineage &&
+          Number.isSafeInteger(positive.recordRevision) &&
+          positive.recordRevision >= v.dataRevision
+        );
+      });
+    if (replacement) {
+      issue(origin, 'scopeHistory', key, '旧空记录与删除提交对应；同库较新恢复及当前归属已核实');
+    } else {
+      protect(table, key, '旧备份含未被证实覆盖的删除回执');
+      issue(origin, table, key, '旧备份显式删除或恢复来源未核实，保留候选');
+    }
+  }
   for (const { origin, s } of legacyFlags) {
     const identity = identities.find((i) => i.source === origin);
     const liveBinding = identities.find(
@@ -738,9 +816,12 @@ export async function reconcile(sources, uid) {
       issue(origin, 'asset', key, '文件缺失、大小或哈希不匹配');
       continue;
     }
-    if (a.key === 'metadata' && !nativeMetadata(sources[proof.index], proof, id)) {
-      issue(origin, 'asset', key, '作品信息 JSON 身份、字段或设备路径需核对');
-      continue;
+    if (a.key === 'metadata') {
+      const why = metadataIssue(sources[proof.index], proof, id);
+      if (why) {
+        issue(origin, 'asset', key, why);
+        continue;
+      }
     }
     hashes.add(proof.sha256);
     unlinked.delete(proof.index + '/' + proof.relative);

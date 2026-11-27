@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Worker, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { child, directory, disjoint, digest, segment } from './rehearsal-files.mjs';
+import { child, directory, disjoint, digest, segment, separatePaths } from './rehearsal-files.mjs';
 import { previewImport, importApproved } from './migration.mjs';
 import { preserveBeforeRollback, verifyRestore, restoreApproved } from './recovery.mjs';
 import { connect, inspectLayout, isUuid, writeDurably, syncDirectory } from './library.mjs';
@@ -30,6 +30,27 @@ function configAt(root) {
   )
     throw Error('请配置彩排账号、来源及镜像摘要。');
   return config;
+}
+function checkRehearsalPaths(root, liveRoot, config, selected) {
+  const area = (name) => directory(child(root, name));
+  const reports = area('reports'),
+    targets = area('targets'),
+    sources = area('sources'),
+    restores = area('restores'),
+    manifests = area('manifests');
+  const mountInfo = process.platform === 'linux' ? fs.readFileSync('/proc/self/mountinfo', 'utf8') : null;
+  separatePaths([liveRoot, reports, targets, sources, restores, manifests], mountInfo);
+  const sourceRoots = Object.keys(config.sources).map((n) => child(sources, nameOf(n)));
+  const restoreRoots = Object.keys(config.restores ?? {}).map((n) => child(restores, nameOf(n)));
+  const targetRoots = fs.readdirSync(targets).map((n) => child(targets, segment(n)));
+  if (selected) {
+    const named = child(targets, nameOf(selected));
+    if (!targetRoots.includes(named)) targetRoots.push(named);
+  }
+  separatePaths([liveRoot, reports, manifests, ...sourceRoots, ...restoreRoots, ...targetRoots], mountInfo);
+  const operands = restoreRoots.flatMap((base) => [path.join(base, 'snapshot'), path.join(base, 'media')]);
+  separatePaths([liveRoot, reports, manifests, ...sourceRoots, ...targetRoots, ...operands], mountInfo);
+  return reports;
 }
 function owner(config, session, accountId) {
   if (accountId !== config.accountId) throw Error('此账号无权访问这组彩排资料。');
@@ -148,10 +169,14 @@ function finishReport(dir, name, value) {
   fs.renameSync(pending, path.join(dir, name));
   syncDirectory(dir);
 }
-function saveResult(dir, result) {
+function saveResult(dir, result, checkDir) {
   const summary = { ...result };
   const audit = summary.conflicts ?? [],
     verification = summary.verification ?? summary;
+  if (Array.isArray(summary.inactiveMedia)) {
+    for (const r of summary.inactiveMedia) audit.push(r);
+    summary.inactiveMedia = summary.inactiveMedia.length;
+  }
   for (const key of ['matched', 'missing', 'changed', 'extra'])
     if (Array.isArray(verification[key])) {
       for (const file of verification[key])
@@ -172,11 +197,14 @@ function saveResult(dir, result) {
       1048576
   );
   if (disk.bavail * disk.bsize < needed) throw Error('独立报告目录空间不足。');
-  for (let pos = 0; pos < audit.length; pos += 50)
+  for (let pos = 0; pos < audit.length; pos += 50) {
+    checkDir();
     writeDurably(
       path.join(dir, 'page-' + (pos / 50 + 1) + '.json'),
       JSON.stringify(audit.slice(pos, pos + 50))
     );
+  }
+  checkDir();
   finishReport(dir, 'result.json', { ...summary, total: audit.length });
 }
 if (!isMainThread && workerData?.rehearsalWorker) {
@@ -184,12 +212,25 @@ if (!isMainThread && workerData?.rehearsalWorker) {
   const guard = () => {
     if (Atomics.load(new Int32Array(flag), 0)) throw Error('彩排已取消或控制权已失效。');
   };
+  const checkDir = () => {
+    directory(dir);
+    const current = fs.lstatSync(dir, { bigint: true });
+    if (String(current.dev) + '/' + String(current.ino) !== workerData.reportIdentity)
+      throw Error('彩排报告目录身份已变化。');
+  };
+  const validateOutput = () => {
+    checkRehearsalPaths(workerData.root, workerData.liveRoot, workerData.config, workerData.input.target);
+    checkDir();
+  };
   try {
+    validateOutput();
     const result = await run(workerData, guard);
     guard();
-    saveResult(dir, result);
+    validateOutput();
+    saveResult(dir, result, checkDir);
     parentPort.postMessage('ready');
   } catch (e) {
+    validateOutput();
     finishReport(dir, 'error.json', { message: e.message });
   }
 }
@@ -208,7 +249,7 @@ export function createRehearsals({ root, liveRoot }) {
     handle(session, accountId, input = {}) {
       const config = requireConfig();
       owner(config, session, accountId);
-      const reports = directory(child(root, 'reports'));
+      const reports = checkRehearsalPaths(root, liveRoot, config, input.target);
       if (input.action === 'list') {
         const jobs = fs
           .readdirSync(reports)
@@ -256,6 +297,8 @@ export function createRehearsals({ root, liveRoot }) {
       const id = randomUUID(),
         dir = child(reports, id);
       fs.mkdirSync(dir, { mode: 0o700 });
+      const created = fs.lstatSync(dir, { bigint: true }),
+        reportIdentity = String(created.dev) + '/' + String(created.ino);
       finishReport(dir, 'request.json', {
         accountId,
         uid: config.uid,
@@ -266,7 +309,7 @@ export function createRehearsals({ root, liveRoot }) {
       const flag = new SharedArrayBuffer(4),
         abort = () => Atomics.store(new Int32Array(flag), 0, 1);
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { rehearsalWorker: true, root, liveRoot, input, config, flag, dir }
+        workerData: { rehearsalWorker: true, root, liveRoot, input, config, flag, dir, reportIdentity }
       });
       const check = setInterval(() => {
         try {

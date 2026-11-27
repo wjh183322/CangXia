@@ -290,7 +290,7 @@ export function ServerBackupResponsibility({ api }) {
               {summary.verifiedPlayback !== undefined && (
                 <p>
                   已在独立目标登记 {summary.registeredFiles} 个文件，正式播放接口已读回{' '}
-                  {summary.verifiedPlayback} 个资源。
+                  {summary.verifiedPlayback} 个当前资源。已核实并保留的非当前资源 {summary.inactiveMedia??0} 个。
                 </p>
               )}
               {(summary.matched !== undefined || summary.verification) && (

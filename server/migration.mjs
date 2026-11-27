@@ -111,7 +111,20 @@ function saveImportedDownloads(db, rows, assets) {
       Number(hidden)
     );
   }
-  for (const id of new Set([...downloads.keys(), ...tasks.keys()])) {
+  // The formal download page shows newest rowids first. Insert imported rows in reverse
+  // native display order so future native jobs still appear first. The old active page
+  // displayed running jobs ahead of waiting jobs, then used the durable rank in each bucket.
+  const ids = [...new Set([...downloads.keys(), ...tasks.keys()])].sort((a, b) => {
+    const left = tasks.get(a),
+      right = tasks.get(b);
+    if (!left || !right) return Number(!!left) - Number(!!right);
+    return (
+      Number(left.state === 'running') - Number(right.state === 'running') ||
+      right.rank - left.rank ||
+      (a < b ? 1 : a > b ? -1 : 0)
+    );
+  });
+  for (const id of ids) {
     const work = works.get(id),
       archive = downloads.get(id),
       task = tasks.get(id),

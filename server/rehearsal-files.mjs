@@ -30,55 +30,83 @@ export function child(dir, relative) {
   const parts = relative.split('/').map(segment);
   return path.join(directory(path.join(dir, ...parts.slice(0, -1))), parts.at(-1));
 }
-export function disjoint(a, b) {
-  const within = (x, y) => {
-    const rel = path.relative(x, y);
-    return !rel || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
-  };
-  const fail = () => {
-    throw Error('源、运行库及目标必须使用独立目录。');
-  };
-  if (within(a, b) || within(b, a)) fail();
-  function ancestors(file) {
-    const ids = [];
-    for (let p = file; ; p = path.dirname(p)) {
+const overlap = () => {
+  throw Error('源、运行库、报告和目标必须使用独立目录。');
+};
+function within(parent, entry, paths = path) {
+  const rel = paths.relative(parent, entry);
+  return !rel || (!rel.startsWith('..' + paths.sep) && rel !== '..' && !paths.isAbsolute(rel));
+}
+// A bind below an otherwise separate configured root still belongs to that root's
+// read/write scope. Compare the underlying superblock and path of *every* such extent.
+export function checkLinuxMountTrees(roots, mountInfo) {
+  const posix = path.posix,
+    unescape = (s) => s.replace(/\\([0-7]{3})/g, (_, v) => String.fromCharCode(parseInt(v, 8)));
+  const mounts = mountInfo
+    .trim()
+    .split('\n')
+    .map((line) => {
+      const f = line.split(' ');
+      return { device: f[2], root: unescape(f[3]), at: unescape(f[4]) };
+    })
+    .sort((a, b) => b.at.length - a.at.length);
+  const scopes = roots.map((root) => {
+    const owner = mounts.find((m) => within(m.at, root, posix));
+    if (!owner) overlap();
+    const extent = { device: owner.device, path: posix.join(owner.root, posix.relative(owner.at, root)) };
+    return [
+      extent,
+      ...mounts
+        .filter((m) => m.at !== root && within(root, m.at, posix))
+        .map((m) => ({ device: m.device, path: m.root }))
+    ];
+  });
+  for (let i = 0; i < scopes.length; i++)
+    for (let j = 0; j < i; j++) {
+      for (const x of scopes[i])
+        for (const y of scopes[j])
+          if (x.device === y.device && (within(x.path, y.path, posix) || within(y.path, x.path, posix)))
+            overlap();
+    }
+}
+export function separatePaths(
+  roots,
+  mountInfo = process.platform === 'linux' ? fs.readFileSync('/proc/self/mountinfo', 'utf8') : null
+) {
+  if (roots.length < 2) return;
+  const data = roots.map((root) => {
+    const ancestors = new Set();
+    let own;
+    for (let p = root; ; p = path.dirname(p)) {
       try {
-        const s = fs.lstatSync(p, { bigint: true });
-        ids.push({ path: p, id: s.dev + '/' + s.ino });
+        const stat = fs.lstatSync(p, { bigint: true });
+        if (stat.isSymbolicLink()) overlap();
+        const id = stat.dev + '/' + stat.ino;
+        ancestors.add(id);
+        if (p === root) own = id;
       } catch (e) {
         if (e.code !== 'ENOENT') throw e;
       }
       if (path.dirname(p) === p) break;
     }
-    return ids;
-  }
-  const x = ancestors(a),
-    y = ancestors(b);
-  if (
-    x.some((p) => p.path === a && y.some((q) => q.id === p.id)) ||
-    y.some((q) => q.path === b && x.some((p) => p.id === q.id))
-  )
-    fail();
-  if (process.platform === 'linux') {
-    const unescape = (s) => s.replace(/\\([0-7]{3})/g, (_, v) => String.fromCharCode(parseInt(v, 8)));
-    const mounts = fs
-      .readFileSync('/proc/self/mountinfo', 'utf8')
-      .trim()
-      .split('\n')
-      .map((line) => {
-        const fields = line.split(' ');
-        return { device: fields[2], root: unescape(fields[3]), at: unescape(fields[4]) };
-      })
-      .sort((l, r) => r.at.length - l.at.length);
-    const backing = (file) => {
-      const m = mounts.find((m) => within(m.at, file));
-      if (!m) fail();
-      return { device: m.device, path: path.join(m.root, path.relative(m.at, file)) };
-    };
-    const p = backing(a),
-      q = backing(b);
-    if (p.device === q.device && (within(p.path, q.path) || within(q.path, p.path))) fail();
-  }
+    return { root, own, ancestors };
+  });
+  for (let i = 0; i < data.length; i++)
+    for (let j = 0; j < i; j++) {
+      const a = data[i],
+        b = data[j];
+      if (
+        within(a.root, b.root) ||
+        within(b.root, a.root) ||
+        b.ancestors.has(a.own) ||
+        a.ancestors.has(b.own)
+      )
+        overlap();
+    }
+  if (mountInfo) checkLinuxMountTrees(roots, mountInfo);
+}
+export function disjoint(a, b) {
+  separatePaths([a, b]);
 }
 export async function fileProof(file) {
   directory(path.dirname(file));

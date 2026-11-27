@@ -6,7 +6,8 @@ import { openDownloadStore } from './download-store.mjs';
 import { verifyFormat } from './downloads.mjs';
 import { audioInfo } from '../electron/audio-info.mjs';
 import { mediaList, serveMedia } from './media.mjs';
-import { resolveResource, moveExclusive } from './files.mjs';
+import { resolveResource, moveExclusive, registeredAssetProof, currentHDCover } from './files.mjs';
+import { contentHash } from '../shared/backup-protocol.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -281,6 +282,7 @@ async function verifyReadable(store, rows, guard, head = false) {
   const session = { signal: new AbortController().signal, guard },
     media = new Map();
   let streamed = 0;
+  const inactive = [];
   for (const r of rows) {
     guard();
     const resource = await resolveResource({
@@ -296,15 +298,55 @@ async function verifyReadable(store, rows, guard, head = false) {
     if (!media.has(r.work_id))
       media.set(r.work_id, new Map(mediaList(store.db, r.work_id).map((m) => [m.key, m])));
     const item = media.get(r.work_id).get(r.key);
-    if (!item?.saved || item.version !== resource.revision + '-' + r.sha256)
-      throw Error('正常播放入口没有此版本的已存资源。');
-    if (!head && item.kind === 'audio') {
+    let inactiveReason;
+    if (!item?.saved || item.version !== resource.revision + '-' + r.sha256) {
+      const proof = registeredAssetProof(store.db, r.work_id, resource);
+      if (!item?.saved && r.key === 'audio') {
+        const currentMusic = store.work(r.work_id).music?.id;
+        if (
+          currentMusic &&
+          /^[a-f0-9]{64}$/.test(proof?.resourceIdentity) &&
+          proof.resourceIdentity !==
+            contentHash({
+              workId: r.work_id,
+              key: 'audio',
+              kind: 'audio',
+              sourceIdentity: 'music:' + currentMusic
+            })
+        )
+          inactiveReason = '已保留先前配乐，当前作品音乐身份已更新';
+      } else if (!item?.saved && r.key === 'cover-hd' && !currentHDCover(store.db, r.work_id)) {
+        const historical = store.db
+          .prepare(
+            "SELECT 1 FROM hd_covers WHERE work_id=? AND json_extract(body,'$.key')=? AND json_extract(body,'$.sha256')=?"
+          )
+          .get(r.work_id, r.key, r.sha256);
+        if (historical) inactiveReason = '已保留原匹配封面，当前视频或参考图已更新';
+      }
+      if (!inactiveReason) throw Error('正常播放入口没有此版本的已存资源。');
+    }
+    if (!head && resource.kind === 'audio') {
       const info = await audioInfo(resource.file, session.signal);
       if (
-        { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav' }[info.format] !== item.mime
+        { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav' }[info.format] !==
+        resource.mime
       )
         throw Error('恢复的配乐格式与登记不符。');
-    } else if (!head) await verifyFormat(resource, item.mime, session.signal);
+    } else if (!head) await verifyFormat(resource, resource.mime, session.signal);
+    if (inactiveReason) {
+      if (!head) {
+        const verified = await fileProof(resource.file);
+        if (verified.sha256 !== r.sha256 || verified.size !== r.size)
+          throw Error('非当前资源的归档字节与登记不符。');
+      }
+      inactive.push({
+        workId: r.work_id,
+        key: r.relative_path,
+        type: 'inactiveMedia',
+        reason: inactiveReason
+      });
+      continue;
+    }
     const hash = createHash('sha256');
     let count = 0,
       status;
@@ -328,7 +370,7 @@ async function verifyReadable(store, rows, guard, head = false) {
       throw Error('正式媒体播放接口读回字节不符。');
     streamed++;
   }
-  return streamed;
+  return { streamed, inactive };
 }
 export async function restoreApproved(input) {
   const { snapshot, mediaRoot, target, manifestSha256, libraryId, uid, confirmed, guard = () => {} } = input;
@@ -415,7 +457,12 @@ export async function restoreApproved(input) {
     try {
       const store = openDownloadStore({ root: target, library: published });
       try {
-        await verifyReadable(store, rows, guard, true);
+        const publishedProof = await verifyReadable(store, rows, guard, true);
+        if (
+          publishedProof.streamed !== streamed.streamed ||
+          JSON.stringify(publishedProof.inactive) !== JSON.stringify(streamed.inactive)
+        )
+          throw Error('恢复目标发布期间的当前媒体身份发生变化。');
       } finally {
         store.close();
       }
@@ -428,7 +475,8 @@ export async function restoreApproved(input) {
       manifestSha256,
       target,
       registeredFiles: rows.length,
-      verifiedPlayback: streamed,
+      verifiedPlayback: streamed.streamed,
+      inactiveMedia: streamed.inactive,
       databaseVerified: true,
       verified: true
     };

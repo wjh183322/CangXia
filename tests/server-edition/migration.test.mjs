@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, X509Certificate } from 'node:crypto';
+import { createHash, X509Certificate, randomUUID } from 'node:crypto';
+import { ScopeState } from '../../backup-server/scope-state.mjs';
+import { checkLinuxMountTrees } from '../../server/rehearsal-files.mjs';
 import { setTimeout as wait } from 'node:timers/promises';
 import selfsigned from 'selfsigned';
 import { createSessionService } from '../../server/session.mjs';
@@ -13,6 +15,7 @@ import { ServerClient, pinnedRequest } from '../../electron/server-client.mjs';
 import { registerCatalogueHandlers } from '../../electron/server-ipc.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../../electron/store.mjs';
+import { DownloadQueue } from '../../electron/downloads.mjs';
 import { listWorks } from '../../server/catalogue.mjs';
 import { historyRuns, historyItems } from '../../server/read-history.mjs';
 import * as recovery from '../../server/recovery.mjs';
@@ -35,6 +38,35 @@ const work = (id) => ({
   coAuthors: []
 });
 const imageDigest = 'sha256:' + 'a'.repeat(64);
+test('Linux mount extents include bind-mounted reports and nested sources before any report can be written', () => {
+  const normal = '1 0 8:1 / / rw - ext4 /dev/test rw';
+  const bind = (backing, at) => '2 1 8:1 ' + backing + ' ' + at + ' rw - ext4 /dev/test rw';
+  assert.doesNotThrow(() => checkLinuxMountTrees(['/live', '/rehearsal/reports'], normal));
+  assert.throws(
+    () =>
+      checkLinuxMountTrees(
+        ['/live', '/rehearsal/reports'],
+        normal + '\n' + bind('/live', '/rehearsal/reports')
+      ),
+    /独立目录/
+  );
+  assert.throws(
+    () =>
+      checkLinuxMountTrees(
+        ['/rehearsal/reports', '/rehearsal/sources'],
+        normal + '\n' + bind('/rehearsal/reports', '/rehearsal/sources/frozen/objects')
+      ),
+    /独立目录/
+  );
+  assert.throws(
+    () =>
+      checkLinuxMountTrees(
+        ['/targets/a', '/targets/b'],
+        normal + '\n' + bind('/targets/a/media', '/targets/b')
+      ),
+    /独立目录/
+  );
+});
 test('native Windows WAL, NAS objects, recovery-only records and device deletion protection', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-rehearsal-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -109,14 +141,42 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
   record('works', id, work(id));
   record('works', deleted, work(deleted));
   source.db.prepare('INSERT INTO objects VALUES(?,?)').run(sha, bytes.length);
-  const metadata = Buffer.from(
-    JSON.stringify({
-      schemaVersion: 1,
-      workId: id,
-      workName: '旧归档',
-      assets: [{ key: 'video', file: '原件.mp4', size: bytes.length }]
-    })
+  const status = {
+    state: 'available',
+    reason: '来源可用',
+    method: 'platform',
+    checkedAt: '2026-01-02T00:00:00Z'
+  };
+  const archiveWork = {
+    ...work(id),
+    sourceStatus: status,
+    sourceAttempt: status,
+    checkedAt: status.checkedAt
+  };
+  const actualMetadata = DownloadQueue.prototype.metadata.call({ store }, archiveWork, {
+    collectionId: '__all__',
+    assets: [{ key: 'video', file: '原件.mp4', size: bytes.length }]
+  });
+  const metadata = Buffer.from(JSON.stringify(actualMetadata, null, 2));
+  const secret = 'private-fixture-token-not-in-report',
+    rejectedWork = { ...work('91'), sourceStatus: { ...status, cookie: secret } };
+  const rejected = Buffer.from(
+    JSON.stringify(
+      DownloadQueue.prototype.metadata.call({ store }, rejectedWork, { collectionId: '__all__', assets: [] })
+    )
   );
+  record('works', '91', work('91'));
+  const rejectHash = hash(rejected);
+  source.db.prepare('INSERT INTO objects VALUES(?,?)').run(rejectHash, rejected.length);
+  fs.writeFileSync(path.join(nas, 'objects', rejectHash), rejected);
+  record('downloads', '91', {
+    collectionId: '__all__',
+    home: { ...home, workFolder: '受保护的作品信息' },
+    state: 'partial',
+    assets: [
+      { key: 'metadata', kind: 'metadata', file: '作品信息.json', size: rejected.length, sha256: rejectHash }
+    ]
+  });
   const metaHash = hash(metadata);
   source.db.prepare('INSERT INTO objects VALUES(?,?)').run(metaHash, metadata.length);
   fs.writeFileSync(path.join(nas, 'objects', metaHash), metadata);
@@ -165,6 +225,8 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
   const args = { sources: inputs, target, uid, imageDigest };
   try {
     const pre = await previewImport(args);
+    assert.ok(pre.conflicts.some((c) => c.key === '91/metadata' && c.reason.includes('sourceStatus.cookie')));
+    assert.ok(!JSON.stringify(pre).includes(secret));
     assert.equal(fs.existsSync(target), false);
     assert.ok(pre.conflicts.some((x) => x.key.includes('999')));
     assert.ok(pre.conflicts.some((x) => x.reason.includes('删除')));
@@ -434,8 +496,22 @@ test('desktop IPC uses the authenticated owner and worker to approve a named off
   const sources = ['desktop'],
     target = 'trial',
     args = { sources, target };
-  const invalid = await op({ action: 'preview', sources, target: '../escape' });
-  assert.equal(invalid.state, 'failed');
+  const reportRoot = path.join(root, 'reports'),
+    initialReports = fs.readdirSync(reportRoot);
+  await assert.rejects(ipc({ action: 'preview', sources, target: '../escape' }), /名称/);
+  assert.deepEqual(fs.readdirSync(reportRoot), initialReports);
+  const realReports = path.join(root, 'unmounted-reports'),
+    beforeAlias = fs.readdirSync(liveRoot);
+  fs.renameSync(reportRoot, realReports);
+  fs.symlinkSync(liveRoot, reportRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    await assert.rejects(ipc({ action: 'preview', sources, target: 'invalid-layout' }));
+    assert.deepEqual(fs.readdirSync(liveRoot), beforeAlias);
+  } finally {
+    fs.unlinkSync(reportRoot);
+    fs.renameSync(realReports, reportRoot);
+  }
+  assert.deepEqual(fs.readdirSync(reportRoot), initialReports);
   const preview = await op({ action: 'preview', ...args });
   assert.equal(preview.state, 'done', preview.message);
   const failure = await op({
@@ -548,7 +624,7 @@ test('independent memberships, audio identity, ranked overlays and restored gene
     s.put('authors', author, person);
     record('authors', author, authorPublic(person));
     s.put('collections', '77', { id: '77', name: '夹', added: true });
-    for (const id of ['1', '2', '3', '4', '5', '88', '89']) {
+    for (const id of ['1', '2', '3', '4', '5', '88', '89', '14', '15']) {
       const w = work(id);
       if (id === '88' || id === '89') w.music = { id: '100', version: 1, state: 'known' };
       s.put('works', id, w);
@@ -587,6 +663,16 @@ test('independent memberships, audio identity, ranked overlays and restored gene
       ['5', 'cancelled']
     ])
       s.db.run('INSERT INTO download_tasks VALUES(?,?,?,?)', [id, state, 1, JSON.stringify({ id, state })]);
+    for (const [id, rank] of [
+      ['14', 0],
+      ['15', 1]
+    ])
+      s.db.run('INSERT INTO download_tasks VALUES(?,?,?,?)', [
+        id,
+        'failed',
+        rank,
+        JSON.stringify({ id, state: 'failed' })
+      ]);
     const files = { workId: '88', kind: 'files', sourceId: '' };
     s.deviceScopes.remember({ scope: files, generation: 1, revision: 1, deleted: true });
     const scope = (id, kind, sid, gen, del, rev) =>
@@ -651,6 +737,13 @@ test('independent memberships, audio identity, ranked overlays and restored gene
         assert.equal(mediaList(db, '88').find((a) => a.key === 'audio')?.saved, true);
         assert.ok(!mediaList(db, '89').some((a) => a.key === 'audio' && a.saved));
         assert.ok(downloads.page(db, { tab: 'failed' }).jobs.some((j) => j.workId === '4'));
+        assert.deepEqual(
+          downloads
+            .page(db, { tab: 'failed' })
+            .jobs.map((j) => j.workId)
+            .filter((id) => ['14', '15'].includes(id)),
+          ['14', '15']
+        );
         assert.ok(!downloads.page(db, { tab: 'active' }).jobs.some((j) => j.workId === '5'));
       });
       const proof = await preserveBeforeRollback({
@@ -672,12 +765,154 @@ test('independent memberships, audio identity, ranked overlays and restored gene
         manifestSha256: proof.manifestSha256
       });
       assert.equal(restored.verifiedPlayback, 1);
+      lib.write((db) =>
+        db.prepare("UPDATE works SET body=json_set(body,'$.music.id','101') WHERE id='88'").run()
+      );
+      const later = await preserveBeforeRollback({
+        root: target,
+        libraryId: result.libraryId,
+        imageDigest,
+        uid,
+        confirmed: true
+      });
+      const inactive = await recovery.restoreApproved({
+        uid,
+        libraryId: result.libraryId,
+        snapshot: later.snapshot,
+        mediaRoot: later.mediaRoot,
+        target: path.join(root, 'old-track'),
+        confirmed: true,
+        manifestSha256: later.manifestSha256
+      });
+      assert.equal(inactive.verifiedPlayback, 0);
+      assert.equal(inactive.inactiveMedia.length, 1);
+      const oldCopy = openLibrary({ root: inactive.target, expectedId: result.libraryId });
+      try {
+        oldCopy.read((db) => assert.ok(!mediaList(db, '88').some((r) => r.key === 'audio' && r.saved)));
+      } finally {
+        oldCopy.close();
+      }
+      assert.deepEqual(
+        fs.readFileSync(path.join(inactive.target, 'cangxia-server', 'media', inactive.inactiveMedia[0].key)),
+        audio
+      );
     } finally {
       await downloads.close();
       lib.close();
     }
   } finally {
     s.close();
+    await n.close();
+  }
+});
+
+test('native NAS deletion tombstones yield only to a later proved restore of that member on the same library', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-scoped-history-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const make = (name) => {
+    const d = path.join(root, name);
+    fs.mkdirSync(d);
+    return d;
+  };
+  const nas = make('nas'),
+    old = make('old'),
+    win = make('win'),
+    target = path.join(root, 'new'),
+    uid = '55';
+  const n = createBackupServer({
+    dataDir: nas,
+    token: 'scoped-history-unit-'.repeat(2),
+    allowInsecureLoopback: true
+  });
+  await n.listen();
+  const local = await Store.open(path.join(win, 'library.sqlite'), path.join(win, 'archive'));
+  try {
+    const libraryId = n.status().libraryId,
+      scopes = new ScopeState(n.db),
+      device = { id: randomUUID(), name: 'synthetic NAS device' },
+      author = 'MS4wLjABfixture123';
+    local.setSetting('account', { uid });
+    local.deviceScopes.bind(libraryId);
+    const put = (table, key, body, revision = 0) =>
+      n.db
+        .prepare('INSERT OR REPLACE INTO records VALUES(?,?,?,?)')
+        .run(table, key, body === null ? null : JSON.stringify(body), revision);
+    put('settings', 'account', { value: { uid } });
+    put('authors', author, {
+      id: author,
+      uid: '800',
+      name: '作者',
+      folder: '作者作品/测试',
+      url: 'https://www.douyin.com/user/' + author
+    });
+    for (const key of ['5', '6', '8']) {
+      put('works', key, work(key));
+      local.put('works', key, work(key));
+    }
+    put('collections', '__all__', { id: '__all__', name: '总收藏', folder: '收藏' });
+    const member = (id, pos) => ({
+      table: 'members',
+      key: '__all__:' + id,
+      body: { collectionId: '__all__', workId: id, rank: pos }
+    });
+    const authorMember = {
+      table: 'author_members',
+      key: author + ':5',
+      body: { authorId: author, workId: '5', position: 0, hidden: false }
+    };
+    for (const row of [member('5', 0), authorMember, member('6', 2)]) put(row.table, row.key, row.body);
+    local.db.run('INSERT INTO members VALUES(?,?,?)', ['__all__', '6', 2]);
+    put('members', '__all__:8', null); // Ordinary old NULL, without a deletion generation or matching receipt.
+    put('collections', '77', { id: '77', name: '另一夹', folder: '另一夹' });
+    put('members', '77:5', null);
+    const account = (id) => ({ workId: id, kind: 'account', sourceId: '__all__' });
+    const authorScope = { workId: '5', kind: 'author', sourceId: author };
+    const cmd = (items, generation) => ({
+      operationId: randomUUID(),
+      libraryId,
+      items: items.map((scope) => ({ scope, expectedGeneration: generation }))
+    });
+    const deleted = scopes.delete(cmd([account('5'), authorScope, account('6')], 0), device);
+    assert.equal(
+      n.db
+        .prepare("SELECT revision FROM records WHERE kind='members' AND id='__all__:5' AND body IS NULL")
+        .get().revision,
+      deleted.dataRevision
+    );
+    n.db.prepare('VACUUM INTO ?').run(path.join(old, 'library.sqlite'));
+    const grant = scopes.prepareRestore(cmd([account('5'), authorScope], 1), device);
+    const restored = scopes.finishRestore(grant.grantId, [member('5', 0), authorMember], device);
+    assert.equal(restored.items[0].generation, 2);
+    put('members', '__all__:8', member('8', 3).body, restored.dataRevision);
+    put('members', '77:5', { collectionId: '77', workId: '5', rank: 4 }, restored.dataRevision);
+    const sources = [];
+    for (const [directory, kind] of [
+      [nas, 'nas'],
+      [old, 'recovery'],
+      [win, 'windows']
+    ])
+      sources.push(await sealSource({ directory, kind, database: 'library.sqlite' }));
+    const args = { sources, uid, target, imageDigest },
+      preview = await previewImport(args);
+    const result = await importApproved({
+      ...args,
+      previewId: preview.previewId,
+      approval: { confirmed: true, uid, target, previewId: preview.previewId }
+    });
+    const lib = openLibrary({ root: target, expectedId: result.libraryId });
+    try {
+      lib.read((db) => {
+        const owner = { grant: { proof: 'test' } };
+        assert.deepEqual(listWorks(db, { source: 'total' }, owner).ids, ['5']);
+        assert.deepEqual(listWorks(db, { source: 'author:' + author }, owner).ids, ['5']);
+        assert.deepEqual(listWorks(db, { source: 'folder:77' }, owner).ids, []);
+      });
+    } finally {
+      lib.close();
+    }
+    assert.ok(preview.conflicts.some((x) => x.key === '__all__:8' && x.reason.includes('删除')));
+  } finally {
+    local.close();
     await n.close();
   }
 });
