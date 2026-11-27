@@ -1,7 +1,8 @@
 import {ServerMedia,attachMedia} from './server-media.mjs';
 import {listDirectory,makeDirectory,pickerLocations} from './file-browser.mjs';
 import {registerCatalogueHandlers} from './server-ipc.mjs';
-import { app, BrowserWindow, protocol, ipcMain, powerMonitor, safeStorage, screen,shell } from 'electron';
+import {registerMaintenanceHandlers} from './server-maintenance.mjs';
+import { app, BrowserWindow, protocol, ipcMain, powerMonitor, safeStorage, screen,shell,dialog } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -24,6 +25,11 @@ if (!app.requestSingleInstanceLock()) app.exit(0);
 
 protocol.registerSchemesAsPrivileged([{scheme:'app-media',privileges:{standard:true,secure:true,stream:true,supportFetchAPI:true}}]);
 let media;
+let verification,verificationId;
+function closeVerification(){
+  if(alive(verification))verification.destroy();
+  verification=null;verificationId=null;
+}
 let gate,
   workspace,
   client,
@@ -31,6 +37,7 @@ let gate,
   closing = false;
 const alive = (w) => w && !w.isDestroyed();
 function discardWorkspace() {
+  closeVerification();
   const old = workspace;
   workspace = null;
   if (!alive(old)) return;
@@ -103,12 +110,13 @@ function ipc(name, access, action) {
     try {
       const onGate = from(event, gate),
         onWorkspace = from(event, workspace);
-      if (!(access === 'gate' ? onGate : access === 'both' ? onGate || onWorkspace : onWorkspace))
+      const onVerification=from(event,verification);
+      if (!(access === 'gate' ? onGate : access === 'both' ? onGate || onWorkspace : access==='verification'?onVerification:onWorkspace))
         throw Error('当前窗口无使用权。');
-      if (onWorkspace) client.assert();
+      if (onWorkspace||onVerification) client.assert();
       const epoch=client.epoch;
       let data=await action(...args);
-      if(onWorkspace && name!=='serverRelease')client.assert(epoch);
+      if((onWorkspace||onVerification) && name!=='serverRelease')client.assert(epoch);
       if(onWorkspace && name==='listWorks')data={...data,items:data.items.map(w=>attachMedia(w,client.grant.libraryId))};
       if(onWorkspace && name==='workDetail')data=attachMedia(data,client.grant.libraryId);
       if(onWorkspace && data?.storage?.mode==='server')data={...data,flatQueue:media.queue.state(),mediaCache:media.cache.summary()};
@@ -138,8 +146,6 @@ async function openWorkspace(config, displayedEpoch) {
     await loadWindow(win);
     client.assert(epoch);
     if (workspace !== win) throw Error('资料库已锁定。');
-    win.show();
-    gate.hide();
     void client.call('identity/recover', {}).then(async account => {
       if (!account || workspace !== win) return;
       const next = await client.query('state');
@@ -156,6 +162,7 @@ async function openWorkspace(config, displayedEpoch) {
 async function quit() {
   if (closing) return;
   closing = true;
+  if(alive(workspace)&&!(await confirmExportExit())){closing=false;return;}
   quitting = true;
   discardWorkspace();
   try {
@@ -167,6 +174,11 @@ async function quit() {
     await media?.cleaning;
     app.exit(0);
   }
+}
+async function confirmExportExit(){
+  if(!media?.queue.state().batches.some(b=>!b.canceled&&(b.failed||b.jobs.some(j=>['running','waiting'].includes(j.state)))))return true;
+  const {response}=await dialog.showMessageBox(workspace,{type:'question',buttons:['返回藏匣','取消未完成导出并继续'],defaultId:0,cancelId:0,message:'本次 Windows 导出尚未结束。退出后保留已完成文件，取消剩余项目。'});
+  return response===1;
 }
 
 app.on('second-instance', () => {
@@ -200,7 +212,15 @@ app
       diagnostics.record({ event: 'startup-stage', name: 'connection-visible' })
     );
     ipc('serverConnect', 'gate', openWorkspace);
-    ipc('serverRelease', 'workspace', () => client.release());
+    ipc('cancelBackup','gate',async()=>{
+      if(client.state().owned)await client.release();
+      else client.lock('已停止等待连接。');
+      return client.state();
+    });
+    ipc('serverRelease', 'workspace', async () => {
+      if(!(await confirmExportExit()))throw Error('已保留本次导出及使用权。');
+      return client.release();
+    });
     ipc('serverReceipt', 'workspace', (id) => client.receipt(id));
     ipc('serverCommand', 'workspace', (command) => client.command(command));
     const notifyMedia=()=>{if(alive(workspace)&&client.state().owned)workspace.webContents.send('cangxia:change',{delta:true,flatQueue:media.queue.state(),mediaCache:media.cache.summary()});};
@@ -211,10 +231,12 @@ app
     for(const action of ['Pause','Resume','Retry','Cancel','Clear'])
       handle('flat'+action,id=>media.queue[action.toLowerCase()](id));
     const openDirectory=async dir=>{const error=await shell.openPath(dir);if(error)throw Error(error);};
+    registerMaintenanceHandlers({ipc,client,diagnostics,cache:media.cache,openDirectory,chooseDiagnostic:options=>dialog.showSaveDialog(workspace,options)});
     handle('flatOpen',id=>openDirectory(media.queue.checkDirectory(media.queue.get(id).directory)));
     handle('openCache',()=>{const dir=media.cache.directory;if(!fs.lstatSync(dir).isDirectory()||fs.realpathSync(dir)!==dir)throw Error('缓存目录已变化。');return openDirectory(dir);});
     handle('cacheSettings',input=>media.cache.setLimits(input));
-    handle('cacheClear',scopes=>media.cache.clear(scopes));
+    handle('cacheClear',scopes=>media.cache.clearCancellable(scopes,notifyMedia,client.signal()));
+    handle('cacheStop',()=>media.cache.stopClear());
     handle('pickerLocations',()=>pickerLocations(id=>app.getPath(id)));
     handle('listDirectory',dir=>listDirectory(dir,'directory'));
     handle('makeDirectory',makeDirectory);
@@ -247,17 +269,30 @@ app
     }});
     ipc('state', 'workspace', () => client.query('state'));
     ipc('startQrLogin', 'workspace', () => client.call('source/open', {}));
+    ipc('showQrExternalPage','workspace',async viewId=>{
+      const epoch=client.epoch;
+      await client.call('source/view',{viewId});
+      client.assert(epoch);
+      if(alive(verification)&&verificationId===viewId){verification.focus();return {shown:true};}
+      closeVerification();
+      const win=createWindow('verification');verification=win;verificationId=viewId;
+      win.setParentWindow(workspace);win.setTitle('抖音官方验证');win.setSize(500,640);
+      try{await loadWindow(win);client.assert(epoch);if(verification!==win)throw Error('验证流程已结束。');win.show();return {shown:true};}
+      catch(e){if(verification===win)closeVerification();throw e;}
+    });
+    ipc('verificationView','verification',()=>client.call('source/view',{viewId:verificationId}));
+    ipc('verificationManual','verification',input=>client.call('source/manual',{viewId:verificationId,input}));
     ipc('sourceLoginView', 'workspace', viewId => client.call('source/view', {viewId}));
     ipc('refreshQrLogin', 'workspace', viewId => client.call('source/refresh', {viewId}));
-    ipc('cancelQrLogin', 'workspace', viewId => client.call('source/cancel', {viewId}));
+    ipc('cancelQrLogin', 'workspace', viewId => {if(verificationId===viewId)closeVerification();return client.call('source/cancel', {viewId});});
     ipc('sourceQrShown','workspace',(viewId,token)=>client.call('source/shown',{viewId,token}));
     ipc('sourceManualLogin', 'workspace', (viewId,input) => client.call('source/manual', {viewId,input}));
-    ipc('finishLogin', 'workspace', () => client.call('identity/verify', {}));
+    ipc('finishLogin', 'workspace', async () => {const value=await client.call('identity/verify', {});closeVerification();return value;});
     ipc('logout', 'workspace', async () => {
       await client.call('source/logout', {});
       return client.query('state');
     });
-    ipc('startupReady', 'workspace', () => true);
+    ipc('startupReady', 'workspace', () => { workspace.show();gate.hide();return {ready:true}; });
     ipc('setTags', 'workspace', (id, tags, entityVersion) =>
       client.command({
         operationId: randomUUID(),

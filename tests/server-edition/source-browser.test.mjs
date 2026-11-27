@@ -412,7 +412,7 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
     const {
@@ -424,7 +424,7 @@ for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
       upgradeV3,
       upgradeV4,
       upgradeV5,
-      upgradeV6,upgradeV7,upgradeV8,upgradeV9,upgradeV10,upgradeV11,upgradeV12
+      upgradeV6,upgradeV7,upgradeV8,upgradeV9,upgradeV10,upgradeV11,upgradeV12,upgradeV13
     } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -454,6 +454,7 @@ for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
     if(version>=11)db.exec(upgradeV10);
     if(version>=12)db.exec(upgradeV11);
     if(version>=13)db.exec(upgradeV12);
+    if(version>=14)db.exec(upgradeV13);
     if (version === 7) {
       db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
       db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();

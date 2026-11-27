@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {setImmediate as nextTurn} from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 import { CACHE_DEFAULTS, validCacheLimit } from './media-cache.mjs';
@@ -47,7 +48,7 @@ export class ServerMediaCache {
     const used = { audio: 0, cover: 0, stage: this.reserved };
     for (const row of this.db.prepare('SELECT scope,sum(size) n FROM objects GROUP BY scope').all())
       used[row.scope] = row.n;
-    return { used, limits: this.limits() };
+    return { used, limits: this.limits(),cleaning:!!this.cleanup };
   }
   setLimits(input) {
     for (const k of Object.keys(defaults))
@@ -76,6 +77,27 @@ export class ServerMediaCache {
     for (const scope of scopes) if (Object.hasOwn(defaults, scope)) this.trim(scope, 0);
     return this.summary();
   }
+  async clearCancellable(scopes,notify=()=>{},signal){
+    if(!Array.isArray(scopes)||scopes.some(s=>!Object.hasOwn(defaults,s)))throw Error('缓存类别无效。');
+    if(this.cleanup)throw Error('已有缓存清理正在进行。');
+    const controller=this.cleanup=new AbortController();
+    notify();
+    try{
+      for(const scope of new Set(scopes)){
+        let after=0;
+        for(;;){
+          await nextTurn();
+          if(controller.signal.aborted||signal?.aborted)break;
+          const rows=this.db.prepare('SELECT rowid AS n,key FROM objects WHERE scope=? AND rowid>? ORDER BY rowid LIMIT 16').all(scope,after);
+          for(const row of rows)if(!this.pins.has(row.key))this.db.prepare('DELETE FROM objects WHERE rowid=? AND key=?').run(row.n,row.key);
+          if(rows.length<16)break;
+          after=rows.at(-1).n;
+        }
+      }
+    }finally{this.cleanup=null;notify();}
+    return this.summary();
+  }
+  stopClear(){this.cleanup?.abort();return this.summary();}
   get(key) {
     return this.db.prepare('SELECT mime,etag,size FROM objects WHERE key=?').get(key);
   }

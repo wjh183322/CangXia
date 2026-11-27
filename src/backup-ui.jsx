@@ -25,3 +25,14 @@ export function BackupPanel({storage={},busy,api,onUpdated,onImport,onConflict})
  <p className="muted small">导入仅用于空的备份版本机库，原版资料保留。清理本机媒体不会删除 NAS 中已经备份的副本。</p>
  </section>;
 }
+
+export function ServerBackupResponsibility() {
+  return (
+    <section>
+      <h3>备份与还原</h3>
+      <p>
+        完整媒体的备份任务、备份结果和文件还原请在绿联「同步与备份」中查看。藏匣在数据库升级前创建并校验数据库快照。
+      </p>
+    </section>
+  );
+}

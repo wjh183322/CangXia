@@ -38,3 +38,391 @@ export function DefectRepairPanel({report,job,busy,canWrite,canScan=true,getPage
   {data.pages>1&&<Pagination page={data.page} pages={data.pages} onChange={setPage} location="检查列表"/>}
  </div><footer className="modal-footer"><button className="button secondary" disabled={active||busy} onClick={onClose}>关闭</button>{scanning?<button className="button secondary" onClick={onStop}>停止检查</button>:active?<button className="button secondary" onClick={onStop}><Pause size={15}/>{job?.kind==='verify'?'停止核验':'停止补齐'}</button>:<>{job&&(job.phase==='paused'||job.failed>0)&&<button className="button secondary" disabled={busy||!canWrite} onClick={onResume}>继续未完成 / 重试失败项</button>}{onVerify&&<button className="button secondary" disabled={busy||!canWrite||!chosen} onClick={()=>onVerify(selection(true))}>核验原作品状态（{chosen}）</button>}<button className="button primary" disabled={busy||!canWrite||!repairChosen} onClick={start}>补齐选中 {repairChosen} 个</button></>}</footer></>;
 }
+
+const stages = {
+  files: '文件',
+  source: '来源',
+  download: '下载',
+  registration: '登记',
+  cleanup: '清理',
+  cover: '封面'
+};
+const checkKinds = {
+  files: '文件检查',
+  source: '来源核验',
+  repair: '补齐入队',
+  storage: '存储统计',
+  reconcile: '归档整理'
+};
+const checkStates = { running: '进行中', complete: '已完成', paused: '已暂停', failed: '失败' };
+const fileStates = {
+  pending: '待补齐',
+  blocked: '需要核对',
+  complete: '已核对',
+  queued: '已入队',
+  failed: '失败'
+};
+const sourceStates = {
+  available: '可访问',
+  unavailable: '不可访问',
+  unknown: '暂无法确认',
+  unchecked: '尚未核验'
+};
+export function ServerMaintenancePanel({ api, initialId, initialState, onDetail, onClose }) {
+  const [id, setId] = useState(initialId),
+    [historyPage, setHistoryPage] = useState(initialState?.historyPage ?? 1),
+    [history, setHistory] = useState(null);
+  const [page, setPage] = useState(initialState?.page ?? 1),
+    [fileStatus, setFilter] = useState(initialState?.fileStatus ?? 'all'),
+    [stage, setStage] = useState(initialState?.stage ?? 'all'),
+    [sourceStatus, setSource] = useState(initialState?.sourceStatus ?? 'all');
+  const [report, setReport] = useState(null),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(''),
+    [refresh, setRefresh] = useState(0);
+  const [marked, setMarked] = useState(initialState?.marked ?? { key: '', ids: [], all: false });
+  const latest = useRef(0);
+  useEffect(() => {
+    let live = true,
+      timer;
+    async function load() {
+      try {
+        const past = await api.defectOverview({ page: historyPage });
+        if (!live) return;
+        setHistory(past);
+        const current = id ?? past.items[0]?.id;
+        if (!current) {
+          setReport(null);
+          return;
+        }
+        const next = await api.defectPage({ id: current, page, fileStatus, sourceStatus, stage });
+        if (!live) return;
+        setReport(next);
+        setError('');
+        if (next.state === 'running') timer = setTimeout(load, 450);
+      } catch (e) {
+        if (live) setError(e.message);
+      }
+    }
+    setReport(null);
+    void load();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [api, id, page, stage, sourceStatus, fileStatus, historyPage, refresh]);
+  useEffect(
+    () => () => {
+      latest.current++;
+    },
+    []
+  );
+  const key = JSON.stringify([
+    report?.id,
+    report?.version,
+    report?.revision,
+    fileStatus,
+    sourceStatus,
+    stage
+  ]);
+  const selected = marked.key === key ? marked : { key, ids: [], all: false };
+  const selection = report && {
+    id: report.id,
+    version: report.version,
+    revision: report.revision,
+    fileStatus,
+    sourceStatus,
+    stage,
+    ids: selected.ids,
+    all: selected.all
+  };
+  const count = selected.all ? (report?.count ?? 0) - selected.ids.length : selected.ids.length;
+  const pick = (next) => {
+    setId(next);
+    setPage(1);
+    setFilter('all');
+    setSource('all');
+    setStage('all');
+    setMarked({ key: '', ids: [], all: false });
+  };
+  async function act(fn, follow = true) {
+    const sequence = ++latest.current;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await fn();
+      if (sequence !== latest.current) return;
+      if (follow && result?.id) pick(result.id);
+      setRefresh((n) => n + 1);
+    } catch (e) {
+      if (sequence === latest.current) setError(e.message);
+    } finally {
+      if (sequence === latest.current) setBusy(false);
+    }
+  }
+  const running = report?.state === 'running';
+  return (
+    <>
+      <div className="modal-content defect-content" data-maintenance-history>
+        {history?.problems && (
+          <p>
+            当前登记问题（按作品） ·{' '}
+            {Object.entries(stages)
+              .map(([k, label]) => label + ' ' + (history.problems[k] ?? 0))
+              .join(' · ')}
+          </p>
+        )}
+        <div className="defect-controls">
+          <button
+            className="button primary"
+            disabled={busy || running}
+            onClick={() => act(() => api.inspectDefects())}
+          >
+            检查全部文件
+          </button>
+          {history?.pendingArchive > 0 && (
+            <button
+              className="button secondary"
+              disabled={busy || running}
+              onClick={() => act(() => api.resumeReconcile(history.revision))}
+            >
+              继续整理 {history.pendingArchive} 个归档
+            </button>
+          )}
+          <select
+            aria-label="检查记录"
+            value={id ?? history?.items[0]?.id ?? ''}
+            onChange={(e) => pick(e.target.value)}
+          >
+            {!history?.items.length && <option value="">尚无检查记录</option>}
+            {history?.items.map((r) => (
+              <option key={r.id} value={r.id}>
+                {new Date(r.created).toLocaleString()} · {checkKinds[r.kind]} · {checkStates[r.state]}
+              </option>
+            ))}
+          </select>
+          {historyPage > 1 && (
+            <button
+              onClick={() => {
+                setId(undefined);
+                setPage(1);
+                setHistoryPage((p) => p - 1);
+              }}
+            >
+              较新记录
+            </button>
+          )}
+          {history?.hasMore && (
+            <button
+              onClick={() => {
+                setId(undefined);
+                setPage(1);
+                setHistoryPage((p) => p + 1);
+              }}
+            >
+              更早记录
+            </button>
+          )}
+        </div>
+        {error && (
+          <p role="alert" className="danger-text">
+            {error}
+          </p>
+        )}
+        {report && (
+          <>
+            <p data-check-state={report.state}>
+              {checkKinds[report.kind]} · {checkStates[report.state]} · 已处理 {report.processed} /{' '}
+              {report.total} {report.reason}
+            </p>
+            {report.kind === 'storage' && report.totals && (
+              <p>
+                归档 {report.totals.archiveBytes} 字节 · 暂存 {report.totals.stagingBytes} 字节
+              </p>
+            )}
+            <div className="defect-filters">
+              <label>
+                文件状态
+                <select
+                  value={fileStatus}
+                  onChange={(e) => {
+                    setPage(1);
+                    setFilter(e.target.value);
+                  }}
+                >
+                  <option value="all">全部</option>
+                  {Object.entries(fileStates).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                来源状态
+                <select
+                  value={sourceStatus}
+                  onChange={(e) => {
+                    setPage(1);
+                    setSource(e.target.value);
+                  }}
+                >
+                  <option value="all">全部</option>
+                  {Object.entries(sourceStates).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                问题阶段
+                <select
+                  value={stage}
+                  onChange={(e) => {
+                    setPage(1);
+                    setStage(e.target.value);
+                  }}
+                >
+                  {Object.entries({ all: '全部', ...stages }).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v}
+                      {k !== 'all' ? '（' + (report.stageCounts[k] ?? 0) + '）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="defect-select">
+              <button
+                disabled={busy || running || !report.count}
+                onClick={() => setMarked({ key, ids: [], all: true })}
+              >
+                全选筛选结果（{report.count}）
+              </button>
+              <button disabled={!count} onClick={() => setMarked({ key, ids: [], all: false })}>
+                取消选择
+              </button>
+              <span>已选 {count} 个</span>
+            </div>
+            <div className="defect-list">
+              {report.items.map((item) => (
+                <article key={item.workId}>
+                  <input
+                    type="checkbox"
+                    aria-label={'选择作品 ' + item.workId}
+                    disabled={busy || running}
+                    checked={selected.all !== selected.ids.includes(item.workId)}
+                    onChange={() =>
+                      setMarked({
+                        ...selected,
+                        ids: selected.ids.includes(item.workId)
+                          ? selected.ids.filter((id) => id !== item.workId)
+                          : [...selected.ids, item.workId]
+                      })
+                    }
+                  />
+                  <div>
+                    <button
+                      className="text-button"
+                      onClick={() =>
+                        onDetail(item.workId, {
+                          panel: 'serverChecks',
+                          run: report.id,
+                          page,
+                          fileStatus,
+                          sourceStatus,
+                          stage,
+                          historyPage,
+                          marked: selected
+                        })
+                      }
+                    >
+                      作品 {item.workId}
+                    </button>
+                    <p>
+                      {fileStates[item.fileStatus]}
+                      {item.downloadState && ' · 下载状态 ' + item.downloadState} · 来源
+                      {sourceStates[item.sourceStatus]}{' '}
+                      {item.verified !== undefined &&
+                        ' · 已验证 ' + item.verified + ' 个文件，' + item.bytes + ' 字节'}
+                    </p>
+                    {item.issues.map((i, n) => (
+                      <p key={n}>
+                        {i.key && i.key + ' · '}
+                        {i.reason}
+                      </p>
+                    ))}
+                  </div>
+                  <button
+                    className="text-button"
+                    onClick={() => act(() => api.openOriginal(item.workId), false)}
+                  >
+                    原作品
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => act(() => api.exportWorkDiagnostic(item.workId), false)}
+                  >
+                    导出诊断
+                  </button>
+                </article>
+              ))}
+            </div>
+            <div className="defect-select">
+              <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                上一页
+              </button>
+              <span>
+                {page} / {report.pages}
+              </span>
+              <button disabled={page >= report.pages} onClick={() => setPage((p) => p + 1)}>
+                下一页
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      <footer className="modal-footer">
+        {running ? (
+          <button
+            className="button secondary"
+            disabled={busy}
+            onClick={() => act(() => api.stopDefectRepair(report.id))}
+          >
+            停止本次检查
+          </button>
+        ) : (
+          <>
+            {['paused', 'failed'].includes(report?.state) && (
+              <button
+                className="button secondary"
+                disabled={busy}
+                onClick={() => act(() => api.resumeDefectRepair(report.id))}
+              >
+                继续未处理项
+              </button>
+            )}
+            <button
+              className="button secondary"
+              disabled={busy || !count}
+              onClick={() => act(() => api.verifySources(selection))}
+            >
+              核验所选来源
+            </button>
+            <button
+              className="button primary"
+              disabled={busy || !count}
+              onClick={() => act(() => api.startDefectRepair(selection))}
+            >
+              复查并补齐所选缺失文件
+            </button>
+          </>
+        )}
+        <button className="button secondary" onClick={onClose}>
+          关闭
+        </button>
+      </footer>
+    </>
+  );
+}

@@ -75,6 +75,7 @@ export function ServerConnection({api}){
     {changedLibrary&&<label><input type="checkbox" checked={acceptLibrary} onChange={e=>setAcceptLibrary(e.target.checked)}/>已在 NAS 核对新资料库，同意更换本机绑定</label>}
     <p role="status">{error||state?.reason||'正在读取连接设置…'}</p>
     <button className="button primary" disabled={busy||!state}>{busy?'正在连接…':'连接并取得使用权'}</button>
+    {busy&&<button className="button secondary" type="button" onClick={()=>api.cancelBackup().catch(e=>setError(e.message))}>停止等待连接</button>}
   </form></main>;
 }
 export function SessionHandoff({api}){

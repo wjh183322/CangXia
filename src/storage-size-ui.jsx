@@ -8,3 +8,87 @@ export function StorageSize({api,root,estimatedBytes,works,scan,onChange,onError
   {running?<div className="storage-size-message" role="status">正在统计 · {Number(current?.files||0).toLocaleString('zh-CN')} 个文件<button className="text-button" aria-label="停止目录大小统计" onClick={stop}><Square size={10}/>停止</button></div>:<>{result?<p className="storage-size-time">目录大小 · 统计于 {new Date(result.scannedAt).toLocaleString('zh-CN',{hour12:false})}</p>:<p className="storage-size-time">当前为登记文件估算，可手动刷新目录总大小。</p>}{current?.message&&(!['idle','done'].includes(current.phase)||current.links>0)&&<p className={`storage-size-message ${['failed','partial'].includes(current.phase)?'danger-text':''}`} role={['failed','partial'].includes(current.phase)?'alert':'status'}>{current.message}</p>}</>}
  </>;
 }
+
+export function ServerStorageSize({ api }) {
+  const [data, setData] = useState(null),
+    [error, setError] = useState(''),
+    [revision, refresh] = useState(0),
+    [pending, setPending] = useState(false);
+  React.useEffect(() => {
+    let live = true,
+      timer;
+    async function load() {
+      try {
+        const next = await api.storageUsage();
+        if (!live) return;
+        setData(next);
+        if (next.run?.state === 'running' || next.cache.phase === 'running') timer = setTimeout(load, 450);
+      } catch (e) {
+        if (live) setError(e.message);
+      }
+    }
+    void load();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [api, revision]);
+  async function action(fn) {
+    setPending(true);
+    setError('');
+    try {
+      await fn();
+      refresh((n) => n + 1);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPending(false);
+    }
+  }
+  const { run, cache } = data ?? {},
+    totals = run?.totals,
+    active = run?.state === 'running' || cache?.phase === 'running';
+  return (
+    <section>
+      <h3>存储占用</h3>
+      {totals && (
+        <p>
+          作品 {totals.works} · 来源归属 {totals.memberships} · 登记文件 {totals.registeredFiles} · 下载任务{' '}
+          {totals.jobs}
+          <br />
+          NAS 归档 {estimated(totals.archiveBytes)} · NAS 暂存 {estimated(totals.stagingBytes)} · 实际文件{' '}
+          {totals.files}
+        </p>
+      )}
+      {run && (
+        <p>
+          NAS 统计
+          {
+            { running: '进行中', complete: '已完成', paused: '已暂停，显示已统计部分', failed: '失败' }[
+              run.state
+            ]
+          }{' '}
+          {run.reason}
+        </p>
+      )}
+      {cache?.bytes !== undefined && (
+        <p>
+          Windows 缓存目录 {estimated(cache.bytes)} · {cache.message}
+        </p>
+      )}
+      {error && <p role="alert">{error}</p>}
+      <button
+        className="button secondary"
+        disabled={pending || active}
+        onClick={() => action(() => api.refreshStorageSize())}
+      >
+        刷新存储占用
+      </button>
+      {active && (
+        <button className="button secondary" onClick={() => action(() => api.cancelStorageSize(run.id))}>
+          停止统计
+        </button>
+      )}
+    </section>
+  );
+}

@@ -435,6 +435,15 @@ function put(db, job) {
   db.prepare(
     'INSERT INTO download_manifests(id,work_id,body) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,hidden=0'
   ).run(job.id, job.workId, JSON.stringify(job));
+  if(job.state==='complete'&&job.id===job.workId)db.prepare('DELETE FROM maintenance_file_state WHERE work_id=?').run(job.workId);
+  for(const link of db.prepare('SELECT run,work_id FROM maintenance_queue_links WHERE job=?').all(job.id)){
+    const complete=job.state==='complete',failed=retryStates.has(job.state)||['cancelled','unavailable'].includes(job.state);
+    const fileStatus=complete?'complete':failed?'failed':'queued';
+    const changed=db.prepare("UPDATE maintenance_items SET result=json_set(result,'$.downloadState',?,'$.fileStatus',?,'$.repairable',json(?)) WHERE run=? AND work_id=? AND json_extract(result,'$.downloadState') IS NOT ?")
+      .run(job.state,fileStatus,JSON.stringify(failed&&job.state!=='unavailable'),link.run,link.work_id,job.state);
+    if(changed.changes)db.prepare('UPDATE maintenance_runs SET version=version+1 WHERE id=?').run(link.run);
+    if(complete||failed)db.prepare('DELETE FROM maintenance_queue_links WHERE run=? AND work_id=?').run(link.run,link.work_id);
+  }
   db.exec('UPDATE download_options SET revision=revision+1');
 }
 function publicJob(job) {
@@ -552,14 +561,15 @@ function preview(db, ids) {
     if (typeof id !== 'string' || !/^\d{1,40}$/.test(id)) throw invalid();
     const work = recordedWork(db, id);
     if (!work) throw invalid();
+    const saved=db.prepare('SELECT status FROM maintenance_file_state WHERE work_id=?').get(id)?.status??work.localStatus;
     const group =
       work.remoteState === 'unavailable'
         ? 'unavailable'
         : !files.get(id)
           ? 'unsaved'
-          : ['checking', 'unknown'].includes(work.localStatus)
+          : ['checking', 'unknown'].includes(saved)
             ? 'checking'
-            : completed.get(id)
+            : saved!=='partial' && completed.get(id)
               ? 'complete'
               : 'partial';
     groups[group].push(id);
@@ -1383,6 +1393,12 @@ export function createDownloads({
     control,
     preview: (conn, ids) => preview(conn, ids).report,
     page: (db,input)=>downloadPage(db,input),
+    validateSelection:(db,{tab,ids})=>{
+      if(!Array.isArray(ids)||ids.length>10000||ids.some(id=>typeof id!=='string'||id.length>100))throw invalid();
+      const visible=new Set(db.prepare('SELECT j.id'+join+filterSql(tab)+' AND j.id IN(SELECT value FROM json_each(?))').all(JSON.stringify(ids)).map(r=>r.id));
+      const kept=ids.filter(id=>visible.has(id));
+      return {ids:kept,invalid:ids.length-kept.length};
+    },
     audioPage:(db,{page,filter})=>{
       const tab={all:'all',waiting:'waiting',running:'running',failed:'failed',complete:'complete'}[filter];
       if(!tab)throw invalid();

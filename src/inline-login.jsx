@@ -91,6 +91,7 @@ export function ServerInlineLogin({ api, onSuccess }) {
         </div>
       )}
       <p role="status">{error || loginMessages[view.phase]}</p>
+      {view.viewId&&<button className="text-button" onClick={()=>api.showQrExternalPage(view.viewId).catch(e=>setError(e.message))}>在独立窗口查看验证</button>}
       {view.phase === 'verification' && (
         <>
           {view.manual?.send && (
@@ -150,5 +151,83 @@ export function ServerInlineLogin({ api, onSuccess }) {
         </button>
       )}
     </div>
+  );
+}
+
+export function DetachedVerification({ api }) {
+  const [view, setView] = React.useState(null),
+    [error, setError] = React.useState(''),
+    [code, setCode] = React.useState(''),
+    [busy, setBusy] = React.useState(false);
+  useEffect(() => {
+    let live = true,
+      timer;
+    async function read() {
+      try {
+        const state = await api.verificationView();
+        if (live) {
+          setView(state);
+          timer = setTimeout(read, 1500);
+        }
+      } catch (e) {
+        if (live) setError(e.message);
+      }
+    }
+    void read();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [api]);
+  async function submit(action) {
+    setBusy(true);
+    setError('');
+    try {
+      const value = await api.verificationManual({
+        panelId: view.manual.panelId,
+        action,
+        ...(action === 'submit' && { code })
+      });
+      setView(value);
+      setCode('');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <main className="modal-content qr-login-body">
+      <h2>抖音官方验证</h2>
+      {view?.image && <img src={view.image} alt="抖音官方登录二维码" />}
+      <p role="status">{error || loginMessages[view?.phase]}</p>
+      {view?.manual?.send && (
+        <button className="button secondary" disabled={busy} onClick={() => submit('send')}>
+          请求抖音发送验证码
+        </button>
+      )}
+      {view?.manual?.code && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit('submit');
+          }}
+        >
+          <label>
+            抖音短信验证码
+            <input
+              required
+              autoComplete="off"
+              inputMode="numeric"
+              pattern="[0-9]{4,8}"
+              maxLength={8}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+          </label>
+          <button disabled={busy}>提交给抖音验证</button>
+        </form>
+      )}
+    </main>
   );
 }

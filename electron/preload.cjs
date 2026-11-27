@@ -1,40 +1,42 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const methods = ['flatPrepare','flatStart','flatPause','flatResume','flatRetry','flatCancel','flatClear','flatOpen','state','openAccount','startQrLogin','refreshQrLogin','cancelQrLogin','showQrLoginPage','checkQrLogin','setQrPageBounds','showQrExternalPage','finishLogin','logout','importLoginConfig','sync','stopSync','addCollections','importLink','download','pause','resume','cancelDownloads','repairVideoCover','setDownloadConcurrency','chooseRoot','openRoot','openFolder','openOriginal','prepareDelete','prepareNASRemoval','confirmNASRemoval','cancelNASRemoval','resumeNASRemoval','cancelLocalRemoval','confirmDelete','checkRepairs','startRepairs','pickerLocations','listDirectory','makeDirectory','setTags','checkSource','refreshFiles','clearCompleted','confirmLegacyAccount','openDiagnostics'];
-methods.push("nasCataloguePage","nasCatalogueGroups","refreshNASCatalogue","nasCatalogueWork","nasCataloguePreview","prepareNASRestore","confirmNASRestore","stopNASCatalogue","prepareCatalogueDeletion");
-methods.push('prepareScopedDeletion','confirmScopedDeletion','stopScopedDeletion','retryScopedDeletion','cancelPreparedDeletion','deletionPendingPage','refreshDeletionPending','resolveDeletionPending','stopDeletionResolution','validateDeletionSelection');
-methods.push('verifySources','markSourceUnavailable');
-const api = {};
-methods.push('stopWorkCreators','refreshWorkCreators','configureBackup','checkBackup','syncBackup','cancelBackup','acceptRemoteBackup','openBackupRecovery','previewExistingLibrary','importExistingLibrary','finishBackupExit');
-methods.push('startupReady','confirmCollectionRead','resumeReconcile','downloadPage','workDetail','cancelFileCheck','filterWorks');
-methods.push('addAuthor','readAuthor','archiveAuthor');
-methods.push('inspectDefects','startDefectRepair','resumeDefectRepair','stopDefectRepair');
-methods.push('defectPage','retryDownloads','reportCoverStatus');
-methods.push('previewDownloads');
-methods.push('cancelRepairs','repairPage');
-methods.push('openCache','audioPage','audioStatus','audioPrepare','audioRelease','audioRenew','audioRefresh','audioSave','audioPause','audioResume','audioCancel','audioRemove','cacheSettings','cacheClear','cacheStop');
-methods.push('readHistoryRuns','readHistoryItems','clearReadHistory');
-methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
-methods.push('defectOverview');
-methods.push('validateDefectSelection','validateDownloadSelection');
-methods.push('sourceLoginView','sourceManualLogin','sourceQrShown');
-methods.push('previewRemoval','confirmRemoval','previewRestore','restoreRemoval','controlRemoval','removalStatus','removalHistory','trashStatus','startTrashProbe','controlTrashProbe');
-methods.push('previewDownloadSelection','catalogueAction','listWorks','cataloguePosition','catalogueChoices','resolveSelection');
-methods.push('startRead','controlRead','historyItems');
-methods.push('serverIdentity','serverSession','serverGateReady','serverConnect','serverRelease','serverCommand','serverReceipt');
-api.windowRole=typeof process==='undefined'?'':process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17);
-api.onServerSession=callback=>{const listener=(_event,state)=>callback(state);ipcRenderer.on('cangxia:server-session',listener);return()=>ipcRenderer.removeListener('cangxia:server-session',listener);};
-let statePending=null;
-for (const method of methods) api[method] = async (...args) => {
-  const result = await ipcRenderer.invoke('cangxia:' + method, ...args);
-  if (!result.ok) throw new Error(result.error);
+const methods = [
+  'addAuthor', 'addCollections', 'archiveAuthor', 'audioCancel', 'audioPage', 'audioPause',
+  'audioPrepare', 'audioRefresh', 'audioRelease', 'audioRenew', 'audioResume', 'audioSave',
+  'audioStatus', 'cacheClear', 'cacheSettings', 'cacheStop', 'cancelBackup', 'cancelDownloads',
+  'cancelFileCheck', 'cancelQrLogin', 'cancelRepairs', 'cancelStorageSize', 'catalogueAction', 'catalogueChoices',
+  'cataloguePosition', 'checkRepairs', 'checkSource', 'clearCompleted', 'clearReadHistory', 'confirmCollectionRead',
+  'confirmRemoval', 'controlRead', 'controlRemoval', 'controlTrashProbe', 'defectOverview', 'defectPage',
+  'download', 'downloadPage', 'exportWorkDiagnostic', 'finishLogin', 'flatCancel', 'flatClear',
+  'flatOpen', 'flatPause', 'flatPrepare', 'flatResume', 'flatRetry', 'flatStart',
+  'historyItems', 'importLink', 'inspectDefects', 'listDirectory', 'listWorks', 'logout',
+  'makeDirectory', 'markSourceUnavailable', 'openCache', 'openDiagnostics', 'openOriginal', 'pause',
+  'pickerLocations', 'previewDownloadSelection', 'previewDownloads', 'previewRemoval', 'previewRestore', 'readAuthor',
+  'readHistoryItems', 'readHistoryRuns', 'refreshFiles', 'refreshQrLogin', 'refreshStorageSize', 'refreshWorkCreators',
+  'removalHistory', 'removalStatus', 'repairPage', 'repairVideoCover', 'reportCoverStatus', 'resolveSelection',
+  'restoreRemoval', 'resume', 'resumeDefectRepair', 'resumeReconcile', 'retryDownloads', 'serverCommand',
+  'serverConnect', 'serverGateReady', 'serverIdentity', 'serverReceipt', 'serverRelease', 'serverSession',
+  'setDownloadConcurrency', 'setTags', 'showQrExternalPage', 'sourceLoginView', 'sourceManualLogin', 'sourceQrShown',
+  'startDefectRepair', 'startQrLogin', 'startRead', 'startRepairs', 'startTrashProbe', 'startupReady',
+  'state', 'stopDefectRepair', 'stopSync', 'stopWorkCreators', 'storageUsage', 'sync',
+  'trashStatus', 'validateDefectSelection', 'validateDownloadSelection', 'verificationManual', 'verificationView', 'verifySources',
+  'workDetail'
+];
+const api = {
+  windowRole: typeof process === 'undefined' ? '' : process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17)
+};
+for(const method of methods)api[method]=async(...args)=>{
+  const result=await ipcRenderer.invoke('cangxia:'+method,...args);
+  if(!result.ok)throw Error(result.error);
   return result.data;
 };
 const fetchState=api.state;
-api.state=()=>{
-  if(!statePending)statePending=(async()=>{const state=await fetchState();if(!state.chunkedState)return state;const works=[];while(works.length<state.total){const result=await ipcRenderer.invoke('cangxia:stateChunk',state.token,works.length);if(!result.ok)throw new Error(result.error);if(!result.data.works.length)throw new Error('界面数据未完整返回');works.push(...result.data.works);}return {...state.head,works};})().finally(()=>{statePending=null;});
-  return statePending;
-};
-api.onChange = callback => { const listener = (_event, data) => callback(data); ipcRenderer.on('cangxia:change', listener); return () => ipcRenderer.removeListener('cangxia:change', listener); };
-api.onExitRequested=callback=>{const listener=()=>callback();ipcRenderer.on('cangxia:exit-requested',listener);return()=>ipcRenderer.removeListener('cangxia:exit-requested',listener);};
-api.onNotice = callback => {const listener=(_event,message)=>callback(message);ipcRenderer.on('cangxia:notice',listener);return()=>ipcRenderer.removeListener('cangxia:notice',listener);};
-contextBridge.exposeInMainWorld('cangxia', Object.freeze(api));
+let statePending;
+api.state=()=>statePending??=fetchState().finally(()=>{statePending=null;});
+for(const [method,channel] of Object.entries({onChange:'change',onNotice:'notice',onServerSession:'server-session'})){
+  api[method]=callback=>{
+    const listener=(_event,value)=>callback(value);
+    ipcRenderer.on('cangxia:'+channel,listener);
+    return ()=>ipcRenderer.removeListener('cangxia:'+channel,listener);
+  };
+}
+contextBridge.exposeInMainWorld('cangxia',Object.freeze(api));

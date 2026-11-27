@@ -1,4 +1,5 @@
 import {createRemovalService} from './removal.mjs';
+import {createMaintenance} from './maintenance.mjs';
 import {catalogueRevision,listWorks,catalogueChoices,cataloguePosition,catalogueDetail,confirmedSelection,confirmedPage} from './catalogue.mjs';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
@@ -87,6 +88,7 @@ export function createSessionService({
   const bootId = randomUUID(),
     libraryId = library.libraryId;
   const removal=createRemovalService({library,files:removalFiles??(downloads?.store&&downloads)});
+  const maintenance=createMaintenance({library,downloads});
   const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay, archive: downloads?.archive });
   const exportsByGrant = new Map();
@@ -156,6 +158,7 @@ export function createSessionService({
         return catalogueActions[action](db,ids,{...owner,selection,operationId:command.operationId});
       },
       ...removal.commands,
+      ...maintenance.commands,
       ...commands
     })
   );
@@ -166,7 +169,7 @@ export function createSessionService({
         const ids=confirmedSelection(db,{...input,confirmedCount:count},owner,{collect:true});
         return downloads.preview(db,ids);
       },'download-page':downloads.page,'preview-download':(db,{workIds})=>({...downloads.preview(db,workIds),revision:catalogueRevision(db)})}),
-      ...(downloads && {'audio-page':downloads.audioPage}),
+      ...(downloads && {'audio-page':downloads.audioPage,'validate-downloads':downloads.validateSelection}),
       'export-page': (db,{token,offset},{grant})=>{
         const batch=exportsByGrant.get(token);
         if(!batch || batch.generation!==grant.generation || !Number.isSafeInteger(offset) || offset<0) throw invalid();
@@ -193,6 +196,7 @@ export function createSessionService({
         return readState(db, state);
       },
       ...removal.queries,
+      ...maintenance.queries,
       ...queries
     })
   );
@@ -299,6 +303,7 @@ export function createSessionService({
           JSON.stringify(holder)
         );
         jobs.stopExpired(db, { bootId, generation });
+        db.exec("UPDATE maintenance_runs SET state='paused',reason='CHECK_INTERRUPTED',version=version+1 WHERE state='running'");
         save(db, who.accountId, operationId, digest, { generation });
         return { grant: { ...who, libraryId, bootId, generation, instanceId, proof, ttlMs }, until };
       });
@@ -420,6 +425,7 @@ export function createSessionService({
         return save(db, who.accountId, operationId, digest, { ...value, operationId, kind });
       });
       removal.wake(receipt);
+      if(['start-check','retry-repair','control-check'].includes(command.kind))maintenance.wake(receipt,service.sourceSession(who,grant));
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
       if(downloads && !(command.kind==='catalogue-action' && command.payload.action==='flat-download') && ['enqueue-download','control-audio','control-download','catalogue-action','set-tags','archive-author','add-folders'].includes(command.kind))void downloads.run().catch(()=>{});
@@ -431,7 +437,7 @@ export function createSessionService({
     close() {
       closed = true;
       forget();
-      return removal.close();
+      return Promise.all([removal.close(),maintenance.close()]);
     }
   };
   return service;

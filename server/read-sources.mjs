@@ -56,8 +56,8 @@ export function readWorkDetail(db, { id }) {
     }catch{metadata.invalidOriginal=true;}
   }
   if(work.sourceStatus){
-    const {state,reason,checkedAt}=work.sourceStatus;
-    metadata.sourceStatus={state,reason,checkedAt};
+    const {state,reason,checkedAt,method}=work.sourceStatus;
+    metadata.sourceStatus={state,reason,checkedAt,...(['manual','platform'].includes(method)&&{method})};
   }
   if (work.music) {
     const { id, title, author, duration, state, clip, mixPending } = work.music;

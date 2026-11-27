@@ -1,5 +1,6 @@
 // Launched only by the Windows integration test, using its private temporary profile.
-import { app, BrowserWindow, powerMonitor, shell, ipcMain } from 'electron';
+import {auditEntrypoints} from './compatibility-audit.mjs';
+import { app, BrowserWindow, powerMonitor, shell, ipcMain, dialog } from 'electron';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,15 +12,16 @@ app.setPath('appData', root);
 app.commandLine.appendSwitch('disable-gpu');
 // Hold only the specified fixture request after the normal HTTPS operation has completed.
 const handle=ipcMain.handle.bind(ipcMain);
+const channels=new Set();
 let hold;
-ipcMain.handle=(name,fn)=>handle(name,async(event,...args)=>{
+ipcMain.handle=(name,fn)=>{channels.add(name.slice('cangxia:'.length));return handle(name,async(event,...args)=>{
   const result=await fn(event,...args);
   if(name==='cangxia:workDetail'&&hold?.id===args[0]&&!hold.release){
     const pending=hold;
     await new Promise(resolve=>{pending.release=resolve;});
   }
   return result;
-});
+});};
 await import('../../electron/main.mjs');
 async function waitFor(fn) {
   const deadline = Date.now() + 20000;
@@ -84,6 +86,25 @@ app.whenReady().then(async () => {
     assert.equal((await js(win, 'window.cangxia.state()')).storage.mode, 'server');
     assert.equal(await js(win, 'window.cangxia.windowRole'), 'library');
     ipcMain.handle=handle;
+    const exposed=await js(win,"Object.keys(window.cangxia).filter(k=>typeof window.cangxia[k]==='function')");
+    const audit=auditEntrypoints(channels,exposed);
+    assert.equal(audit.rows,142);assert.equal(audit.migration,8);
+    await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
+    const buttonText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(label)})?.click()`);
+    await buttonText('检查与补齐');
+    await waitFor(()=>js(win,"document.querySelector('[data-maintenance-history]')"));
+    await buttonText('检查全部文件');
+    await waitFor(()=>js(win,"document.querySelector('[data-check-state]')?.dataset.checkState==='complete'"));
+    assert.ok(await js(win,"document.querySelector('[role=dialog]').textContent.includes('登记')"));
+    let chosen=0;
+    const destination=path.join(root,'selected-diagnostic.json'),save=dialog.showSaveDialog;
+    dialog.showSaveDialog=async()=>++chosen===1?{canceled:true}:{canceled:false,filePath:destination};
+    await buttonText('导出诊断');await waitFor(()=>chosen===1);assert.ok(!fs.existsSync(destination));
+    await buttonText('导出诊断');await waitFor(()=>fs.existsSync(destination));
+    assert.match(JSON.parse(fs.readFileSync(destination)).workId,/^\d+$/);assert.ok(!fs.readFileSync(destination,'utf8').includes(config.token));
+    dialog.showSaveDialog=save;
+    await js(win,"document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+    await waitFor(()=>js(win,"!document.querySelector('[role=dialog]')"));
     await waitFor(()=>js(win,"document.querySelectorAll('[data-work-id]').length===20"));
     const clickText=label=>js(win,`[...document.querySelectorAll('button')].find(b=>b.textContent.includes(${JSON.stringify(label)})).click()`);
     await clickText('全部结果全选');
@@ -159,6 +180,10 @@ app.whenReady().then(async () => {
     assert.equal(receipt.entityVersion, 1);
     await js(win, `document.querySelector('button[aria-label="设置"]').click()`);
     await waitFor(() => js(win, 'document.body.innerText.includes("查询 NAS 回执")'));
+    assert.equal(await js(win,"typeof window.cangxia.importLoginConfig"),'undefined');
+    assert.ok(await js(win,"document.querySelector('[role=dialog]').textContent.includes('在 NAS 官方登录并核验账号')"));
+    await buttonText('刷新存储占用');
+    await waitFor(()=>js(win,"document.querySelector('[role=dialog]').textContent.includes('NAS 统计已完成')"));
     await js(
       win,
       `const input=document.querySelector('.settings-content form input');

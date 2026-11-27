@@ -30,7 +30,7 @@ function strings(input, max = 100) {
 function scopeOptions(input) {
   const { source = 'total', sort = 'original', filter = {} } = input;
   if (
-    !['total', 'all', 'media', 'empty'].includes(source) &&
+    !['total', 'all', 'media', 'empty','maintenance'].includes(source) &&
     !(
       typeof source === 'string' &&
       /^(?:folder:\d{1,40}|author:[A-Za-z0-9_-]{1,240}|media-folder:\d{1,40})$/.test(source)
@@ -72,8 +72,9 @@ const videoFiles =
   "(SELECT count(*) FROM media_files WHERE work_id=w.id AND lower(relative_path) GLOB '*.mp4')";
 const imageFiles =
   "(SELECT count(*) FROM media_files WHERE work_id=w.id AND (lower(relative_path) GLOB '*.jpg' OR lower(relative_path) GLOB '*.jpeg' OR lower(relative_path) GLOB '*.webp' OR lower(relative_path) GLOB '*.png' OR lower(relative_path) GLOB '*.avif') AND lower(relative_path) NOT LIKE '%cover%')";
-const checking = "coalesce(json_extract(w.body,'$.localStatus'),'') IN ('checking','unknown')";
-const complete = `NOT (${checking}) AND EXISTS(SELECT 1 FROM download_jobs d WHERE d.work_id=w.id AND d.state='complete' AND d.id NOT LIKE 'audio:%' AND d.id NOT LIKE 'hd:%') AND CASE WHEN json_extract(w.body,'$.type')='images' THEN json_array_length(w.body,'$.images')>0 AND ${imageFiles}>=json_array_length(w.body,'$.images') ELSE ${videoFiles}>0 END`;
+const savedStatus="coalesce((SELECT status FROM maintenance_file_state WHERE work_id=w.id),json_extract(w.body,'$.localStatus'),'')";
+const checking = savedStatus+" IN ('checking','unknown')";
+const complete = `NOT (${checking}) AND ${savedStatus}<>'partial' AND EXISTS(SELECT 1 FROM download_jobs d WHERE d.work_id=w.id AND d.state='complete' AND d.id NOT LIKE 'audio:%' AND d.id NOT LIKE 'hd:%') AND CASE WHEN json_extract(w.body,'$.type')='images' THEN json_array_length(w.body,'$.images')>0 AND ${imageFiles}>=json_array_length(w.body,'$.images') ELSE ${videoFiles}>0 END`;
 const resolvedPerson = `cx_person(p.person,coalesce(
   (SELECT body FROM source_creator_profiles WHERE id='uid:'||json_extract(p.person,'$.uid')),
   (SELECT body FROM source_creator_profiles WHERE json_extract(body,'$.secUid')=nullif(json_extract(p.person,'$.secUid'),'') LIMIT 1)
@@ -97,9 +98,11 @@ function build({ source, sort, filter: f }) {
     order = 'w.rowid';
   const where = ["coalesce(json_extract(w.body,'$.readHidden'),0)=0"],
     args = [];
-  if (source !== 'media' && !source.startsWith('media-folder:')) where.push('NOT EXISTS(SELECT 1 FROM removed_work_records r WHERE r.work_id=w.id)');
+  const visibleRecord='NOT EXISTS(SELECT 1 FROM removed_work_records r WHERE r.work_id=w.id)';
+  if(source==='maintenance')where.push('('+visibleRecord+' OR EXISTS(SELECT 1 FROM media_files WHERE work_id=w.id))');
+  else if (source !== 'media' && !source.startsWith('media-folder:')) where.push(visibleRecord);
   if (source === 'empty') where.push('0');
-  else if (source === 'all' || source === 'media') {
+  else if (source === 'all' || source === 'media' || source==='maintenance') {
     from += " LEFT JOIN source_members m ON m.work_id=w.id AND m.source_id='total'";
     order = 'm.position IS NULL,m.order_generation DESC,m.position,w.rowid';
   } else {
@@ -159,7 +162,7 @@ function summary(db, id) {
   const detail = readWorkDetail(db, { id });
   const media = db
     .prepare(
-      `SELECT ${hasMedia} AS local,${complete} AS downloaded,${bytes} AS size,json_extract(w.body,'$.localStatus') AS saved_status FROM works w WHERE id=?`
+      `SELECT ${hasMedia} AS local,${complete} AS downloaded,${bytes} AS size,${savedStatus} AS saved_status FROM works w WHERE id=?`
     )
     .get(id);
   const rows = db

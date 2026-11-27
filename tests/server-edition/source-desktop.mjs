@@ -46,6 +46,12 @@ app.whenReady().then(async () => {
     await waitFor(() => js(win, '!!document.querySelector(".account-button")'));
     await js(win, 'document.querySelector(".account-button").click()');
     await waitFor(() => js(win, '!!document.querySelector(\'img[alt="抖音官方登录二维码"]\')'));
+    assert.ok(await js(win,"[...document.querySelectorAll('button')].some(b=>b.textContent==='在独立窗口查看验证')"));
+    await js(win,"[...document.querySelectorAll('button')].find(b=>b.textContent==='在独立窗口查看验证').click()");
+    const detached=await waitFor(()=>BrowserWindow.getAllWindows().find(w=>w!==win&&w!==gate&&w.isVisible()));
+    await waitFor(()=>js(detached,"!!document.querySelector('img[alt=抖音官方登录二维码]')"));
+    await assert.rejects(js(detached,'window.cangxia.state()'),/无使用权/);
+    detached.close();
     await js(
       win,
       `[...document.querySelectorAll('button')].find(b=>b.textContent.includes('核验账号')).click()`

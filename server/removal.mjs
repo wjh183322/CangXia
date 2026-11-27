@@ -201,7 +201,8 @@ export function createRemovalService({ library, files }) {
     adapter.check(p.binding);
     return p.binding;
   }
-  function preview(db, { payload: { scope, selection } }, owner) {
+  function preview(db, { payload: { scope, selection, asset } }, owner) {
+    if (asset !== undefined && (asset !== 'audio' || scope !== 'files')) throw stale();
     if (!['membership', 'records', 'files'].includes(scope)) throw stale();
     if (!selection || typeof selection.source !== 'string') throw stale();
     const source = selection.source;
@@ -225,7 +226,9 @@ export function createRemovalService({ library, files }) {
     for (const id of ids) {
       const work = db.prepare('SELECT title,body FROM works WHERE id=?').get(id);
       const members = db.prepare('SELECT * FROM source_members WHERE work_id=? ORDER BY source_id').all(id);
-      const media = db.prepare('SELECT * FROM media_files WHERE work_id=? ORDER BY relative_path').all(id);
+      const media = asset==='audio'
+        ? db.prepare("SELECT * FROM archive_resources WHERE work_id=? AND key='audio' AND kind='audio' ORDER BY relative_path").all(id)
+        : db.prepare('SELECT * FROM media_files WHERE work_id=? ORDER BY relative_path').all(id);
       const tags = db
         .prepare('SELECT tag FROM work_tags WHERE work_id=? ORDER BY tag')
         .all(id)
@@ -631,6 +634,11 @@ export function createRemovalService({ library, files }) {
   }
   function control(db, { payload: { token, action, ordinal, restored } }, owner) {
     const b = batch(db, token, owner);
+    if(action==='discard'){
+      if(b.state!=='preview'||!belongs(owner,b))throw stale();
+      mark(db,token,'discarded',b.body);
+      return {token};
+    }
     if (action === 'manual') {
       if (
         !legacy(b) ||
@@ -834,7 +842,7 @@ export function createRemovalService({ library, files }) {
       if (!Number.isSafeInteger(offset) || offset < 0) throw stale();
       return db
         .prepare(
-          "SELECT * FROM removal_batches WHERE account=? AND state<>'preview' ORDER BY created DESC,rowid DESC LIMIT 20 OFFSET ?"
+          "SELECT * FROM removal_batches WHERE account=? AND state NOT IN ('preview','discarded') ORDER BY created DESC,rowid DESC LIMIT 20 OFFSET ?"
         )
         .all(owner.who.accountId, offset)
         .map((row) => receiptView(db, parse(row)));

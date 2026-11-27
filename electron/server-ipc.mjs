@@ -8,6 +8,7 @@ export function registerCatalogueHandlers({ ipc, client }) {
     ipc(method,'workspace',payload=>client.query(kind,payload??{}));
   const control = (action, ids = null, extra = {}) => command('control-download', { action, ids, ...extra });
   ipc('downloadPage', 'workspace', (query) => client.query('download-page', query));
+  ipc('validateDownloadSelection','workspace',query=>client.query('validate-downloads',query));
   ipc('previewDownloads', 'workspace', (workIds) => client.query('preview-download', { workIds }));
   ipc('repairVideoCover', 'workspace', (workIds, revision) =>
     command('enqueue-download', { workIds, selection: 'repair-cover', revision })

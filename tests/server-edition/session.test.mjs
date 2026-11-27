@@ -7,7 +7,7 @@ import test from 'node:test';
 import selfsigned from 'selfsigned';
 import { openLibrary } from '../../server/library.mjs';
 
-const token = 'a'.repeat(48);
+const token = 'test-only-device-A-credential-47c8302e451d835c';
 const credentials = { A: { accountId: 'family', token }, B: { accountId: 'family', token: 'b'.repeat(48) } };
 const cert = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
   keySize: 2048,
