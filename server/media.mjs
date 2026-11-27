@@ -78,7 +78,8 @@ function describe(db, work) {
   for (const row of db
     .prepare("SELECT * FROM archive_resources WHERE work_id=? AND kind<>'metadata'")
     .all(work.id)) {
-    if (!['image', 'video', 'audio'].includes(row.kind) || (row.key === 'cover-hd' && row.key !== hd?.key))
+    if (!['image', 'video', 'audio'].includes(row.kind) || /^cover-hd-[a-f0-9]{16}$/.test(row.key) ||
+        (row.key === 'cover-hd' && row.key !== hd?.key))
       continue;
     if (row.key === 'audio' && work.music?.id) {
       const expected = contentHash({

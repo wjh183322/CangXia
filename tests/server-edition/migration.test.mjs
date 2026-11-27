@@ -18,7 +18,8 @@ import { gzipSync } from 'node:zlib';
 import { Store } from '../../electron/store.mjs';
 import { DownloadQueue } from '../../electron/downloads.mjs';
 import { HDCover } from '../../electron/hd-cover.mjs';
-import { listWorks } from '../../server/catalogue.mjs';
+import { catalogueDetail, listWorks } from '../../server/catalogue.mjs';
+import {imageDimensions} from '../../electron/media-info.mjs';
 import { historyRuns, historyItems } from '../../server/read-history.mjs';
 import * as recovery from '../../server/recovery.mjs';
 import { mediaList } from '../../server/media.mjs';
@@ -1010,7 +1011,8 @@ test('native cover-only failure retains archived video and projects safe diagnos
     13: 'Authorization: Basic concealed-value',
     14: null,
     15: 'upstream error: access_token=SYNTHETIC_FIXTURE',
-    16: 'No YUV/RGB match'
+    16: 'No YUV/RGB match',
+    17: null, 18: null
   };
   const reasons = {
     15: ['upstream error: access_token=SYNTHETIC_FIXTURE', '{"refreshToken":"SYNTHETIC_REFRESH"}'],
@@ -1080,6 +1082,18 @@ test('native cover-only failure retains archived video and projects safe diagnos
       const save = queue.saveWork({ id, coverOnly: true }, new AbortController().signal);
       if (message) await assert.rejects(save, /未取得/);
       else await save;
+      if (id === '17' || id === '18') {
+        const d=store.download(id),signal=new AbortController().signal;
+        for (const [file,source] of [[path.join(homeDir,'单图.png'),'cover'],
+          [new URL('../../assets/icon.png',import.meta.url),'origin_cover']]) {
+          const bytes=fs.readFileSync(file),temp=path.join(root,'平台样本.png');
+          fs.writeFileSync(temp,bytes);
+          queue.hdCovers.publish(d,{kind:'image',source,...imageDimensions(bytes)},temp,signal);
+        }
+        queue.saveMetadata(w,d);
+        if(id==='18')d.hdCover.width++; // This receipt no longer matches the native JSON or the pixels.
+        store.put('downloads',id,d);
+      }
       assert.equal(store.download(id).state, 'complete');
       const native = JSON.parse(fs.readFileSync(path.join(homeDir, '作品信息.json')));
       if (message) assert.equal(native.hdCover.message, message);
@@ -1166,6 +1180,16 @@ test('native cover-only failure retains archived video and projects safe diagnos
         videoHeight: 1
       });
       assert.ok(!JSON.stringify(pre).includes('concealed-value'));
+      const originalHD=store.download('17').hdCover.key;
+      assert.match(originalHD,/^cover-hd-[a-f0-9]{16}$/);
+      const detail=lib.read(db=>catalogueDetail(db,{id:'17'}));
+      assert.equal(detail.hdCover?.key,'cover-hd');
+      assert.equal(detail.mediaCover.resourceId,'17:cover-hd');
+      assert.equal(detail.hdCover.sha256,hash(fs.readFileSync(new URL('../../assets/icon.png',import.meta.url))));
+      assert.equal(lib.read(db=>catalogueDetail(db,{id:'18'})).hdCover,null);
+      assert.equal(JSON.parse(info('17')).hdCover.key,originalHD);
+      assert.equal(info('17'),fs.readFileSync(path.join(media,'收藏','旧作品17','作品信息.json'),'utf8'));
+      assert.ok(pre.conflicts.some(c=>c.type==='hdCover'&&c.key==='18'));
       assert.ok(pre.conflicts.some((c) => c.reason.includes('hdCover.message') && c.reason.includes('隐去')));
       const restored = await recovery.restoreApproved({
         snapshot: result.snapshot,
@@ -1176,7 +1200,8 @@ test('native cover-only failure retains archived video and projects safe diagnos
         confirmed: true,
         target: path.join(root, 'playable')
       });
-      assert.equal(restored.verifiedPlayback, 12);
+      assert.equal(restored.verifiedPlayback, 17);
+      assert.equal(restored.inactiveMedia.length,3);
       assert.ok(!fs.readFileSync(path.join(result.snapshot, 'library.sqlite')).includes('concealed-value'));
     } finally {
       lib.close();

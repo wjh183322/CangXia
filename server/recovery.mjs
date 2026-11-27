@@ -315,6 +315,8 @@ async function verifyReadable(store, rows, guard, head = false) {
             })
         )
           inactiveReason = '已保留先前配乐，当前作品音乐身份已更新';
+      } else if (!item?.saved && r.key==='cover-hd-'+r.sha256.slice(0,16) && proof?.legacyCoverKey===r.key){
+        inactiveReason='已保留旧版高清变体，当前选择未绑定此文件';
       } else if (!item?.saved && r.key === 'cover-hd' && !currentHDCover(store.db, r.work_id)) {
         const historical = store.db
           .prepare(

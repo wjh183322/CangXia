@@ -12,6 +12,7 @@ import { readLegacyOrder } from './legacy-order.mjs';
 import { normalizeScope, validateScopeCommand } from '../shared/backup-scopes.mjs';
 import { memberScopeKey, pastMemberDeletes, earlierMemberDelete } from './legacy-deletion-evidence.mjs';
 import { child, readCopy, segment, digest } from './rehearsal-files.mjs';
+import {verifyFormat} from './downloads.mjs';
 
 const pick = (value, fields) =>
   Object.fromEntries(
@@ -160,6 +161,7 @@ function projectMetadata(source, proof, workId) {
 
 export async function reconcile(sources, uid) {
   const groups = new Map(),
+    hdClaims = new Map(),
     denied = new Map(),
     conflicts = [],
     identities = [],
@@ -304,6 +306,11 @@ export async function reconcile(sources, uid) {
       ) {
         add('tags', key, [...new Set(b.tags)].sort(), key);
       } else if (['downloads', 'backup_downloads'].includes(table) && validId(key)) {
+        if (!historical && b.hdCover?.status === 'ready') {
+          const claims=hdClaims.get(key)??[];
+          claims.push({hd:b.hdCover,records:b.assets??[]});
+          hdClaims.set(key,claims);
+        }
         if (b.backupDeleted || b.backupRemoved)
           legacyFlags.push({ origin, s: { workId: key, kind: 'files', sourceId: '' } });
         if (table === 'downloads' && source.kind !== 'nas' && b.path) {
@@ -857,7 +864,8 @@ export async function reconcile(sources, uid) {
       issue(origin, 'asset', key, '旧配乐和作品音乐身份不符');
       continue;
     }
-    if (!/^(?:video|cover|thumbnail|audio|metadata|image-\d+)$/.test(a.key)) {
+    const legacyHD = /^cover-hd-[a-f0-9]{16}$/.test(a.key);
+    if (!legacyHD && !/^(?:video|cover|thumbnail|audio|metadata|image-\d+)$/.test(a.key)) {
       issue(origin, 'asset', key, '未知资源类型');
       continue;
     }
@@ -881,7 +889,8 @@ export async function reconcile(sources, uid) {
       !proof ||
       (a.sha256 && a.sha256 !== proof.sha256) ||
       (a.size != null && a.size !== proof.size) ||
-      !proof.size
+      !proof.size ||
+      (legacyHD && (a.kind !== 'image' || a.sha256 !== proof.sha256 || a.key !== 'cover-hd-'+proof.sha256.slice(0,16)))
     ) {
       issue(origin, 'asset', key, '文件缺失、大小或哈希不匹配');
       continue;
@@ -910,6 +919,7 @@ export async function reconcile(sources, uid) {
     unlinked.delete(proof.index + '/' + proof.relative);
     const value = {
       key: a.key,
+      ...(legacyHD ? {legacyCoverKey:a.key} : {}),
       work: id,
       kind: ['audio', 'video', 'metadata'].includes(a.key) ? a.key : 'image',
       relative,
@@ -941,6 +951,23 @@ export async function reconcile(sources, uid) {
     assets.push(a);
   }
   const fileOwned = new Set(assets.map((a) => a.work));
+  const byWork = new Map();
+  for(const a of assets){
+    const group=byWork.get(a.work)??new Map();
+    group.set(a.key,a);byWork.set(a.work,group);
+  }
+  for(const [id,claims] of hdClaims){
+    const group=byWork.get(id);
+    if(!group)continue;
+    try{
+      const attested=await verifiedLegacyCover(group,claims,sources);
+      const asset=group.get(attested.nativeKey);
+      asset.key=attested.nativeKey==='cover'?'cover':'cover-hd';
+      asset.hdCover={accepted:true,key:asset.key,source:attested.source,width:attested.width,height:attested.height,sha256:asset.sha256};
+    }catch{
+      issue('合并','hdCover',id,'旧端高清选择与同次归档的原视频、参考图、输出字节或作品信息不一致，保留原件供核对');
+    }
+  }
   const heldWorks = new Set(
     [...output.values()]
       .filter(
@@ -964,4 +991,36 @@ export async function reconcile(sources, uid) {
     identity.held = conflicts.filter((c) => c.source === identity.source).length;
   }
   return { rows: [...output.values()], assets, conflicts, identities };
+}
+
+async function verifiedLegacyCover(assets,claims,sources){
+  const check=value=>{if(!value)throw Error('unmatched native cover');};
+  const pathOf=a=>child(sources[a.from.index].directory,a.from.relative);
+  const video=assets.get('video'),reference=assets.get('cover'),meta=assets.get('metadata');
+  check(video&&reference&&meta);
+  const json=JSON.parse(meta.metadataJSON??fs.readFileSync(pathOf(meta),'utf8'));
+  const hd=claims[0].hd,chosen=assets.get(hd.key);
+  check(chosen && (hd.key==='cover'||chosen.legacyCoverKey===hd.key));
+  const signal=new AbortController().signal;
+  const mime={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.avif':'image/avif','.webp':'image/webp'};
+  const verify=(a,type)=>verifyFormat({file:pathOf(a),size:a.size},type,signal);
+  await verify(video,'video/mp4');
+  const dims=await verify(chosen,mime[path.extname(chosen.relative).toLowerCase()]);
+  if(chosen!==reference)await verify(reference,mime[path.extname(reference.relative).toLowerCase()]);
+  check(dims.width===hd.width&&dims.height===hd.height && contentHash(json.hdCover)===contentHash(hd));
+  check(['video_frame','cover','origin_cover','cover_original_scale','platform'].includes(hd.source));
+  for(const claim of claims){
+    check(contentHash(claim.hd)===contentHash(hd));
+    for(const a of new Set([video,reference,chosen])){
+      const record=claim.records.find(r=>r.key===a.key), item=json.assets.find(r=>r.key===a.key);
+      check(record && item && record.sha256===a.sha256 && record.size===a.size &&
+        record.file===path.posix.basename(a.relative) && item.file===record.file && item.size===record.size);
+      if(a===chosen && chosen.legacyCoverKey)check(record.source===hd.source && item.source===hd.source &&
+        record.width===dims.width && record.height===dims.height && item.width===dims.width && item.height===dims.height &&
+        contentHash(record.match??null)===contentHash(hd.match??null) && contentHash(item.match??null)===contentHash(hd.match??null));
+    }
+  }
+  if(hd.source==='video_frame')check(Number.isSafeInteger(hd.match?.frame)&&hd.match.frame>=0 &&
+    Number.isFinite(hd.match.seconds) && Number.isFinite(hd.match.correlation));
+  return {nativeKey:hd.key,source:hd.source,width:dims.width,height:dims.height};
 }

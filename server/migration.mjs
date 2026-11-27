@@ -100,6 +100,7 @@ function saveImportedDownloads(db, rows, assets) {
   for (const a of assets) {
     const set = verified.get(a.work) ?? new Set();
     set.add(a.key);
+    if(a.legacyCoverKey)set.add(a.legacyCoverKey);
     verified.set(a.work, set);
   }
   function put(job, hidden) {
@@ -261,6 +262,11 @@ function populate(db, uid, rows, assets, media) {
     );
   }
   saveImportedDownloads(db, rows, assets);
+  const assetsByWork=new Map();
+  for(const a of assets){
+    const group=assetsByWork.get(a.work)??new Map();
+    group.set(a.key,a.sha256);assetsByWork.set(a.work,group);
+  }
   let revision = 0;
   for (const a of assets) {
     const file = child(media, a.relative),
@@ -284,6 +290,7 @@ function populate(db, uid, rows, assets, media) {
         identity: idOf(stat),
         mtimeNs: String(stat.mtimeNs),
         registeredChangeNs: String(stat.ctimeNs),
+        ...(a.legacyCoverKey ? {legacyCoverKey:a.legacyCoverKey} : {}),
         ...(a.musicId
           ? {
               resourceIdentity: contentHash({
@@ -298,6 +305,11 @@ function populate(db, uid, rows, assets, media) {
       }),
       revision
     );
+    if(a.hdCover){
+      // All three byte identities were checked against the same native download and its metadata.
+      const source=assetsByWork.get(a.work);
+      db.prepare('INSERT INTO hd_covers VALUES(?,?,?,?)').run(a.work,source.get('video'),source.get('cover'),JSON.stringify(a.hdCover));
+    }
   }
   db.prepare('UPDATE download_options SET revision=max(revision,?)').run(revision);
 }
