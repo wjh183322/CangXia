@@ -101,8 +101,10 @@ function ipc(name, access, action) {
     }
   });
 }
-async function openWorkspace() {
-  const state = await client.acquire(),
+async function openWorkspace(config, displayedEpoch) {
+  if (!Number.isSafeInteger(displayedEpoch)) throw Error('资料库已锁定，请重新连接。');
+  const { attempt } = await client.connect(config, displayedEpoch);
+  const state = await client.acquire(attempt),
     epoch = state.epoch;
   client.assert(epoch);
   const win = createWindow('library');
@@ -172,8 +174,7 @@ app
     ipc('serverGateReady', 'gate', () =>
       diagnostics.record({ event: 'startup-stage', name: 'connection-visible' })
     );
-    ipc('serverConnect', 'gate', (config) => client.connect(config));
-    ipc('serverAcquire', 'gate', openWorkspace);
+    ipc('serverConnect', 'gate', openWorkspace);
     ipc('serverRelease', 'workspace', () => client.release());
     ipc('serverReceipt', 'workspace', (id) => client.receipt(id));
     ipc('serverCommand', 'workspace', (command) => client.command(command));

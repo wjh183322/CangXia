@@ -40,6 +40,21 @@ app.whenReady().then(async () => {
     assert.equal(await js(gate, 'window.cangxia.windowRole'), 'connection');
     assert.ok(await js(gate, 'document.body.innerText.includes("连接 NAS 资料库")'));
     await assert.rejects(js(gate, 'window.cangxia.state()'), /无使用权/);
+    // Deliver the native wake notification exactly after pinned status succeeds
+    // and before the same user's click can request a lease.
+    const send = gate.webContents.send.bind(gate.webContents);
+    let wakeBetweenStages = true;
+    gate.webContents.send = (channel, ...args) => {
+      send(channel, ...args);
+      if (
+        wakeBetweenStages &&
+        channel === 'cangxia:server-session' &&
+        args[0]?.reason === '可以取得使用权。'
+      ) {
+        wakeBetweenStages = false;
+        powerMonitor.emit('resume');
+      }
+    };
     const fields = JSON.stringify([config.url, config.deviceId, config.fingerprint, config.token]);
     await js(
       gate,
@@ -48,6 +63,11 @@ app.whenReady().then(async () => {
     el.dispatchEvent(new Event('input',{bubbles:true}));
   }); document.querySelector('form button').click();`
     );
+    await waitFor(() => js(gate, 'document.body.innerText.includes("资料库已锁定，请重新连接。")'));
+    assert.equal(BrowserWindow.getAllWindows().length, 1);
+    assert.equal((await js(gate, 'window.cangxia.serverSession()')).owned, false);
+    gate.webContents.send = send;
+    await js(gate, "document.querySelector('form button').click()");
     const win = await waitFor(() => BrowserWindow.getAllWindows().find((w) => w !== gate && w.isVisible()));
     await waitFor(() => js(win, 'document.body.innerText.includes("释放使用权")'));
     assert.equal((await js(win, 'window.cangxia.state()')).storage.mode, 'server');

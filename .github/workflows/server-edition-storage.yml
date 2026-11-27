@@ -7,6 +7,9 @@ on:
       - 'server/**'
       - 'shared/server-identity.mjs'
       - 'tests/server-edition/**'
+      - 'electron/server-client.mjs'
+      - 'package.json'
+      - 'package-lock.json'
       - '.github/workflows/server-edition-storage.yml'
   workflow_dispatch:
 
@@ -26,5 +29,6 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
+      - run: npm ci --include=dev --ignore-scripts --no-audit --no-fund
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
       - run: npm test --prefix server

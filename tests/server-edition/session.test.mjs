@@ -402,3 +402,139 @@ test(
     assert.equal(fs.readFileSync(file, 'utf8'), 'unverified');
   }
 );
+
+test('a completed connection attempt cannot acquire after the desktop locked', async () => {
+  const { ServerClient } = await import('../../electron/server-client.mjs');
+  const libraryId = randomUUID(),
+    calls = [];
+  const client = new ServerClient({
+    request: async (_config, route, body) => {
+      calls.push(route);
+      if (route === 'status') return { occupied: false, protocolVersion: 1 };
+      return {
+        libraryId,
+        bootId: randomUUID(),
+        accountId: 'family',
+        deviceId: 'A',
+        instanceId: body.instanceId,
+        generation: 1,
+        proof: 'b'.repeat(64),
+        ttlMs: 20000
+      };
+    }
+  });
+  const config = { url: 'https://localhost', deviceId: 'A', token, fingerprint: '88'.repeat(32) };
+  const prior = await client.connect(config);
+  client.lock('电脑已唤醒');
+  await assert.rejects(client.acquire(prior.attempt), /锁定/);
+  assert.deepEqual(calls, ['status']);
+  const fresh = await client.connect(config);
+  await client.acquire(fresh.attempt);
+  assert.deepEqual(calls, ['status', 'status', 'acquire']);
+  client.lock();
+});
+test('release replay is bound to the issuing device, instance and current service boot', async (t) => {
+  const { sessions, library } = await fixture(t);
+  const grant = sessions.acquire(identity('A'), request(library, 'A')),
+    id = randomUUID();
+  const result = sessions.release(identity('A'), grant, id);
+  const active = sessions.acquire(identity('B'), request(library, 'B'));
+  assert.deepEqual(sessions.release(identity('A'), grant, id), result);
+  for (const changed of [
+    { ...grant, deviceId: 'B' },
+    { ...grant, instanceId: randomUUID() }
+  ]) {
+    assert.throws(
+      () => sessions.release(identity(changed.deviceId), changed, id),
+      (e) => [403, 409].includes(e.status)
+    );
+  }
+  assert.equal(
+    sessions.read(identity('B'), active, () => 1),
+    1
+  );
+  const { createSessionService } = await import('../../server/session.mjs');
+  const next = createSessionService({ library });
+  t.after(() => next.close());
+  assert.throws(
+    () => next.release(identity('A'), grant, id),
+    (e) => e.status === 403
+  );
+  assert.throws(
+    () => sessions.release(identity('A'), grant, id),
+    (e) => e.status === 403
+  );
+});
+
+test('lost acquire and release acknowledgements survive relaunch; only an explicit fresh attempt can recover', async (t) => {
+  const { ServerClient } = await import('../../electron/server-client.mjs');
+  const { sessions } = await fixture(t);
+  const config = { url: 'https://localhost', deviceId: 'A', token, fingerprint: '88'.repeat(32) };
+  let saved = {},
+    dropAcquire = true,
+    dropRelease = true,
+    releaseId,
+    releaseCalls = 0;
+  const profile = {
+    load: () => structuredClone(saved),
+    save: (value) => {
+      saved = structuredClone(value);
+    }
+  };
+  const acquisitions = [],
+    receipts = [];
+  const request = async (config, route, body) => {
+    const who = identity(config.deviceId);
+    if (route === 'status') return sessions.status();
+    if (route === 'acquire') {
+      acquisitions.push(structuredClone(body));
+      const grant = sessions.acquire(who, body);
+      if (dropAcquire) {
+        dropAcquire = false;
+        throw Error('lost acquire ack');
+      }
+      return grant;
+    }
+    if (route === 'release') {
+      releaseCalls++;
+      const value = sessions.release(who, body.grant, body.operationId);
+      releaseId = body.operationId;
+      if (dropRelease) {
+        dropRelease = false;
+        throw Error('lost release ack');
+      }
+      return value;
+    }
+    if (route === 'receipt') {
+      receipts.push(body.operationId);
+      return sessions.receipt(who, body.grant, body.operationId);
+    }
+  };
+  const first = new ServerClient({ profile, request });
+  const initial = await first.connect(config);
+  await assert.rejects(first.acquire(initial.attempt), /lost acquire/);
+  assert.equal(first.state().owned, false);
+  const recovered = new ServerClient({ profile, request });
+  t.after(() => recovered.lock());
+  const status = await recovered.connect();
+  assert.equal(status.occupied, true);
+  assert.equal(recovered.state().owned, false);
+  await recovered.acquire(status.attempt);
+  assert.deepEqual(acquisitions[1], acquisitions[0]);
+  await Promise.all([
+    assert.rejects(recovered.release(), /lost release/),
+    assert.rejects(recovered.release(), /lost release/)
+  ]);
+  assert.equal(releaseCalls, 1);
+  assert.equal(recovered.state().owned, false);
+  assert.ok(JSON.stringify(saved).includes(releaseId));
+  const next = new ServerClient({ profile, request });
+  t.after(() => next.lock());
+  const fresh = await next.connect();
+  assert.equal(next.state().owned, false);
+  assert.deepEqual(receipts, []);
+  await next.acquire(fresh.attempt);
+  assert.deepEqual(next.state().recent, { operationId: releaseId, confirmed: true });
+  assert.deepEqual(receipts, [releaseId]);
+  assert.ok(!JSON.stringify(saved).includes(releaseId));
+});

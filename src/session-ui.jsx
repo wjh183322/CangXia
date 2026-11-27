@@ -55,9 +55,8 @@ export function ServerConnection({api}){
     const config={url:form.url.trim(),deviceId:form.deviceId.trim(),fingerprint:form.fingerprint.trim(),token:form.token};
     try{
       if(acceptLibrary)config.libraryId=null;
-      await api.serverConnect(config);
       setForm(previous=>({...previous,token:''}));
-      await api.serverAcquire();
+      await api.serverConnect(config,state.epoch);
       setChangedLibrary(false);setAcceptLibrary(false);
     }catch(e){setError(e.message);setChangedLibrary(e.message.includes('资料库身份已更换'));}
     finally{setBusy(false);}

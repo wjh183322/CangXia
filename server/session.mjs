@@ -197,16 +197,22 @@ export function createSessionService({
         grant.accountId !== who.accountId ||
         grant.deviceId !== who.deviceId ||
         grant.libraryId !== libraryId ||
+        grant.bootId !== bootId ||
         typeof grant.proof !== 'string'
       )
         throw stale();
       const digest = contentHash({
         kind: 'release',
+        accountId: who.accountId,
+        deviceId: who.deviceId,
+        instanceId: grant.instanceId,
+        libraryId,
         bootId: grant.bootId,
         generation: grant.generation,
         proof: hash(grant.proof)
       });
       const result = library.write((db) => {
+        current(db);
         const saved = receiptRow(db, who.accountId, operationId, digest);
         if (saved) return saved;
         checked(db, who, grant);

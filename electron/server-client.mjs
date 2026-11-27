@@ -158,7 +158,11 @@ export class ServerClient {
     return { url, fingerprint, deviceId, libraryId };
   }
   save() {
-    this.profile?.save({ config: this.saved.config, pending: this.pending });
+    this.profile?.save({
+      config: this.saved.config,
+      pending: this.pending,
+      acquireIntent: this.saved.acquireIntent
+    });
   }
   state() {
     const owned = !!this.grant && this.now() < this.deadline;
@@ -187,6 +191,7 @@ export class ServerClient {
     this.reconciling = false;
     this.recent = null;
     this.closing = false;
+    this.releaseTask = null;
     this.emit();
   }
   assert(epoch = this.epoch) {
@@ -200,7 +205,8 @@ export class ServerClient {
     this.assert();
     return this.scope.signal;
   }
-  async connect(input = {}) {
+  async connect(input = {}, displayedEpoch = this.epoch) {
+    if (displayedEpoch !== this.epoch) throw locked();
     this.lock();
     this.config = null;
     const epoch = this.epoch,
@@ -225,7 +231,7 @@ export class ServerClient {
     this.save();
     this.reason = status.occupied ? '另一台电脑正在使用资料库。' : '可以取得使用权。';
     this.emit();
-    return status;
+    return { ...status, attempt: epoch };
   }
   schedule(grant, start) {
     if (
@@ -249,20 +255,50 @@ export class ServerClient {
     );
     this.heartbeat.unref?.();
   }
-  async acquire() {
-    if (!this.config) throw locked();
+  async requestGrant(epoch) {
+    const config = this.config;
+    const scope = createHash('sha256')
+      .update(
+        JSON.stringify([config.url, config.fingerprint, config.deviceId, config.libraryId, config.token])
+      )
+      .digest('hex');
+    let previous = this.saved.acquireIntent?.scope === scope ? this.saved.acquireIntent.body : null;
+    for (;;) {
+      if (epoch !== this.epoch) throw locked();
+      const body = previous ?? {
+        libraryId: config.libraryId,
+        deviceId: config.deviceId,
+        instanceId: randomUUID(),
+        operationId: randomUUID()
+      };
+      this.saved.acquireIntent = { scope, body };
+      this.save();
+      const start = this.now();
+      try {
+        const grant = await this.request(config, 'acquire', body, this.scope.signal);
+        return { grant, instanceId: body.instanceId, start };
+      } catch (error) {
+        if (epoch !== this.epoch) throw locked();
+        if (error.status >= 400 && error.status < 500) {
+          delete this.saved.acquireIntent;
+          this.save();
+        }
+        // A fresh click can create a new lease after the server positively
+        // rejects an older, expired acquire receipt. Never replay after a local lock.
+        if (previous && error.code === 'SESSION_LOST') {
+          previous = null;
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+  async acquire(attempt = this.epoch) {
+    if (attempt !== this.epoch || !this.config) throw locked();
     this.lock();
-    const epoch = this.epoch,
-      start = this.now(),
-      instanceId = randomUUID(),
-      operationId = randomUUID();
+    const epoch = this.epoch;
     try {
-      const grant = await this.request(
-        this.config,
-        'acquire',
-        { libraryId: this.config.libraryId, deviceId: this.config.deviceId, instanceId, operationId },
-        this.scope.signal
-      );
+      const { grant, instanceId, start } = await this.requestGrant(epoch);
       if (epoch !== this.epoch) throw locked();
       if (
         !grant ||
@@ -281,6 +317,7 @@ export class ServerClient {
         throw Error('NAS 资料库身份已更换。');
       this.config.libraryId = grant.libraryId;
       this.saved.config = this.config;
+      delete this.saved.acquireIntent;
       this.save();
       this.schedule(grant, start);
       this.reason = '已取得使用权。';
@@ -390,13 +427,25 @@ export class ServerClient {
   }
   async release() {
     this.assert();
+    this.releaseTask ??= this.releaseCurrent();
+    return this.releaseTask;
+  }
+  async releaseCurrent() {
     const epoch = this.epoch;
     this.closing = true;
     try {
       await Promise.allSettled([...this.inFlight]);
       this.assert(epoch);
       await this.reconcile();
-      await this.call('release', { operationId: randomUUID() });
+      this.assert(epoch);
+      const key = this.scopeKey,
+        operationId = randomUUID();
+      this.pending[key] = [...(this.pending[key] ?? []), operationId];
+      this.save();
+      await this.call('release', { operationId });
+      this.assert(epoch);
+      this.pending[key] = this.pending[key].filter((id) => id !== operationId);
+      this.save();
     } finally {
       if (epoch === this.epoch) this.lock('已释放使用权。');
     }
