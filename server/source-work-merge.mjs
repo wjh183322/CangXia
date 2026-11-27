@@ -5,6 +5,17 @@ const updateKeys = ['title', 'caption', 'description', 'publishedAt'];
 const videoParams = ['duration', 'width', 'height'];
 const coverSources = ['origin_cover', 'cover_original_scale', 'cover'];
 
+const musicIdentity = (music) => (music?.id && music.id !== '0' ? music.id : '');
+
+// Both the direct track and the work mix carry the music identity in their signature.
+export function mergeAudioCandidates(sources, previousMusic, mergedMusic, observedMusic, hints) {
+  const current = musicIdentity(mergedMusic);
+  if (musicIdentity(previousMusic) !== current) sources.clear();
+  if (musicIdentity(observedMusic) !== current || !hints?.length) return false;
+  for (const hint of hints) sources.set(hint.kind, hint);
+  return true;
+}
+
 function mergeMusic(previous, next, fields) {
   if (!previous) return next;
   if (!next || next.state === 'unknown') return previous;

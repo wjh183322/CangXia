@@ -6,7 +6,7 @@ import { normalizeCreator, mergeCreator, sameCreator } from '../shared/creators.
 import { parsePlatformJSON, parseWork } from '../electron/model.mjs';
 import { audioSources } from '../electron/work-audio.mjs';
 import { SourceError } from './source-error.mjs';
-import { mergeObservedWork } from './source-work-merge.mjs';
+import { mergeAudioCandidates, mergeObservedWork } from './source-work-merge.mjs';
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value) => typeof value === 'string';
@@ -533,8 +533,6 @@ function collectProfiles(works) {
   return profiles;
 }
 
-const musicIdentity = (work) => (work?.music?.id && work.music.id !== '0' ? work.music.id : '');
-
 export function parseSourcePage({ source, inputCursor, status, text, observedAt } = {}) {
   source = validateSource(source);
   if (!isCursor(inputCursor)) throw invalid('输入游标无效');
@@ -551,12 +549,7 @@ export function parseSourcePage({ source, inputCursor, status, text, observedAt 
     const previous = observations.get(work.id);
     const sources = previous?.sources ?? new Map();
     const mergedWork = mergeObservedWork(previous?.work, work);
-    const musicId = musicIdentity(mergedWork);
-    if (musicId !== musicIdentity(previous?.work)) sources.delete('music');
-    for (const hint of hints) {
-      if (hint.kind === 'music' && musicIdentity(work) !== musicId) continue;
-      sources.set(hint.kind, hint);
-    }
+    mergeAudioCandidates(sources, previous?.work.music, mergedWork.music, work.music, hints);
     observations.set(work.id, {
       work: mergedWork,
       rank: previous?.rank ?? rank,

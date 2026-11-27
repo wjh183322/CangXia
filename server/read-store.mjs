@@ -1,7 +1,7 @@
 import { isUuid } from './library.mjs';
 import { failure } from './service-error.mjs';
 import { sourceKey, publishMemberships } from './memberships.mjs';
-import { mergeObservedWork } from './source-work-merge.mjs';
+import { mergeAudioCandidates, mergeObservedWork } from './source-work-merge.mjs';
 import { creatorKey, sameCreator, mergeCreator } from '../shared/creators.mjs';
 import { contentHash } from '../shared/backup-protocol.mjs';
 
@@ -67,10 +67,13 @@ function saveWorks(db, page) {
     const prior = JSON.parse(audio.get(work.id)?.body ?? 'null');
     if (!prior && !incoming) continue;
     const sources = new Map((prior?.sources ?? []).map((s) => [s.kind, s]));
-    const musicId = merged.music?.id ?? '';
-    if ((prior?.music?.id ?? '') !== musicId) sources.delete('music');
-    for (const source of incoming?.sources ?? [])
-      if (source.kind !== 'music' || (incoming.music?.id ?? '') === musicId) sources.set(source.kind, source);
+    const accepted = mergeAudioCandidates(
+      sources,
+      prior?.music,
+      merged.music,
+      incoming?.music,
+      incoming?.sources
+    );
     if (!sources.size) db.prepare('DELETE FROM source_audio_hints WHERE work_id=?').run(work.id);
     else
       saveAudio.run(
@@ -79,7 +82,7 @@ function saveWorks(db, page) {
           workId: work.id,
           music: merged.music,
           sources: [...sources.values()],
-          observedAt: incoming?.observedAt ?? prior.observedAt
+          observedAt: accepted ? incoming.observedAt : prior.observedAt
         })
       );
   }

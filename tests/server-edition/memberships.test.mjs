@@ -403,3 +403,37 @@ test('a fresh recovery uses its accepted page position after an earlier in-fligh
     3
   );
 });
+
+for (const span of ['single page', 'successive pages'])
+  test('audio fallback follows verified track identity across ' + span, (t) => {
+    const f = fixture(t),
+      ticket = { source: folder, inputCursor: '0' };
+    const entry = (id, workURL, musicURL) => ({
+      aweme_id: A,
+      aweme_type: 68,
+      ...(id ? { music: { id, ...(musicURL ? { play_url: { url_list: [musicURL] } } : {}) } } : {}),
+      ...(workURL ? { video: { play_addr: { url_list: [workURL] } } } : {})
+    });
+    const work1 = 'https://v.douyinvod.com/mix-51.mp4',
+      music1 = 'https://v.douyinvod.com/song-51.mp3';
+    const work2 = 'https://v.douyinvod.com/mix-52.mp4',
+      music2 = 'https://v.douyinvod.com/song-52.mp3';
+    const unbound = 'https://v.douyinvod.com/unknown.mp4';
+    function candidates(rows) {
+      let hint;
+      if (span === 'single page') hint = page(ticket, rows).aux.audioSourceHints[0];
+      else {
+        for (const row of rows) f.commit(f.start(folder), [row]);
+        hint = f.library.read((db) =>
+          JSON.parse(db.prepare('SELECT body FROM source_audio_hints WHERE work_id=?').get(A)?.body ?? 'null')
+        );
+      }
+      return Object.fromEntries((hint?.sources ?? []).map((s) => [s.kind, s.urls]));
+    }
+    const old = entry('51', work1, music1);
+    assert.deepEqual(candidates([old, entry('52', null, music2)]), { music: [music2] });
+    assert.deepEqual(candidates([old, entry('52', work2)]), { work: [work2] });
+    assert.deepEqual(candidates([old, entry('52')]), {});
+    assert.deepEqual(candidates([old, entry('51'), entry(null)]), { work: [work1], music: [music1] });
+    assert.deepEqual(candidates([old, entry(null, unbound)]), { work: [work1], music: [music1] });
+  });
