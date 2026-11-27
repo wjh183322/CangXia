@@ -32,25 +32,35 @@ const allowedNested = new Set(
   )
 );
 const withheldDiagnostic = '旧端诊断明细已隐去';
+const diagnosticFields = new Set(['reason', 'message', 'batchMessage']);
 function privateDiagnostic(text) {
-  return (
-    Buffer.byteLength(text, 'utf8') > 512 ||
-    /[\x00-\x08\x0b-\x1f\\/]/.test(text) ||
-    /(?:\b(?:bearer|basic)\s+[a-z0-9+._~=:-]+|\b(?:authorization|proxy-authorization|cookie|set-cookie|passw(?:or)?d|token|api[-_ ]?key|session[-_ ]?(?:id|key))\s*[:=]\s*\S|(?:令牌|口令|密码|凭据)\s*[:：=]\s*\S)/i.test(
-      text
-    )
-  );
+  if (text.length > 512 || Buffer.byteLength(text, 'utf8') > 512 || /[\x00-\x08\x0a-\x1f\x7f]/.test(text))
+    return true;
+  // A slash inside a codec, MIME type, protocol version or frame rate is ordinary diagnostic text.
+  if (/(?:[a-z]:[\\/]|\\\\|\/\/|\bfile:|(?:^|[\s"'（([{:：=,，])[/\\][^\s/\\])/i.test(text)) return true;
+  if (/\bbearer\s+[a-z0-9+._~=:-]+/i.test(text)) return true;
+  for (const [, encoded] of text.matchAll(/\bbasic\s+([a-z0-9+/]+={0,2})/gi)) {
+    if (Buffer.from(encoded, 'base64').includes(0x3a)) return true; // HTTP Basic encodes user:password.
+  }
+  // Read the complete assignment name, including JSON quotes, header prefixes and platform cookie aliases.
+  const assignments = /([\w.-]+(?:[ \t]+(?:key|id|secret|token))?|令牌|口令|密码|凭据)["']?\s*[:：=]\s*(?=\S)/gi;
+  for (const [, key] of text.matchAll(assignments)) {
+    const name = key.toLowerCase().replace(/[ _.-]/g, '');
+    const credential = /(?:token(?:default)?|secret(?:key)?|(?:api|auth|access|private)key|accesskeyid|authorization|cookie|passwd|password|credentials?|jwt|令牌|口令|密码|凭据)$/;
+    const session = /(?:session(?:id(?:ss)?|key)?|sidguard|sidtt|uidtt(?:ss)?)$/;
+    if (credential.test(name) || session.test(name)) return true;
+  }
+  return false;
 }
-function safe(value) {
-  if (Array.isArray(value)) return value.map(safe);
+function safe(value, field) {
+  if (diagnosticFields.has(field) && value != null)
+    return typeof value === 'string' && !privateDiagnostic(value) ? value : withheldDiagnostic;
+  if (Array.isArray(value)) return value.map((item) => safe(item));
   if (value && typeof value === 'object')
     return Object.fromEntries(
       Object.entries(value)
         .filter(([k]) => allowedNested.has(k))
-        .map(([k, v]) => [
-          k,
-          k === 'reason' && typeof v === 'string' && privateDiagnostic(v) ? withheldDiagnostic : safe(v)
-        ])
+        .map(([k, v]) => [k, safe(v, k)])
     );
   if (typeof value === 'string' && /^https?:/i.test(value)) {
     try {
@@ -63,7 +73,7 @@ function safe(value) {
   return value;
 }
 function publicFields(body, keys) {
-  return Object.fromEntries(Object.entries(pick(body, keys)).map(([k, v]) => [k, safe(v)]));
+  return Object.fromEntries(Object.entries(pick(body, keys)).map(([k, v]) => [k, safe(v, k)]));
 }
 const sourceKey = (id, author = false) =>
   author ? 'author:' + id : id === '__all__' ? 'total' : 'folder:' + id;

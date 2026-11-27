@@ -988,14 +988,45 @@ test('native cover-only failure retains archived video and projects safe diagnos
     11: 'No matching frame',
     12: 'Matcher failed at /private/real-library/frames',
     13: 'Authorization: Basic concealed-value',
-    14: null
+    14: null,
+    15: 'upstream error: access_token=SYNTHETIC_FIXTURE',
+    16: 'No YUV/RGB match'
   };
+  const reasons = {
+    15: ['upstream error: access_token=SYNTHETIC_FIXTURE', '{"refreshToken":"SYNTHETIC_REFRESH"}'],
+    16: ['HTTP/2 returned 404', 'image/jpeg at 30000/1001 fps']
+  };
+  const stamp = '2026-01-02T00:00:00Z';
+  const nativeStatus = (reason) => ({ state: 'unknown', method: 'api', checkedAt: stamp, reason });
   try {
+    store.readHistory.batches.put({
+      token: 'old-diagnostics',
+      scope: '__batch__',
+      source: 'batch',
+      startedAt: stamp,
+      reason: 'X-API-Key: SYNTHETIC_API_KEY',
+      message: 'ENOENT: open "C:\\private\\frames"',
+      batchMessage: 'retry: sessionid_ss=SYNTHETIC_COOKIE',
+      warning: true
+    });
+    store.readHistory.batches.put({
+      token: 'old-formats',
+      scope: '__batch__',
+      source: 'batch',
+      startedAt: stamp,
+      reason: 'Basic YUV/RGB comparison failed',
+      message: 'access token expired',
+      batchMessage: 'frame 3/5'
+    });
     for (const [id, message] of Object.entries(diagnostic)) {
       const home = { kind: 'collection', id: '__all__', folder: '收藏', workFolder: '旧作品' + id };
       const homeDir = path.join(media, home.folder, home.workFolder);
       fs.mkdirSync(homeDir, { recursive: true });
       const w = { ...work(id), coverUrls: ['https://example.com/cover.jpg'] };
+      if (reasons[id]) {
+        w.sourceStatus = nativeStatus(reasons[id][0]);
+        w.sourceAttempt = nativeStatus(reasons[id][1]);
+      }
       store.put('works', id, w);
       const assets = [];
       for (const [key, file, bytes] of [
@@ -1055,11 +1086,48 @@ test('native cover-only failure retains archived video and projects safe diagnos
             { source: 'all', filter: { downloaded: 'complete' } },
             { grant: { proof: 'test' } }
           ).ids.sort(),
-          ['11', '12', '13', '14']
+          Object.keys(diagnostic)
         )
       );
       const info = (id) =>
         fs.readFileSync(path.join(result.mediaRoot, '收藏', '旧作品' + id, '作品信息.json'), 'utf8');
+      const withheld = '旧端诊断明细已隐去';
+      for (const [id, expected] of [['15', [withheld, withheld]], ['16', reasons[16]]]) {
+        const original = fs.readFileSync(path.join(media, '收藏', '旧作品' + id, '作品信息.json'), 'utf8');
+        const handedOff = info(id);
+        const metadata = JSON.parse(handedOff);
+        assert.equal(JSON.parse(original).hdCover.message, diagnostic[id]);
+        assert.equal(JSON.parse(original).sourceAttempt.reason, reasons[id][1]);
+        assert.equal(metadata.hdCover.message, id === '15' ? withheld : diagnostic[id]);
+        const stored = lib.read((db) => JSON.parse(db.prepare('SELECT body FROM works WHERE id=?').get(id).body));
+        for (const doc of [metadata, stored]) {
+          assert.deepEqual(doc.sourceStatus, nativeStatus(expected[0]));
+          assert.deepEqual(doc.sourceAttempt, nativeStatus(expected[1]));
+        }
+        const projection = pre.conflicts.find((c) => c.type === 'metadataProjection' && c.key === id + '/metadata');
+        if (id === '15') {
+          assert.ok(projection.reason.includes(hash(original)) && projection.reason.includes(hash(handedOff)));
+          assert.notEqual(hash(original), hash(handedOff));
+        } else {
+          assert.equal(handedOff, original);
+          assert.equal(projection, undefined);
+        }
+      }
+      const summary = (id) =>
+        lib.read((db) => JSON.parse(db.prepare('SELECT summary FROM read_legacy_runs WHERE id=?').get(id).summary));
+      const hidden = summary('old-diagnostics');
+      assert.deepEqual(
+        [hidden.reason, hidden.message, hidden.batchMessage, hidden.warning],
+        [withheld, withheld, withheld, true]
+      );
+      const formats = summary('old-formats');
+      assert.deepEqual(
+        [formats.reason, formats.message, formats.batchMessage],
+        ['Basic YUV/RGB comparison failed', 'access token expired', 'frame 3/5']
+      );
+      assert.ok(!JSON.stringify(pre).includes('SYNTHETIC_'));
+      assert.ok(!fs.readFileSync(path.join(result.snapshot, 'library.sqlite')).includes('SYNTHETIC_'));
+      assert.deepEqual(await sealSource({ directory: win, kind: 'windows', database: 'library.sqlite' }), args.sources[0]);
       assert.equal(JSON.parse(info('11')).hdCover.message, 'No matching frame');
       assert.equal(
         info('11'),
@@ -1088,7 +1156,7 @@ test('native cover-only failure retains archived video and projects safe diagnos
         confirmed: true,
         target: path.join(root, 'playable')
       });
-      assert.equal(restored.verifiedPlayback, 8);
+      assert.equal(restored.verifiedPlayback, 12);
       assert.ok(!fs.readFileSync(path.join(result.snapshot, 'library.sqlite')).includes('concealed-value'));
     } finally {
       lib.close();
