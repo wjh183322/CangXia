@@ -25,7 +25,15 @@ jobs:
           python -m pip install --only-binary=:all: numpy==2.2.6 opencv-python-headless==4.11.0.86
       - run: node server/node_modules/playwright-core/cli.js install chromium
       - run: npm run test:ui
-      - run: npm run test:layout
+      - name: Verify layout at fixed Windows viewports
+        shell: pwsh
+        run: |
+          npm run test:layout
+          $result=$LASTEXITCODE
+          if ($result -ne 0 -and (Test-Path -LiteralPath '.test-output/layout-smoke.json')) {
+            Get-Content -LiteralPath '.test-output/layout-smoke.json' -Raw
+          }
+          exit $result
       - shell: pwsh
         run: |
           $env:CANGXIA_TEST_COVER_PYTHON=(Get-Command python).Source

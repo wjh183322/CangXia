@@ -35,7 +35,33 @@ jobs:
           package-manager-cache: false
       - run: npm ci --include=dev --ignore-scripts --no-audit --no-fund
       - run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
-      - run: node server/node_modules/playwright-core/cli.js install --with-deps chromium --only-shell
+      - name: Install the locked Chromium shell and permit its sandbox on the disposable Ubuntu runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/cangxia-browser-download"
+          PLAYWRIGHT_BROWSERS_PATH="$staging" node server/node_modules/playwright-core/cli.js install --with-deps chromium --only-shell
+          private=$(sudo mktemp -d /opt/cangxia-ci-browser.XXXXXXXX)
+          sudo cp -a --no-preserve=ownership "$staging/." "$private/"
+          sudo chmod -R a+rX,go-w "$private"
+          sudo chmod 0755 "$private"
+          mapfile -t binaries < <(find "$private" -type f \( -name headless_shell -o -name chrome-headless-shell \))
+          [[ ${#binaries[@]} == 1 && -x ${binaries[0]} && $(stat -c %u "${binaries[0]}") == 0 ]]
+          # Chromium's documented executable-specific profile. Neither the workspace
+          # nor the runner's writable browser cache is eligible for this permission.
+          sudo tee /etc/apparmor.d/cangxia-ci-headless >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile cangxia-ci-headless "${binaries[0]}" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/cangxia-ci-headless
+          echo "PLAYWRIGHT_BROWSERS_PATH=$private" >> "$GITHUB_ENV"
+          PLAYWRIGHT_BROWSERS_PATH="$private" node --input-type=module -e '
+          import {chromium} from "./server/node_modules/playwright-core/index.mjs";
+          const b=await chromium.launch({headless:true,chromiumSandbox:true});
+          try {const p=await b.newPage(); await p.goto("about:blank");} finally {await b.close();}'
       - name: Install the pinned cover matcher and verify the original golden
         run: |
           python3.12 -m venv "$RUNNER_TEMP/cover-runtime"

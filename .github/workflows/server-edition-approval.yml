@@ -27,7 +27,9 @@ jobs:
     needs: approval
     runs-on: ubuntu-24.04
     timeout-minutes: 65
-    permissions: {contents: read, actions: read, packages: write, statuses: write}
+    permissions: {contents: read, actions: read, packages: write, statuses: read}
+    outputs:
+      receipt: ${{ steps.publish.outputs.receipt }}
     env:
       IMAGE: ghcr.io/wjh183322/cangxia-server:ci
     steps:
@@ -41,6 +43,7 @@ jobs:
       - if: needs.approval.outputs.action == 'candidate'
         run: bash scripts/verify-server-image.sh
       - name: Verify approval, package visibility and tested identity before writing
+        id: publish
         env: {GH_TOKEN: "${{ github.token }}"}
         run: bash scripts/promote-server-image.sh publish
       - uses: actions/upload-artifact@v4
@@ -74,3 +77,24 @@ jobs:
             release/server/candidate.json
           if-no-files-found: error
           retention-days: 7
+
+  candidate-ready:
+    needs: [approval, registry, public-windows]
+    if: always() && !cancelled() && needs.approval.outputs.action == 'candidate'
+    runs-on: ubuntu-24.04
+    permissions: {contents: read, statuses: write}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - id: completed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: node scripts/server-distribution-ready.mjs
+      - name: Persist this completed candidate on its source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.completed.outputs.digest }}
+          STATUS_CONTEXT: ${{ steps.completed.outputs.context }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f description="$DIGEST" \
+            -f context="$STATUS_CONTEXT" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null

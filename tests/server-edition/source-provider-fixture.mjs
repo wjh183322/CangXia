@@ -4,7 +4,7 @@ const require = createRequire(new URL('../../server/package.json', import.meta.u
 export async function exerciseProvider(t, openOfficialProvider) {
   assert.equal(typeof openOfficialProvider, 'function', 'normal Chromium provider must exist');
   const { chromium } = require('playwright-core');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, chromiumSandbox: process.platform === 'linux' });
   t.after(() => browser.close());
   const context = await browser.newContext({
     viewport: { width: 1000, height: 760 },
@@ -246,7 +246,7 @@ export async function exerciseProvider(t, openOfficialProvider) {
 
 export async function delayedStatusDuringVerification(t, makeSource, openOfficialProvider, session) {
   const { chromium } = require('playwright-core');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, chromiumSandbox: process.platform === 'linux' });
   t.after(() => browser.close());
   const entered = Promise.withResolvers(),
     release = Promise.withResolvers(),

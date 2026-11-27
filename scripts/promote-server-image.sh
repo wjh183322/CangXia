@@ -21,7 +21,7 @@ else
   # exact candidate run/attempt, distribution scope and registry manifest must all match.
   gh api --paginate --slurp "repos/$repo/commits/$revision/statuses?per_page=100" | jq -e \
    --arg context "cangxia-server/candidate/$run/$attempt/$visibility" --arg d "$approved" \
-   --arg url "$GITHUB_SERVER_URL/$repo/actions/runs/$run/attempts/$attempt" '
+   --arg url "$GITHUB_SERVER_URL/$repo/actions/runs/$run" '
      [ .[][] | select(.context==$context) ][0] |
      .state=="success" and .description==$d and .target_url==$url and .creator.login=="github-actions[bot]"' >/dev/null
 fi
@@ -97,8 +97,4 @@ check_visibility
 jq -n --arg s "$revision" --arg v "$visibility" --arg d "$digest" --arg c "$config" --arg t "$tag" --arg action "$action" \
  --arg r "$GITHUB_RUN_ID" --arg a "$GITHUB_RUN_ATTEMPT" '{version:"0.4.1",protocolVersion:1,sourceRevision:$s,visibility:$v,digest:$d,configDigest:$c,tag:$t,action:$action,run:$r,attempt:$a}' > "$root/receipt.json"
 
-if [[ "$action" == candidate ]]; then
-  gh api --method POST "repos/$repo/statuses/$revision" -f state=success -f description="$digest" \
-    -f context="cangxia-server/candidate/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$visibility" \
-    -f target_url="$GITHUB_SERVER_URL/$repo/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" >/dev/null
-fi
+printf 'receipt=%s\n' "$(jq -c . "$root/receipt.json")" >> "$GITHUB_OUTPUT"

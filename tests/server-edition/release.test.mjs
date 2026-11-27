@@ -61,3 +61,20 @@ test('ordinary verification only uploads exact JSON records and owner approval s
   assert.doesNotMatch(promote,/gh run download/);
   assert.ok(promote.includes('check "docker://$registry:$version"')&&promote.includes('check "docker://$registry:latest"'));
 });
+
+import {completedCandidate} from '../../scripts/server-distribution-ready.mjs';
+test('promotable status requires the completed public Windows delivery and the matching registered attempt',()=>{
+  const revision='a'.repeat(40), run='9';
+  function needs(visibility,windows){
+    const receipt=JSON.stringify({sourceRevision:revision,run,attempt:'1',version:'0.4.1',protocolVersion:1,
+      action:'candidate',visibility,tag:'0.4.1-rc.9.1',digest:'sha256:'+'e'.repeat(64),configDigest:'sha256:'+'b'.repeat(64)});
+    return {approval:{result:'success',outputs:{action:'candidate',visibility}},registry:{result:'success',outputs:{receipt}},
+      'public-windows':{result:windows}};
+  }
+  const check=n=>completedCandidate(n,{revision,run});
+  for(const state of ['failure','skipped','cancelled'])assert.throws(()=>check(needs('public',state)));
+  assert.throws(()=>check(needs('private','success')));
+  assert.equal(check(needs('private','skipped')).attempt,'1');
+  assert.equal(check(needs('public','success')).digest,'sha256:'+'e'.repeat(64));
+  const failed=needs('private','skipped');failed.registry.result='failure';assert.throws(()=>check(failed));
+});
