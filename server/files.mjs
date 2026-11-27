@@ -399,6 +399,28 @@ async function commitDirectory(layout, commit) {
   return result.file;
 }
 
+// Older writers linked an already tracked payload.part to a second name and then
+// unlinked the first before recording the second. Only its original inode proves
+// ownership; a copied file with identical bytes does not.
+async function recoverLegacyStage(dir, commit) {
+  if (commit.body.transfer || commit.body.kind === 'metadata') return;
+  for (const [part, identity] of Object.entries(commit.body.files)) {
+    if (!stageName.test(part) || !part.endsWith('.part')) continue;
+    const name = part.slice(0, -5);
+    if (commit.body.files[name]) continue;
+    const from = path.join(dir, name),
+      to = path.join(dir, part);
+    const alias = await status(from),
+      original = await status(to);
+    if (!alias?.isFile() || !same(alias, identity)) continue;
+    if (!original && alias.nlink === 1n) await moveExclusive(from, to);
+    else if (original?.isFile() && same(original, identity) && original.nlink === 2n && alias.nlink === 2n)
+      await fs.unlink(from);
+    else continue;
+    await syncDirectory(dir);
+  }
+}
+
 function checkStageEntries(dir, commit) {
   return fs.readdir(dir).then(async (names) => {
     for (const name of names) {
@@ -424,6 +446,7 @@ export async function openFileStage({
   kind,
   resourceIdentity,
   observationIdentity,
+  urlHash,
   group,
   guard
 }) {
@@ -436,12 +459,15 @@ export async function openFileStage({
         entry.body.jobId === jobId &&
         entry.body.key === key &&
         entry.body.resourceIdentity === resourceIdentity &&
+        entry.body.observationIdentity === observationIdentity &&
+        (!entry.body.transfer || entry.body.transfer.urlHash === urlHash) &&
         entry.body.group === group &&
         (kind === 'metadata' || !Object.keys(entry.body.files).some((name) => !name.endsWith('.part')))
     );
   if (previous) {
     previous.body.observationIdentity = observationIdentity;
     const stage = { commit: previous, dir: await commitDirectory(layout, previous) };
+    await recoverLegacyStage(stage.dir, previous);
     await assertFileStage(stage, layout);
     return stage;
   }
@@ -510,6 +536,48 @@ export function trackStagedFile(store, { commit, dir }, file, opened) {
   }
 }
 
+export async function sealTransfer({ store, layout, stage, result, urlHash, guard }) {
+  await assertFileStage(stage, layout);
+  const { file, size, sha256, extension } = result,
+    name = path.basename(file),
+    stat = await status(file);
+  if (
+    path.dirname(file) !== stage.dir ||
+    name !== 'payload' + extension + '.part' ||
+    !stageName.test(name) ||
+    !stat?.isFile() ||
+    stat.nlink !== 1n ||
+    !same(stat, stage.commit.body.files[name]) ||
+    Number(stat.size) !== size
+  )
+    throw review();
+  guard();
+  const transfer = {
+    name,
+    size,
+    sha256,
+    extension,
+    urlHash,
+    identity: idOf(stat),
+    mtimeNs: String(stat.mtimeNs)
+  };
+  stage.commit.body.transfer = transfer;
+  delete stage.commit.body.checkpoint;
+  updateCommit(store, stage.commit);
+  store.fileHook('afterStagedDigest', { workId: stage.commit.workId, file });
+}
+export async function stagedTransfer(stage, urlHash, signal) {
+  const proof = stage.commit.body.transfer;
+  if (!proof) return null;
+  if (!stageName.test(proof.name) || proof.name !== 'payload' + proof.extension + '.part') throw review();
+  if (proof.urlHash !== urlHash) return null;
+  const file = path.join(stage.dir, proof.name);
+  await assertDigest({ file, stat: await status(file) }, proof, 1, signal);
+  return { file, size: proof.size, sha256: proof.sha256, extension: proof.extension };
+}
+export function discardInvalidTransfer(store, stage) {
+  if (stage.commit.body.transfer) updateCommit(store, stage.commit, 'rejected');
+}
 export function stageCheckpoints(store, { commit }) {
   return {
     get: () => commit.body.checkpoint,
@@ -755,6 +823,7 @@ async function settlePlacement({ store, commit, destination, dir, staged }) {
       await fs.unlink(staged.file);
     });
     await syncDirectory(dir);
+    store.fileHook('afterStagingUnlink', { workId: commit.workId, file: destination.file });
   }
   updateCommit(store, commit, 'placed');
   return registerFile(store, commit);
@@ -764,7 +833,14 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
   assertWorkFiles(store, commit.workId);
   const { body } = commit;
   const dir = await commitDirectory(layout, commit);
-  if (!stageName.test(body.stagedName) || body.stagedName.endsWith('.part')) throw review();
+  if (
+    !stageName.test(body.stagedName) ||
+    (body.stagedName.endsWith('.part') &&
+      (body.transfer?.name !== body.stagedName ||
+        body.transfer.sha256 !== body.sha256 ||
+        body.transfer.size !== body.size))
+  )
+    throw review();
   const staged = { file: path.join(dir, body.stagedName) };
   staged.stat = await status(staged.file);
   const { media } = await roots(layout);
@@ -777,6 +853,7 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
     if (commit.stage === 'placed' || destination.stat) throw review();
     if (recoverOnly) return null;
     await assertDigest(staged, body);
+    store.fileHook('beforeFormalPlacement', { workId: commit.workId, file: destination.file });
     guard?.();
     try {
       await fs.link(staged.file, destination.file);
@@ -928,11 +1005,12 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
     if (
       commit.body.jobId !== jobId ||
       (key && commit.body.key !== key) ||
-      !['staged', 'allocating', 'verified', 'cancel-cleanup'].includes(commit.stage)
+      !['staged', 'rejected', 'allocating', 'verified', 'cancel-cleanup'].includes(commit.stage)
     )
       continue;
     try {
       const dir = await commitDirectory(layout, commit);
+      await recoverLegacyStage(dir, commit);
       const names = await fs.readdir(dir);
       for (const name of names) {
         const file = path.join(dir, name);
@@ -962,11 +1040,11 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
   return pending;
 }
 
-export async function recoverFileCommits({ store, layout, workId }) {
+export async function recoverFileCommits({ store, layout, workId, jobId, guard }) {
   const results = [];
   const stages = ['verified', 'swapping', 'placed', 'moving'];
   for (const candidate of store.fileCommits(workId)) {
-    if (!stages.includes(candidate.stage)) continue;
+    if (!stages.includes(candidate.stage) || (jobId && candidate.body.jobId !== jobId)) continue;
     const result = await withWorkFiles(layout, candidate.workId, async () => {
       const commit = store.fileCommit(candidate.id, candidate.workId);
       if (!commit || !stages.includes(commit.stage) || commit.revision !== candidate.revision) return null;
@@ -975,7 +1053,10 @@ export async function recoverFileCommits({ store, layout, workId }) {
           const job =
             commit.body.jobId &&
             store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId);
-          return ['cancelling', 'cancelled', 'pausing', 'paused'].includes(job?.state);
+          return (
+            job &&
+            (!['queued', 'running'].includes(job.state) || !store.canPublishDownload?.(commit.body.jobId))
+          );
         };
         const options = {
           store,
@@ -983,6 +1064,7 @@ export async function recoverFileCommits({ store, layout, workId }) {
           commit,
           recoverOnly: isStopping(),
           guard() {
+            guard?.();
             if (isStopping())
               throw problem('NAS_FILE_RECOVERY_PAUSED', 'The stopped job has no new file work to recover.');
             assertWorkFiles(store, commit.workId);
@@ -1202,7 +1284,7 @@ export async function finalizeWorkFiles({
 }
 
 export async function reconcileWork({ store, layout, workId, guard }) {
-  const recovered = await recoverFileCommits({ store, layout, workId });
+  const recovered = await recoverFileCommits({ store, layout, workId, guard });
   const errors = recovered.filter((result) => result.error).map((result) => ({ workId, ...result.error }));
   if (errors.length) return { ok: false, pending: true, errors };
   return withWorkFiles(layout, workId, () => finalizeWorkFiles({ store, layout, workId, guard }));

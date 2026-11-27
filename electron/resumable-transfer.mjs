@@ -3,6 +3,16 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {requireInside} from './model.mjs';
 const strongTag=value=>typeof value==='string'&&/^"[\x21\x23-\x7e]{1,512}"$/.test(value);
 const digest=value=>createHash('sha256').update(value).digest('hex');
+function integrityError(){return Object.assign(new Error('下载内容与已知 SHA-256 摘要不同。'),{code:'CONTENT_DIGEST_MISMATCH'});}
+function sha256Field(headers,name){
+ const value=headers.get(name);
+ if(!value)return null;
+ const items=value.split(',').map(item=>item.trim()).filter(item=>/^sha-256\s*=/i.test(item));
+ if(!items.length)return null;
+ const match=/^sha-256=:([A-Za-z0-9+/]{43}=):$/i.exec(items[0]);
+ if(items.length!==1||!match)throw integrityError();
+ return Buffer.from(match[1],'base64').toString('hex');
+}
 function ordinary(file){const stat=fs.lstatSync(file,{throwIfNoEntry:false});if(stat&&(!stat.isFile()||stat.isSymbolicLink()))throw new Error('下载临时文件不是普通文件，已停止');}
 async function remove(file){const deadline=performance.now()+3000;for(let attempt=0;;attempt++){ordinary(file);try{await fs.promises.unlink(file);return;}catch(e){if(e.code==='ENOENT')return;const remaining=deadline-performance.now();if(!['EPERM','EACCES','EBUSY'].includes(e.code)||remaining<=0)throw e;await delay(Math.min(remaining,250,25*2**attempt));}}}
 async function hashPrefix(file,bytes,signal){const hash=createHash('sha256');if(bytes)for await(const chunk of fs.createReadStream(file,{start:0,end:bytes-1})){signal?.throwIfAborted();hash.update(chunk);}return hash;}
@@ -12,16 +22,18 @@ async function readCheckpoint(dir,name,url,signal,checkpoints){
   if(!checkpoints&&fs.statSync(meta).size>8192)return null;const value=checkpoints?checkpoints.get(meta):JSON.parse(await fs.promises.readFile(meta,'utf8'));if(!value)return null;
   if(value.version!==1||value.urlHash!==digest(url)||!/^[a-f0-9]{64}$/.test(value.responseHash)||!strongTag(value.etag)||!Number.isSafeInteger(value.total)||value.total<=0||!Number.isSafeInteger(value.offset)||value.offset<=0||value.offset>=value.total||!/^[a-f0-9]{64}$/.test(value.prefixHash))return null;
   if(!['.mp4','.jpg','.png','.webp','.avif','.bin'].some(ext=>value.part===name+ext+'.part'))return null;
+  if(value.fullDigest!=null&&!/^[a-f0-9]{64}$/.test(value.fullDigest))return null;
   const partial=requireInside(dir,path.join(dir,value.part));ordinary(partial);if(!fs.existsSync(partial)||fs.statSync(partial).size<value.offset)return null;
   const hash=await hashPrefix(partial,value.offset,signal);if(hash.copy().digest('hex')!==value.prefixHash)return null;
   return {...value,hash,partial};
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null}){
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null,sealPartial=null,verifyDigests=false}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
  let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
  const get=async resume=>{signal?.throwIfAborted();return fetchMedia(url,{headers:{'Accept-Encoding':'identity',...(resume?{Range:`bytes=${resume.offset}-`,'If-Range':resume.etag}:{})},signal:AbortSignal.any([signal,AbortSignal.timeout(120000)])});};
+ const previous=saved;
  let response=await get(saved);
  if(saved&&response.status===206){
   const match=/^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range')||'');
@@ -38,31 +50,51 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  const lengthHeader=response.headers.get('content-length');
  if(lengthHeader!==null&&(!/^\d+$/.test(lengthHeader)||!Number.isSafeInteger(Number(lengthHeader)))){await response.body?.cancel().catch(()=>{});throw new Error('资源长度无效，未标记为完整');}
  const total=saved?.total??(lengthHeader===null?null:Number(lengthHeader)),etag=response.headers.get('etag'),resumable=!target.name.startsWith('.cangxia-')&&Number.isSafeInteger(total)&&total>0&&strongTag(etag);
+ let fullDigest,rangeDigest;
+ try{
+  if(verifyDigests){
+  // With identity encoding a 200 Content-Digest describes all bytes; on 206 it covers only this response.
+  const contentDigest=sha256Field(response.headers,'content-digest');
+  const sameRepresentation=previous&&strongTag(etag)&&previous.etag===etag&&previous.total===total&&previous.responseHash===digest(response.url||url);
+  const expected=[sameRepresentation?previous.fullDigest:null,sha256Field(response.headers,'repr-digest'),response.status===200?contentDigest:null].filter(Boolean);
+  if(new Set(expected).size>1)throw integrityError();
+  fullDigest=expected[0]||null;
+  if(saved&&contentDigest)rangeDigest={expected:contentDigest,hash:createHash('sha256')};
+  }
+ }catch(error){await response.body?.cancel().catch(()=>{});throw error;}
  if(total!==null&&total>maxBytes){await response.body?.cancel().catch(()=>{});throw Error('资源超过当前保存上限');}
  try{await reserve(total??saved?.offset??0);}catch(e){await response.body?.cancel().catch(()=>{});throw e;}
  if(target.kind==='image'&&total>50000000){await response.body?.cancel().catch(()=>{});throw new Error('图片文件过大，已停止');}
  let hash=saved?.hash||createHash('sha256'),offset=saved?.offset||0,lastSaved=offset,lastTime=Date.now(),handle,reader,finished=false;
  const checkpoint=async()=>{
-  if(!resumable||!offset||offset>=total)return;
+  if(!resumable||!offset||offset>=total||(rangeDigest&&offset!==saved.offset))return;
   await handle.truncate(offset);await handle.sync();
-  const value={version:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,prefixHash:hash.copy().digest('hex')};
+  const value={version:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,...(fullDigest&&{fullDigest}),prefixHash:hash.copy().digest('hex')};
   if(checkpoints)checkpoints.set(meta,value);else{ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');let identity;try{onFileWrite(metaTemp,await record.stat());await record.writeFile(JSON.stringify(value));await record.sync();identity=await record.stat();onFileWrite(metaTemp,identity,{settled:true});}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);onFileWrite(meta,identity,{settled:true});}lastSaved=offset;lastTime=Date.now();
  };
  try{
   handle=openPartial?await openPartial(partial):await fs.promises.open(partial,saved?'r+':'w');onFileWrite(partial,await handle.stat());if(saved)await handle.truncate(offset);else{if(openPartial)await handle.truncate(0);await clearCheckpoint();}
+  if(saved&&fullDigest&&fullDigest!==saved.fullDigest)await checkpoint();
   reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset,total);
   while(true){
    signal?.throwIfAborted();const {done,value}=await reader.read();if(done)break;signal?.throwIfAborted();
    if((total!==null&&offset+value.byteLength>total)||offset+value.byteLength>maxBytes||(target.kind==='image'&&offset+value.byteLength>50000000))throw new Error('资源长度异常，未标记为完整');
    if(total===null)await reserve(offset+value.byteLength);
    let used=0;while(used<value.byteLength){const write=await handle.write(value,used,value.byteLength-used,offset+used);if(!write.bytesWritten)throw new Error('文件写入未完成');used+=write.bytesWritten;}
-   hash.update(value);offset+=value.byteLength;progress(offset,total);
+   hash.update(value);rangeDigest?.hash.update(value);offset+=value.byteLength;progress(offset,total);
    if(offset-lastSaved>=checkpointBytes||Date.now()-lastTime>=2000)await checkpoint();
   }
   signal?.throwIfAborted();if(!offset||(total!==null&&offset!==total))throw new Error('文件未下载完整，已保留可续传进度');
+  if((fullDigest && hash.copy().digest('hex')!==fullDigest) || (rangeDigest && rangeDigest.hash.digest('hex')!==rangeDigest.expected))throw integrityError();
   await handle.sync();await handle.close();handle=null;
   const sha256=hash.copy().digest('hex');if(fs.statSync(partial).size!==offset||(await hashPrefix(partial,offset,signal)).digest('hex')!==sha256)throw new Error('文件校验未通过，未标记为完整');
-  signal?.throwIfAborted();ordinary(file);
+  signal?.throwIfAborted();
+  if(sealPartial){
+   const result={file:partial,size:offset,sha256,resumedBytes:saved?.offset||0,extension:path.extname(file)};
+   await sealPartial(result);
+   await clearCheckpoint();finished=true;return result;
+  }
+  ordinary(file);
   if(preserveExisting){try{await fs.promises.link(partial,file);}catch(e){if(!['EPERM','ENOTSUP','EINVAL','EXDEV'].includes(e.code))throw e;await fs.promises.copyFile(partial,file,fs.constants.COPYFILE_EXCL);}await fs.promises.unlink(partial);}
   else await fs.promises.rename(partial,file);
   onFileWrite(file,await fs.promises.stat(file),{settled:true});

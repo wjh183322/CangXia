@@ -8,6 +8,7 @@ import { imageDimensions } from '../electron/media-info.mjs';
 import { transferAsset } from '../electron/resumable-transfer.mjs';
 import { SourceError } from './source-error.mjs';
 import { openDownloadStore, recordedWork } from './download-store.mjs';
+import { avifDimensions } from './avif-dimensions.mjs';
 import { audioInfo } from '../electron/audio-info.mjs';
 import {
   assertFileStage,
@@ -21,6 +22,9 @@ import {
   recoverFileCommits,
   resolveResource,
   stageCheckpoints,
+  sealTransfer,
+  stagedTransfer,
+  discardInvalidTransfer,
   trackStagedFile,
   verifyAndPlace,
   withWorkFiles
@@ -307,8 +311,15 @@ async function verifyFormat(asset, mime, signal) {
         brands.some((value) => /^avi[fs]$/.test(value)) &&
         boxes.get('meta')?.length > 0 &&
         (boxes.get('mdat')?.length > 0 || boxes.get('moov')?.length > 0)
-      )
-        return {};
+      ) {
+        const meta = boxes.get('meta');
+        if (meta.length > 2 * 1024 * 1024) throw formatError();
+        try {
+          return avifDimensions(await headAt(handle, meta.length, meta.at), boxes.get('mdat'));
+        } catch {
+          throw formatError();
+        }
+      }
       throw formatError();
     }
 
@@ -516,6 +527,21 @@ export function createDownloads({
 }) {
   const store = openDownloadStore({ library, root, fileHook }),
     { db, layout } = store;
+  store.canPublishDownload = (id) => {
+    const job = getJob(db, id);
+    if (!job) return false;
+    let current;
+    try {
+      current = binding(db);
+    } catch {
+      return false;
+    }
+    return (
+      current.uid === job.auth.uid &&
+      current.sessionKey === job.auth.sessionKey &&
+      current.authEpoch === job.auth.authEpoch
+    );
+  };
   const active = new Map();
   let task,
     rerun = false,
@@ -748,6 +774,7 @@ export function createDownloads({
       requireWriter(job, signal);
       const group = cover ? coverObject(url) : null;
       if (handled.has(group)) continue;
+      const urlHash = contentHash(url);
       const stage = await openFileStage({
         store,
         layout,
@@ -757,61 +784,63 @@ export function createDownloads({
         kind: target.kind,
         resourceIdentity: target.identity,
         observationIdentity,
+        urlHash,
         group
       });
       try {
         store.fileHook('beforeFileWrite', { workId: job.workId, kind: target.kind, file: stage.dir });
-        let lastProgress = 0,
-          expectedHash;
-        const result = await transferAsset({
-          dir: stage.dir,
-          target: { name: 'payload', kind: target.kind },
-          url,
-          signal,
-          extension,
-          checkpointBytes,
-          fetchMedia: async (address, options) => {
-            const response = await fetchMedia(address, options, job);
-            try {
-              if (response.status === 200) {
-                const digest = response.headers
-                  .get('content-digest')
-                  ?.match(/(?:^|,\s*)sha-256=:([A-Za-z0-9+/]{43}=):(?:$|,)/i);
-                expectedHash = digest ? Buffer.from(digest[1], 'base64').toString('hex') : null;
+        let lastProgress = 0;
+        const result =
+          (await stagedTransfer(stage, urlHash, signal)) ??
+          (await transferAsset({
+            dir: stage.dir,
+            target: { name: 'payload', kind: target.kind },
+            url,
+            signal,
+            extension,
+            checkpointBytes,
+            fetchMedia: async (address, options) => {
+              const response = await fetchMedia(address, options, job);
+              try {
+                await assertFileStage(stage, layout);
+              } catch (error) {
+                await response.body?.cancel().catch(() => {});
+                throw error;
               }
-              await assertFileStage(stage, layout);
-            } catch (error) {
-              await response.body?.cancel().catch(() => {});
-              throw error;
+              return response;
+            },
+            sealPartial: (result) =>
+              sealTransfer({
+                store,
+                layout,
+                stage,
+                result,
+                urlHash,
+                guard: () => requireWriter(job, signal)
+              }),
+            verifyDigests: true,
+            openPartial: (file) => openStagedPartial(stage, file, layout),
+            checkpoints: stageCheckpoints(store, stage),
+            maxBytes: target.kind === 'audio' ? 256 * 1024 * 1024 : Infinity,
+            progress(bytes, totalBytes) {
+              requireWriter(job, signal);
+              if (bytes === 0 || Date.now() - lastProgress >= 750) {
+                lastProgress = Date.now();
+                change(job.id, (current) => {
+                  current.bytes = bytes;
+                  current.byteTotal = totalBytes;
+                  current.phase = 'transferring';
+                });
+              }
+            },
+            onFileWrite(file, opened) {
+              trackStagedFile(store, stage, file, opened);
             }
-            return response;
-          },
-          preserveExisting: true,
-          openPartial: (file) => openStagedPartial(stage, file, layout),
-          checkpoints: stageCheckpoints(store, stage),
-          maxBytes: target.kind === 'audio' ? 256 * 1024 * 1024 : Infinity,
-          progress(bytes, totalBytes) {
-            requireWriter(job, signal);
-            if (bytes === 0 || Date.now() - lastProgress >= 750) {
-              lastProgress = Date.now();
-              change(job.id, (current) => {
-                current.bytes = bytes;
-                current.byteTotal = totalBytes;
-                current.phase = 'transferring';
-              });
-            }
-          },
-          onFileWrite(file, opened) {
-            trackStagedFile(store, stage, file, opened);
-          }
-        });
-        if (
-          (expectedHash && expectedHash !== result.sha256) ||
-          (existing?.missing && !changed && existing.sha256 !== result.sha256)
-        )
+          }));
+        if (existing?.missing && !changed && existing.sha256 !== result.sha256)
           throw failure('NAS_HASH_MISMATCH', '下载内容与已知 SHA-256 摘要不同。');
         const audio = target.kind === 'audio' ? await audioInfo(result.file, signal) : null;
-        const ext = audio ? '.' + audio.format : path.extname(result.file);
+        const ext = audio ? '.' + audio.format : result.extension;
         const mime = audio
           ? { wav: 'audio/wav', mp3: 'audio/mpeg', aac: 'audio/aac', m4a: 'audio/mp4' }[audio.format]
           : mimeByExtension.get(ext);
@@ -820,6 +849,7 @@ export function createDownloads({
         handled.add(group);
         if (!cover) break;
       } catch (error) {
+        if (error.code === 'CONTENT_DIGEST_MISMATCH') error = failure('NAS_HASH_MISMATCH', error.message);
         if (
           signal.aborted ||
           storage.has(error?.code) ||
@@ -829,6 +859,7 @@ export function createDownloads({
           )
         )
           throw error;
+        discardInvalidTransfer(store, stage);
         lastError = error;
       }
     }
@@ -934,7 +965,13 @@ export function createDownloads({
   async function execute(id, controller) {
     const { workId } = getJob(db, id);
     try {
-      const recovered = await recoverFileCommits({ store, layout, workId });
+      const recovered = await recoverFileCommits({
+        store,
+        layout,
+        workId,
+        jobId: id,
+        guard: () => controller.signal.throwIfAborted()
+      });
       await withWorkFiles(layout, workId, async () => {
         const current = getJob(db, id);
         if (!['queued', 'running'].includes(current.state) || closing) return;

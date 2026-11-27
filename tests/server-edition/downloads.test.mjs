@@ -130,10 +130,7 @@ function model(t, works, options = {}) {
     file: (a) => path.join(d.layout.media, a.relative_path)
   };
 }
-test('daemon killed between placement and registration restarts without fetching that asset again', async (t) => {
-  const f = model(t, [album('10', 1)]);
-  f.enqueue(['10']);
-  await f.d.close();
+function killWriter(root, hook) {
   const child = spawnSync(
     process.execPath,
     [
@@ -144,14 +141,21 @@ test('daemon killed between placement and registration restarts without fetching
   import {createDownloads} from './server/downloads.mjs';
   const root=process.argv[1], library=openLibrary({root});
   const d=createDownloads({root,library,fetchAsset:async()=>new Response(Buffer.from(process.argv[2],'base64'),{headers:{'Content-Type':'image/png'}}),
-   fileHook(name){if(name==='afterFilePlacement')process.kill(process.pid,'SIGKILL');}});
+   fileHook(name){if(name===process.argv[3])process.kill(process.pid,'SIGKILL');}});
   await d.run();`,
-      f.root,
-      png.toString('base64')
+      root,
+      png.toString('base64'),
+      hook
     ],
     { encoding: 'utf8', windowsHide: true, cwd: fileURLToPath(new URL('../../', import.meta.url)) }
   );
   assert.notEqual(child.status, 0);
+}
+test('daemon killed between placement and registration restarts without fetching that asset again', async (t) => {
+  const f = model(t, [album('10', 1)]);
+  f.enqueue(['10']);
+  await f.d.close();
+  killWriter(f.root, 'afterFilePlacement');
   assert.equal(
     f.library.read((db) => db.prepare('SELECT stage FROM file_commits').get().stage),
     'verified'
@@ -504,3 +508,231 @@ test('revisioned catalogue selection confirms all pages on the NAS and runs up t
   assert.equal(f.library.read(f.d.state).counts.complete, 22);
   assert.equal(f.assets(ids.at(-1)).length, 0);
 });
+
+import { createHash } from 'node:crypto';
+import { crc32 } from 'node:zlib';
+const digestHeader = (bytes) => 'sha-256=:' + createHash('sha256').update(bytes).digest('base64') + ':';
+function captionedPNG(caption) {
+  const text = Buffer.from('title\0' + caption),
+    chunk = Buffer.alloc(12 + text.length);
+  chunk.writeUInt32BE(text.length);
+  chunk.write('tEXt', 4);
+  text.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+  return Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]);
+}
+for (const scenario of ['wrong-tail', 'valid-range', 'wrong-range-digest', 'fresh-200']) {
+  test('HTTP digest across restarted Range transfer: ' + scenario, async (t) => {
+    const original = captionedPNG('red'),
+      changed = captionedPNG('tan'),
+      cut = 20;
+    let step = 0;
+    const transport = async (url, { headers }) => {
+      if (step++ === 0) {
+        let started = false;
+        return new Response(
+          new ReadableStream({
+            pull(c) {
+              if (started) c.error(Error('connection lost'));
+              else {
+                started = true;
+                c.enqueue(original.subarray(0, cut));
+              }
+            }
+          }),
+          {
+            headers: {
+              'Content-Type': 'image/png',
+              'Content-Length': String(original.length),
+              etag: '"same"',
+              'Content-Digest': digestHeader(original)
+            }
+          }
+        );
+      }
+      assert.equal(new Headers(headers).get('range'), 'bytes=' + cut + '-');
+      if (scenario === 'fresh-200')
+        return response(changed, 200, { etag: '"new"', 'Content-Digest': digestHeader(changed) });
+      const received = scenario === 'wrong-tail' ? changed : original;
+      return response(received.subarray(cut), 206, {
+        etag: '"same"',
+        'Content-Range': 'bytes ' + cut + '-' + (received.length - 1) + '/' + received.length,
+        'Content-Digest': digestHeader(
+          (scenario === 'wrong-range-digest' ? changed : received).subarray(cut)
+        ),
+        ...(scenario !== 'wrong-tail' && { 'Repr-Digest': digestHeader(original) })
+      });
+    };
+    const f = model(t, [album('91', 1)], { fetchAsset: transport, checkpointBytes: 10 });
+    f.enqueue(['91']);
+    await f.d.run();
+    assert.equal(f.job('91').state, 'failed');
+    await f.d.close();
+    f.open({ fetchAsset: transport });
+    f.control({ action: 'retry', jobId: '91' });
+    await f.d.run();
+    const ok = ['valid-range', 'fresh-200'].includes(scenario);
+    assert.equal(f.job('91').state, ok ? 'complete' : 'failed');
+    if (!ok) {
+      assert.equal(f.job('91').reason.code, 'NAS_HASH_MISMATCH');
+      assert.equal(f.assets('91').length, 0);
+    }
+  });
+}
+
+for (const hook of ['beforeFormalPlacement', 'afterFilePlacement']) {
+  test('recovery after account change at ' + hook, async (t) => {
+    const f = model(t, [album('92', 1)]);
+    f.enqueue(['92']);
+    await f.d.close();
+    killWriter(f.root, hook);
+    f.library.write((db) => db.exec("UPDATE download_auth SET session_key='changed'"));
+    const row = f.library.read((db) =>
+      JSON.parse(db.prepare("SELECT body FROM file_commits WHERE stage='verified'").get().body)
+    );
+    f.open({ fetchAsset: async () => assert.fail('unconfirmed network') });
+    await f.d.run();
+    assert.equal(f.job('92').state, 'waiting-auth');
+    const alreadyPlaced = hook === 'afterFilePlacement';
+    assert.equal(fs.existsSync(path.join(f.d.layout.media, row.relative)), alreadyPlaced);
+    assert.equal(f.assets('92').length, alreadyPlaced ? 1 : 0);
+    if (!alreadyPlaced) {
+      f.control({ action: 'retry', jobId: '92' });
+      await f.d.run();
+      assert.equal(f.job('92').state, 'complete');
+    }
+  });
+}
+for (const hook of ['afterStagedDigest', 'afterStagingUnlink']) {
+  test('persisted ownership recovers process death at ' + hook, async (t) => {
+    const f = model(t, [album('93', 1)]);
+    f.enqueue(['93']);
+    await f.d.close();
+    killWriter(f.root, hook);
+    let requests = 0;
+    f.open({
+      fetchAsset: async () => {
+        requests++;
+        return response();
+      }
+    });
+    await f.d.run();
+    assert.equal(f.job('93').state, 'complete');
+    assert.equal(requests, 0);
+    assert.deepEqual(fs.readFileSync(f.file(f.assets('93').find((a) => a.key === 'image-0'))), png);
+  });
+}
+test('cancellation after the staged digest keeps an unowned file with matching bytes', async (t) => {
+  const f = model(t, [album('94', 1)]);
+  f.enqueue(['94']);
+  await f.d.close();
+  killWriter(f.root, 'afterStagedDigest');
+  f.open();
+  const commit = f.d.store.fileCommits('94')[0],
+    dir = path.join(f.d.layout.staging, 'commits', commit.id);
+  const partial = path.join(dir, 'payload.png.part'),
+    foreign = path.join(dir, 'payload.png');
+  fs.writeFileSync(foreign, png);
+  f.control({ action: 'cancel', jobId: '94' });
+  await f.d.run();
+  assert.equal(f.job('94').cleanupPending, true);
+  assert.equal(fs.existsSync(partial), false);
+  assert.deepEqual(fs.readFileSync(foreign), png);
+  fs.renameSync(foreign, path.join(f.d.layout.media, 'retained.png'));
+  f.control({ action: 'cancel', jobId: '94' });
+  await f.d.run();
+  assert.equal(f.job('94').cleanupPending, false);
+});
+
+const avif = Buffer.from(
+  'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAETAAAALQAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAAMAAAACAAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEADQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoMEAAAANW1kYXQSAAoJGBUv+0QENBoQMh4Ux4eGZQIIIJ5QAAAAx5O05wV4arQzPiRQz7sDBsg=',
+  'base64'
+);
+for (const scenario of ['valid', 'zero-width', 'foreign-association']) {
+  test('cover measures the primary image from real AVIF: ' + scenario, async (t) => {
+    const work = {
+      id: '95',
+      name: '封面比较',
+      type: 'video',
+      author: { nickname: '图像' },
+      videoUrls: ['https://v3.douyinvod.com/video'],
+      coverUrls: ['https://p3.douyinpic.com/small', 'https://p3.douyinpic.com/avif']
+    };
+    const bytes = Buffer.from(avif);
+    if (scenario === 'zero-width') bytes.writeUInt32BE(0, bytes.indexOf('ispe') + 8);
+    if (scenario === 'foreign-association') bytes.writeUInt16BE(2, bytes.indexOf('ipma') + 12);
+    const box = (type, data) => {
+      const h = Buffer.alloc(8);
+      h.writeUInt32BE(data.length + 8);
+      h.write(type, 4);
+      return Buffer.concat([h, data]);
+    };
+    const film = Buffer.concat([
+      box('ftyp', Buffer.from('isom0000mp42')),
+      box('moov', box('trak', Buffer.alloc(8))),
+      box('mdat', Buffer.alloc(8))
+    ]);
+    const f = model(t, [work], {
+      fetchAsset: async (u) =>
+        u.endsWith('video')
+          ? response(film, 200, { 'Content-Type': 'video/mp4' })
+          : u.endsWith('avif')
+            ? response(bytes, 200, { 'Content-Type': 'image/avif' })
+            : response()
+    });
+    f.enqueue(['95']);
+    await f.d.run();
+    assert.equal(f.job('95').state, 'complete');
+    const cover = f.assets('95').find((a) => a.key === 'cover');
+    assert.equal(cover.mime, scenario === 'valid' ? 'image/avif' : 'image/png');
+    const meta = JSON.parse(fs.readFileSync(f.file(f.assets('95').find((a) => a.key === 'metadata'))));
+    const saved = meta.assets.find((a) => a.key === 'cover');
+    assert.deepEqual([saved.width, saved.height], scenario === 'valid' ? [48, 32] : [1, 1]);
+  });
+}
+
+for (const shape of ['linked', 'renamed', 'unproven-copy']) {
+  test('legacy pre-publication stage ' + shape + ' preserves only provable ownership', async (t) => {
+    const f = model(t, [album('96', 1)]);
+    f.enqueue(['96']);
+    await f.d.close();
+    killWriter(f.root, 'afterStagedDigest');
+    const row = f.library.read((db) =>
+      db.prepare("SELECT id,body FROM file_commits WHERE stage='staged'").get()
+    );
+    const body = JSON.parse(row.body);
+    // The old ledger contained only the opened .part identity, with no durable end-of-transfer hash.
+    delete body.transfer;
+    f.library.write((db) =>
+      db.prepare('UPDATE file_commits SET body=? WHERE id=?').run(JSON.stringify(body), row.id)
+    );
+    const dir = path.join(f.root, 'cangxia-server', 'media', '.cangxia-staging', 'commits', row.id),
+      part = path.join(dir, 'payload.png.part'),
+      alias = path.join(dir, 'payload.png');
+    if (shape === 'linked') fs.linkSync(part, alias);
+    else if (shape === 'renamed') fs.renameSync(part, alias);
+    else fs.copyFileSync(part, alias);
+    let requests = 0;
+    f.open({
+      fetchAsset: async () => {
+        requests++;
+        return response();
+      }
+    });
+    await f.d.run();
+    if (shape === 'unproven-copy') {
+      assert.equal(f.job('96').state, 'review');
+      assert.equal(requests, 0);
+      f.control({ action: 'cancel', jobId: '96' });
+      await f.d.run();
+      assert.equal(f.job('96').cleanupPending, true);
+      assert.deepEqual(fs.readFileSync(alias), png);
+      assert.equal(fs.existsSync(part), false);
+    } else {
+      assert.equal(f.job('96').state, 'complete');
+      assert.equal(requests, 1);
+      assert.equal(fs.existsSync(alias), false);
+      assert.deepEqual(fs.readFileSync(f.file(f.assets('96').find((a) => a.key === 'image-0'))), png);
+    }
+  });
+}
