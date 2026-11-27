@@ -66,6 +66,18 @@ export function avifDimensions(meta, mediaData) {
   });
   if (supported.length !== 1) invalid();
 
+  function containsExtent(ranges, start, length) {
+    // Top-level payloads are in file order. One extent must fit one payload, never a box header or gap.
+    let left = 0,
+      right = ranges.length;
+    while (left < right) {
+      const mid = Math.floor((left + right) / 2);
+      if (ranges[mid].at <= start) left = mid + 1;
+      else right = mid;
+    }
+    const range = ranges[left - 1];
+    return !!range && length > 0 && start + length <= range.at + range.length;
+  }
   const locations = reader(one(children, 'iloc')),
     layoutVersion = locations.number(1);
   if (layoutVersion > 2 || locations.number(3) !== 0) invalid();
@@ -79,8 +91,10 @@ export function avifDimensions(meta, mediaData) {
     const reference = locations.number(2),
       offset = locations.number(base >> 4),
       extents = locations.number(2);
+    let ranges = mediaData;
     if (id === primary) {
       if (foundLocation || reference !== 0 || method > 1 || !extents) invalid();
+      if (method === 1) ranges = [{ at: 0, length: one(children, 'idat').length }];
       foundLocation = true;
     }
     for (let e = 0; e < extents; e++) {
@@ -88,8 +102,7 @@ export function avifDimensions(meta, mediaData) {
       const start = offset + locations.number(sizes >> 4),
         length = locations.number(sizes & 15);
       if (id !== primary) continue;
-      const range = method === 1 ? { at: 0, length: one(children, 'idat').length } : mediaData;
-      if (!range || !length || start < range.at || start + length > range.at + range.length) invalid();
+      if (!containsExtent(ranges, start, length)) invalid();
     }
   }
   locations.done();

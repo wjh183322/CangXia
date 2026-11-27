@@ -420,15 +420,15 @@ test('explicit repair after a changed image identity replaces only that verified
   const work = album('70');
   work.mediaQuality = { identities: { imageCount: 2, images: ['one', 'two'] } };
   let calls = [],
-    mismatch = false;
+    mismatch = false,
+    etag = '"v1"';
   const f = model(t, [work], {
     fetchAsset: async (url) => {
       calls.push(url);
-      return response(
-        png,
-        200,
-        mismatch ? { 'Content-Digest': 'sha-256=:' + Buffer.alloc(32).toString('base64') + ':' } : {}
-      );
+      return response(png, 200, {
+        etag,
+        ...(mismatch && { 'Content-Digest': 'sha-256=:' + Buffer.alloc(32).toString('base64') + ':' })
+      });
     }
   });
   f.enqueue(['70']);
@@ -447,8 +447,13 @@ test('explicit repair after a changed image identity replaces only that verified
   mismatch = false;
   f.control({ action: 'retry', jobId: '70' });
   await f.d.run();
+  assert.equal(f.job('70').state, 'failed');
+  assert.equal(f.job('70').reason.code, 'NAS_HASH_MISMATCH');
+  etag = '"corrected"';
+  f.control({ action: 'retry', jobId: '70' });
+  await f.d.run();
   assert.equal(f.job('70').state, 'complete');
-  assert.deepEqual(calls, ['https://p3.douyinpic.com/70-new', 'https://p3.douyinpic.com/70-new']);
+  assert.deepEqual(calls, Array(3).fill('https://p3.douyinpic.com/70-new'));
   assert.equal(fs.existsSync(previous), false);
   assert.deepEqual(fs.readFileSync(f.file(f.assets('70').find((a) => a.key === 'image-1'))), png);
 });
@@ -733,6 +738,158 @@ for (const shape of ['linked', 'renamed', 'unproven-copy']) {
       assert.equal(requests, 1);
       assert.equal(fs.existsSync(alias), false);
       assert.deepEqual(fs.readFileSync(f.file(f.assets('96').find((a) => a.key === 'image-0'))), png);
+    }
+  });
+}
+
+function interruptedBody(bytes, cut, headers) {
+  let sent = false;
+  return new Response(
+    new ReadableStream({
+      pull(c) {
+        if (sent) c.error(Error('disconnected'));
+        else {
+          sent = true;
+          c.enqueue(bytes.subarray(0, cut));
+        }
+      }
+    }),
+    {
+      headers: {
+        'Content-Type': 'image/png',
+        'Content-Length': String(bytes.length),
+        etag: '"same"',
+        ...headers
+      }
+    }
+  );
+}
+for (const mode of ['correct', 'wrong-bytes', 'short', 'long', 'new-etag', 'new-url', 'conflicting-length']) {
+  test('Range fallback to full body enforces the checkpoint representation: ' + mode, async (t) => {
+    const original = captionedPNG('red'),
+      bad = captionedPNG('tan');
+    const bytes =
+      mode === 'correct'
+        ? original
+        : mode === 'short'
+          ? captionedPNG('r')
+          : ['long', 'new-etag', 'new-url', 'conflicting-length'].includes(mode)
+            ? captionedPNG('longer')
+            : bad;
+    let step = 0;
+    const fetchAsset = async (url, { headers }) => {
+      step++;
+      if (step === 1)
+        return interruptedBody(
+          original,
+          20,
+          ['wrong-bytes', 'correct', 'new-etag', 'new-url'].includes(mode)
+            ? { 'Content-Digest': digestHeader(original) }
+            : {}
+        );
+      if (step === 2) assert.equal(new Headers(headers).get('range'), 'bytes=20-');
+      if (mode === 'new-url' && !url.endsWith('/new-image'))
+        return Response.redirect('https://p3.douyinpic.com/new-image', 302);
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(bytes);
+            c.close();
+          }
+        }),
+        {
+          headers: {
+            'Content-Type': 'image/png',
+            etag: mode === 'new-etag' ? '"new"' : '"same"',
+            ...(mode === 'conflicting-length' && { 'Content-Length': String(bytes.length) })
+          }
+        }
+      );
+    };
+    const f = model(t, [album('97', 1)], { fetchAsset });
+    f.enqueue(['97']);
+    await f.d.run();
+    assert.equal(f.job('97').state, 'failed');
+    await f.d.close();
+    f.open({ fetchAsset });
+    f.control({ action: 'retry', jobId: '97' });
+    await f.d.run();
+    const ok = ['correct', 'new-etag', 'new-url'].includes(mode);
+    assert.equal(f.job('97').state, ok ? 'complete' : 'failed');
+    if (ok) {
+      assert.deepEqual(fs.readFileSync(f.file(f.assets('97').find((a) => a.key === 'image-0'))), bytes);
+    } else {
+      assert.equal(f.assets('97').length, 0);
+      await f.d.close();
+      f.open({ fetchAsset });
+      f.control({ action: 'retry', jobId: '97' });
+      await f.d.run();
+      assert.equal(f.job('97').state, 'failed');
+    }
+  });
+}
+test('a serialized v1 NAS checkpoint without digest provenance restarts instead of accepting an unverified 206', async (t) => {
+  const original = captionedPNG('red'),
+    bad = captionedPNG('tan'),
+    requests = [];
+  const fetchAsset = async (url, { headers }) => {
+    const range = new Headers(headers).get('range');
+    requests.push(range);
+    if (requests.length === 1)
+      return interruptedBody(original, 20, { 'Content-Digest': digestHeader(original) });
+    if (range)
+      return response(bad.subarray(20), 206, {
+        etag: '"same"',
+        'Content-Range': 'bytes 20-' + (bad.length - 1) + '/' + bad.length
+      });
+    return response(original, 200, { etag: '"same"', 'Content-Digest': digestHeader(original) });
+  };
+  const f = model(t, [album('98', 1)], { fetchAsset });
+  f.enqueue(['98']);
+  await f.d.run();
+  const r = f.library.read((db) => db.prepare("SELECT id,body FROM file_commits WHERE stage='staged'").get()),
+    body = JSON.parse(r.body);
+  assert.equal(body.checkpoint.offset, 20);
+  body.checkpoint.version = 1;
+  delete body.checkpoint.fullDigest;
+  f.library.write((db) =>
+    db.prepare('UPDATE file_commits SET body=? WHERE id=?').run(JSON.stringify(body), r.id)
+  );
+  await f.d.close();
+  f.open({ fetchAsset });
+  f.control({ action: 'retry', jobId: '98' });
+  await f.d.run();
+  assert.deepEqual(requests, [null, null]);
+  assert.deepEqual(fs.readFileSync(f.file(f.assets('98').find((a) => a.key === 'image-0'))), original);
+});
+
+// Both containers decode with libavif to the same 48x32 pixels as the ordinary mdat fixture above.
+const idatImage = Buffer.from(
+  'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAEibWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOcGl0bQAAAAAAAQAAACBpbG9jAQAAAEQAAAEAAQABAAAAAQAAAAAAAAAtAAAAKGlpbmYAAAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAAAwAAAAIAAAABBwaXhpAAAAAAMICAgAAAAMYXYxQ4EADAAAAAATY29scm5jbHgAAQANAAaAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAAA1aWRhdBIACgkYFS/7RAQ0GhAyHhTHh4ZlAgggnlAAAADHk7TnBXhqtDM+JFDPuwMGyA==',
+  'base64'
+);
+const laterMdatImage = Buffer.from(
+  'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAEfAAAALQAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAAMAAAACAAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEADQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoMEAAAADG1kYXR0ZXN0AAAANW1kYXQSAAoJGBUv+0QENBoQMh4Ux4eGZQIIIJ5QAAAAx5O05wV4arQzPiRQz7sDBsg=',
+  'base64'
+);
+for (const mode of ['idat', 'later-mdat', 'past-idat', 'between-mdats']) {
+  test('AVIF verifies all actual primary data extents: ' + mode, async (t) => {
+    const bytes = Buffer.from(mode.includes('idat') ? idatImage : laterMdatImage);
+    if (mode === 'past-idat') bytes.writeUInt32BE(1, bytes.indexOf('iloc') + 20);
+    if (mode === 'between-mdats')
+      bytes.writeUInt32BE(bytes.lastIndexOf('mdat') - 2, bytes.indexOf('iloc') + 18);
+    const f = model(t, [album('99', 1)], {
+      fetchAsset: async () => response(bytes, 200, { 'Content-Type': 'image/avif' })
+    });
+    f.enqueue(['99']);
+    await f.d.run();
+    if (['idat', 'later-mdat'].includes(mode)) {
+      assert.equal(f.job('99').state, 'complete');
+      const meta = JSON.parse(fs.readFileSync(f.file(f.assets('99').find((a) => a.key === 'metadata'))));
+      assert.deepEqual([meta.assets[0].width, meta.assets[0].height], [48, 32]);
+    } else {
+      assert.equal(f.job('99').state, 'failed');
+      assert.equal(f.assets('99').length, 0);
     }
   });
 }

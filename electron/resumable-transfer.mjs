@@ -16,24 +16,35 @@ function sha256Field(headers,name){
 function ordinary(file){const stat=fs.lstatSync(file,{throwIfNoEntry:false});if(stat&&(!stat.isFile()||stat.isSymbolicLink()))throw new Error('下载临时文件不是普通文件，已停止');}
 async function remove(file){const deadline=performance.now()+3000;for(let attempt=0;;attempt++){ordinary(file);try{await fs.promises.unlink(file);return;}catch(e){if(e.code==='ENOENT')return;const remaining=deadline-performance.now();if(!['EPERM','EACCES','EBUSY'].includes(e.code)||remaining<=0)throw e;await delay(Math.min(remaining,250,25*2**attempt));}}}
 async function hashPrefix(file,bytes,signal){const hash=createHash('sha256');if(bytes)for await(const chunk of fs.createReadStream(file,{start:0,end:bytes-1})){signal?.throwIfAborted();hash.update(chunk);}return hash;}
-async function readCheckpoint(dir,name,url,signal,checkpoints){
+async function readCheckpoint(dir,name,url,signal,checkpoints,verifyDigests){
  const meta=requireInside(dir,path.join(dir,name+'.resume.json'));if(!checkpoints){ordinary(meta);if(!fs.existsSync(meta))return null;}
  try{
   if(!checkpoints&&fs.statSync(meta).size>8192)return null;const value=checkpoints?checkpoints.get(meta):JSON.parse(await fs.promises.readFile(meta,'utf8'));if(!value)return null;
-  if(value.version!==1||value.urlHash!==digest(url)||!/^[a-f0-9]{64}$/.test(value.responseHash)||!strongTag(value.etag)||!Number.isSafeInteger(value.total)||value.total<=0||!Number.isSafeInteger(value.offset)||value.offset<=0||value.offset>=value.total||!/^[a-f0-9]{64}$/.test(value.prefixHash))return null;
+  // V1 NAS interrupted transfers did not always record an advertised digest.
+  const hashKnown=typeof value.fullDigest==='string'&&/^[a-f0-9]{64}$/.test(value.fullDigest);
+  if(verifyDigests){
+   if(value.version===1){if(!hashKnown)return null;}
+   else if(value.version!==2||!(value.fullDigest===null||hashKnown))return null;
+  }else if(value.version!==1)return null;
+  if(value.urlHash!==digest(url)||!/^[a-f0-9]{64}$/.test(value.responseHash)||!strongTag(value.etag)||!Number.isSafeInteger(value.total)||value.total<=0||!Number.isSafeInteger(value.offset)||value.offset<(verifyDigests?0:1)||value.offset>=value.total||!/^[a-f0-9]{64}$/.test(value.prefixHash))return null;
   if(!['.mp4','.jpg','.png','.webp','.avif','.bin'].some(ext=>value.part===name+ext+'.part'))return null;
   if(value.fullDigest!=null&&!/^[a-f0-9]{64}$/.test(value.fullDigest))return null;
-  const partial=requireInside(dir,path.join(dir,value.part));ordinary(partial);if(!fs.existsSync(partial)||fs.statSync(partial).size<value.offset)return null;
-  const hash=await hashPrefix(partial,value.offset,signal);if(hash.copy().digest('hex')!==value.prefixHash)return null;
-  return {...value,hash,partial};
+  const partial=requireInside(dir,path.join(dir,value.part));ordinary(partial);
+  if(fs.existsSync(partial)&&fs.statSync(partial).size>=value.offset){
+   const hash=await hashPrefix(partial,value.offset,signal);
+   if(hash.copy().digest('hex')===value.prefixHash)return {...value,hash,partial};
+  }
+  // Discard an unusable prefix without forgetting its representation's trusted integrity data.
+  return verifyDigests?{...value,offset:0,hash:createHash('sha256'),partial}:null;
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
 export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null,sealPartial=null,verifyDigests=false}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
- let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
+ let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints,verifyDigests);
  const get=async resume=>{signal?.throwIfAborted();return fetchMedia(url,{headers:{'Accept-Encoding':'identity',...(resume?{Range:`bytes=${resume.offset}-`,'If-Range':resume.etag}:{})},signal:AbortSignal.any([signal,AbortSignal.timeout(120000)])});};
  const previous=saved;
+ if(saved?.offset===0)saved=null;
  let response=await get(saved);
  if(saved&&response.status===206){
   const match=/^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range')||'');
@@ -49,13 +60,17 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  if(saved&&saved.partial!==partial){await response.body?.cancel().catch(()=>{});throw new Error('资源文件类型发生变化，未拼接文件');}
  const lengthHeader=response.headers.get('content-length');
  if(lengthHeader!==null&&(!/^\d+$/.test(lengthHeader)||!Number.isSafeInteger(Number(lengthHeader)))){await response.body?.cancel().catch(()=>{});throw new Error('资源长度无效，未标记为完整');}
- const total=saved?.total??(lengthHeader===null?null:Number(lengthHeader)),etag=response.headers.get('etag'),resumable=!target.name.startsWith('.cangxia-')&&Number.isSafeInteger(total)&&total>0&&strongTag(etag);
- let fullDigest,rangeDigest;
+ const etag=response.headers.get('etag'),announcedLength=lengthHeader===null?null:Number(lengthHeader);
+ const sameRepresentation=verifyDigests && previous && strongTag(etag) &&
+  previous.etag===etag && previous.responseHash===digest(response.url||url);
+ const total=saved?.total??(sameRepresentation?previous.total:announcedLength);
+ const resumable=!target.name.startsWith('.cangxia-')&&Number.isSafeInteger(total)&&total>0&&strongTag(etag);
+ let fullDigest=null,rangeDigest;
  try{
   if(verifyDigests){
-  // With identity encoding a 200 Content-Digest describes all bytes; on 206 it covers only this response.
+  // A matching strong validator binds the complete representation even when a full 200 is chunked.
+  if(sameRepresentation&&response.status===200&&announcedLength!==null&&announcedLength!==total)throw integrityError();
   const contentDigest=sha256Field(response.headers,'content-digest');
-  const sameRepresentation=previous&&strongTag(etag)&&previous.etag===etag&&previous.total===total&&previous.responseHash===digest(response.url||url);
   const expected=[sameRepresentation?previous.fullDigest:null,sha256Field(response.headers,'repr-digest'),response.status===200?contentDigest:null].filter(Boolean);
   if(new Set(expected).size>1)throw integrityError();
   fullDigest=expected[0]||null;
@@ -66,14 +81,24 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  try{await reserve(total??saved?.offset??0);}catch(e){await response.body?.cancel().catch(()=>{});throw e;}
  if(target.kind==='image'&&total>50000000){await response.body?.cancel().catch(()=>{});throw new Error('图片文件过大，已停止');}
  let hash=saved?.hash||createHash('sha256'),offset=saved?.offset||0,lastSaved=offset,lastTime=Date.now(),handle,reader,finished=false;
+ const recordCheckpoint=async()=>{
+  const value={version:verifyDigests?2:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,...(verifyDigests&&{fullDigest}),prefixHash:hash.copy().digest('hex')};
+  if(checkpoints)checkpoints.set(meta,value);else{ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');let identity;try{onFileWrite(metaTemp,await record.stat());await record.writeFile(JSON.stringify(value));await record.sync();identity=await record.stat();onFileWrite(metaTemp,identity,{settled:true});}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);onFileWrite(meta,identity,{settled:true});}lastSaved=offset;lastTime=Date.now();
+ };
  const checkpoint=async()=>{
   if(!resumable||!offset||offset>=total||(rangeDigest&&offset!==saved.offset))return;
   await handle.truncate(offset);await handle.sync();
-  const value={version:1,part:path.basename(partial),urlHash:digest(url),responseHash:digest(response.url||url),etag,total,offset,...(fullDigest&&{fullDigest}),prefixHash:hash.copy().digest('hex')};
-  if(checkpoints)checkpoints.set(meta,value);else{ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');let identity;try{onFileWrite(metaTemp,await record.stat());await record.writeFile(JSON.stringify(value));await record.sync();identity=await record.stat();onFileWrite(metaTemp,identity,{settled:true});}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);onFileWrite(meta,identity,{settled:true});}lastSaved=offset;lastTime=Date.now();
+  await recordCheckpoint();
  };
  try{
-  handle=openPartial?await openPartial(partial):await fs.promises.open(partial,saved?'r+':'w');onFileWrite(partial,await handle.stat());if(saved)await handle.truncate(offset);else{if(openPartial)await handle.truncate(0);await clearCheckpoint();}
+  handle=openPartial?await openPartial(partial):await fs.promises.open(partial,saved?'r+':'w');
+  onFileWrite(partial,await handle.stat());
+  if(saved)await handle.truncate(offset);
+  else{
+   // Commit the zero-prefix proof before resetting a previously trusted NAS prefix.
+   if(verifyDigests&&resumable)await recordCheckpoint();else await clearCheckpoint();
+   if(openPartial)await handle.truncate(0);
+  }
   if(saved&&fullDigest&&fullDigest!==saved.fullDigest)await checkpoint();
   reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset,total);
   while(true){
@@ -100,7 +125,13 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
   onFileWrite(file,await fs.promises.stat(file),{settled:true});
   await clearCheckpoint();finished=true;
   return {file,size:offset,sha256,resumedBytes:saved?.offset||0};
- }catch(e){if(handle)try{await checkpoint();}catch{await clearCheckpoint().catch(()=>{});}throw e;}
+ }catch(e){
+  if(handle)try{await checkpoint();}catch{
+   // A failed NAS checkpoint transaction leaves the preceding representation proof usable.
+   if(!verifyDigests)await clearCheckpoint().catch(()=>{});
+  }
+  throw e;
+ }
  finally{
   await reader?.cancel().catch(()=>{});reader?.releaseLock();if(handle)try{onFileWrite(partial,await handle.stat(),{settled:true});}finally{await handle.close().catch(()=>{});}
   if(!finished&&!resumable&&!openPartial){await remove(partial).catch(()=>{});await clearCheckpoint().catch(()=>{});}

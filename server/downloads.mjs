@@ -226,7 +226,8 @@ async function headAt(file, size, position) {
 }
 
 async function isoBoxes(file, size, signal, start = 0) {
-  const boxes = new Map();
+  const boxes = new Map(),
+    mediaData = [];
   let at = start;
   let count = 0;
   while (at < size) {
@@ -243,10 +244,12 @@ async function isoBoxes(file, size, signal, start = 0) {
       headerBytes = 16;
     }
     if (length < headerBytes || length > size - at) throw formatError();
-    if (!boxes.has(type)) boxes.set(type, { at: at + headerBytes, length: length - headerBytes });
+    const extent = { at: at + headerBytes, length: length - headerBytes };
+    if (!boxes.has(type)) boxes.set(type, extent);
+    if (type === 'mdat') mediaData.push(extent);
     at += length;
   }
-  return boxes;
+  return { boxes, mediaData };
 }
 
 async function verifyPng(file, size, signal) {
@@ -290,7 +293,7 @@ async function verifyFormat(asset, mime, signal) {
   try {
     const bytes = await headAt(handle, Math.min(size, 64 * 1024), 0);
     if (mime === 'video/mp4' || mime === 'image/avif') {
-      const boxes = await isoBoxes(handle, size, signal);
+      const { boxes, mediaData } = await isoBoxes(handle, size, signal);
       const brand = boxes.get('ftyp');
       if (!brand || brand.length < 8 || brand.length > 512) throw formatError();
       const flags = await headAt(handle, brand.length, brand.at);
@@ -303,19 +306,18 @@ async function verifyFormat(asset, mime, signal) {
         movie?.length &&
         boxes.get('mdat')?.length > 0 &&
         brands.some((value) => /^(?:iso[m2-9]|mp4[12]|avc1|M4V |dash)$/.test(value)) &&
-        (await isoBoxes(handle, movie.at + movie.length, signal, movie.at)).get('trak')?.length > 0
+        (await isoBoxes(handle, movie.at + movie.length, signal, movie.at)).boxes.get('trak')?.length > 0
       )
         return {};
       if (
         mime === 'image/avif' &&
         brands.some((value) => /^avi[fs]$/.test(value)) &&
-        boxes.get('meta')?.length > 0 &&
-        (boxes.get('mdat')?.length > 0 || boxes.get('moov')?.length > 0)
+        boxes.get('meta')?.length > 0
       ) {
         const meta = boxes.get('meta');
         if (meta.length > 2 * 1024 * 1024) throw formatError();
         try {
-          return avifDimensions(await headAt(handle, meta.length, meta.at), boxes.get('mdat'));
+          return avifDimensions(await headAt(handle, meta.length, meta.at), mediaData);
         } catch {
           throw formatError();
         }
