@@ -46,7 +46,7 @@ export function createArchive(store) {
             .some(
               (c) =>
                 c.body.jobId !== jobId &&
-                ['verified', 'swapping', 'moving', 'placed', 'review'].includes(c.stage)
+                ['verified', 'swapping', 'moving', 'placed', 'review', 'hd-withdrawing'].includes(c.stage)
             )
         )
           throw new SourceError('NAS_FILE_REVIEW', '下载还有尚未登记的归档文件。');

@@ -658,3 +658,173 @@ test(
     }
   }
 );
+
+test(
+  'derived HD recovery validates physical inputs and withdraws only owned output at both native crash boundaries',
+  { skip: !python && 'requires pinned OpenCV runtime' },
+  async (t) => {
+    const files = fs.mkdtempSync(path.join(tmpdir(), 'cx-hd-recovery-'));
+    t.after(() => fs.rmSync(files, { recursive: true, force: true, maxRetries: 5 }));
+    execFileSync(python, ['-I', path.join(repo, 'tests/server-edition/fixtures/archive-cover.py'), files], {
+      windowsHide: true
+    });
+    const observation = (base, high = false) =>
+      parseSourceDetail({
+        workId: '72',
+        status: 200,
+        observedAt: '2026-11-26T10:00:00Z',
+        text: JSON.stringify({
+          aweme_detail: {
+            aweme_id: '72',
+            item_title: '恢复测试',
+            author: { uid: '12', nickname: '合成' },
+            video: {
+              vid: 'video-A',
+              play_addr: { url_list: ['https://v3.douyinvod.com/video'] },
+              cover: { uri: base, url_list: ['https://p3.douyinpic.com/' + base] },
+              ...(high ? { origin_cover: { uri: 'hd-A', url_list: ['https://p3.douyinpic.com/hd'] } } : {})
+            }
+          }
+        })
+      });
+    for (const [hook, mutation] of [
+      ['beforeFormalPlacement', 'external-video'],
+      ['beforeFormalPlacement', 'external-cover'],
+      ['afterFilePlacement', 'source'],
+      ['afterStagingUnlink', 'source'],
+      ['afterFilePlacement', 'external-video'],
+      ['afterStagingUnlink', 'external-cover'],
+      ['afterFilePlacement', 'foreign-target'],
+      ['afterStagingUnlink', 'valid']
+    ]) {
+      const work = observation('reference'),
+        fresh = observation('reference', true);
+      const f = fixture(t, work, {
+        coverPython: python,
+        source: {
+          account: () => ({ uid: '42', authEpoch: 'fixture' }),
+          readDownloadDetail: async () => fresh
+        },
+        fetchAsset: async (url) =>
+          new Response(
+            fs.readFileSync(
+              path.join(
+                files,
+                url.endsWith('/video') ? 'video.mp4' : url.endsWith('/hd') ? 'hd.png' : 'reference.png'
+              )
+            ),
+            { headers: { 'Content-Type': url.endsWith('/video') ? 'video/mp4' : 'image/png' } }
+          )
+      });
+      f.ipc.download(['72'], { scope: 'missing' });
+      await f.d.run();
+      const video = f.file('video'),
+        cover = f.file('cover'),
+        media = f.d.layout.media;
+      f.command('control-download', { action: 'pause', ids: null });
+      f.ipc.repairVideoCover(['72']);
+      await f.d.run();
+      await f.close();
+      const child = spawnSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          `
+      import fs from 'node:fs';import path from 'node:path';import {openLibrary} from './server/library.mjs';import {createDownloads} from './server/downloads.mjs';
+      const [root,files,python,detail,hook]=process.argv.slice(1),library=openLibrary({root});
+      const d=createDownloads({root,library,coverPython:python,source:{account:()=>({uid:'42'}),readDownloadDetail:async()=>JSON.parse(detail)},
+        fetchAsset:async url=>new Response(fs.readFileSync(path.join(files,url.endsWith('/hd')?'hd.png':'reference.png')),{headers:{'Content-Type':'image/png'}}),
+        fileHook(name,arg){if(name===hook && path.basename(arg.file).startsWith('高清封面-'))process.kill(process.pid,'SIGKILL');}});
+      library.write(db=>d.control(db,{action:'resume',ids:null}));await d.run();`,
+          f.root,
+          files,
+          python,
+          JSON.stringify(fresh),
+          hook
+        ],
+        { cwd: repo, windowsHide: true, encoding: 'utf8' }
+      );
+      assert.notEqual(child.status, 0, child.stderr);
+      const saved = f.library.read((db) =>
+        db
+          .prepare(
+            "SELECT id,stage,body FROM file_commits WHERE work_id='72' AND json_extract(body,'$.key')='cover-hd' AND stage='verified'"
+          )
+          .get()
+      );
+      assert.ok(saved, child.stderr);
+      const record = JSON.parse(saved.body),
+        destination = path.join(media, record.relative);
+      const stage = path.join(media, '.cangxia-staging', 'commits', saved.id, record.stagedName);
+      assert.equal(fs.existsSync(stage), hook !== 'afterStagingUnlink');
+      assert.equal(fs.existsSync(destination), hook !== 'beforeFormalPlacement');
+      if (fs.existsSync(destination)) assert.equal(digest(fs.readFileSync(destination)), record.sha256);
+      const previous = path.join(media, '原始输入');
+      if (['source', 'foreign-target'].includes(mutation))
+        f.library.write((db) =>
+          saveWorks(db, { works: [observation('other')], aux: { audioSourceHints: [], creatorProfiles: [] } })
+        );
+      if (mutation === 'external-video') {
+        fs.renameSync(video, previous);
+        fs.copyFileSync(previous, video);
+      }
+      if (mutation === 'external-cover') {
+        const before = fs.statSync(cover, { bigint: true });
+        execFileSync(
+          python,
+          [
+            '-I',
+            '-c',
+            "import os,sys; p=sys.argv[1]; s=os.stat(p); f=open(p,'r+b'); b=f.read(1); f.seek(0); f.write(bytes([b[0]^1])); f.close(); os.utime(p,ns=(s.st_atime_ns,s.st_mtime_ns))",
+            cover
+          ],
+          { windowsHide: true }
+        );
+        const after = fs.statSync(cover, { bigint: true });
+        assert.deepEqual([after.ino, after.size, after.mtimeNs], [before.ino, before.size, before.mtimeNs]);
+      }
+      let foreignIdentity;
+      if (mutation === 'foreign-target') {
+        fs.unlinkSync(destination);
+        fs.copyFileSync(path.join(files, 'hd.png'), destination);
+        foreignIdentity = fs.statSync(destination, { bigint: true }).ino;
+      }
+      f.start();
+      await f.d.run();
+      const asset = f.rows().find((row) => row.key === 'cover-hd');
+      if (mutation === 'valid') {
+        assert.equal(asset?.sha256, record.sha256);
+        assert.equal(f.state('hd:72').state, 'complete');
+        continue;
+      }
+      assert.equal(asset, undefined, hook + ' ' + mutation);
+      assert.equal(f.query('work-detail', { id: '72' }).hdCover, null);
+      assert.equal(
+        f.info().assets.some((row) => row.key === 'cover-hd'),
+        false
+      );
+      if (mutation === 'foreign-target')
+        assert.equal(fs.statSync(destination, { bigint: true }).ino, foreignIdentity);
+      else assert.equal(fs.existsSync(destination), false);
+      if (mutation === 'external-video')
+        assert.equal(digest(fs.readFileSync(video)), digest(fs.readFileSync(previous)));
+      if (mutation === 'external-cover')
+        assert.notEqual(digest(fs.readFileSync(cover)), f.rows().find((row) => row.key === 'cover').sha256);
+      f.command('control-download', { action: 'cancel', jobId: 'hd:72' });
+      await f.d.run();
+      assert.equal(f.state('hd:72').downloadState, 'cancelled');
+      assert.equal(f.state('hd:72').cleanupPending, false);
+      if (mutation === 'foreign-target')
+        assert.equal(fs.statSync(destination, { bigint: true }).ino, foreignIdentity);
+      if (mutation === 'source') {
+        f.library.write((db) =>
+          saveWorks(db, { works: [work], aux: { audioSourceHints: [], creatorProfiles: [] } })
+        );
+        f.ipc.repairVideoCover(['72']);
+        await f.d.run();
+        assert.equal(f.state('hd:72').state, 'complete');
+      }
+    }
+  }
+);

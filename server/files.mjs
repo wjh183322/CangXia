@@ -793,13 +793,14 @@ export async function verifyAndPlace({
   guard?.();
   Object.assign(commit.body, details);
   updateCommit(store, commit, 'verified');
-  return placeVerified({ store, layout, commit, guard });
+  return placeVerified({ store, layout, commit, guard, signal });
 }
 
-async function registerFile(store, commit) {
+async function registerFile(store, commit, hdGuard) {
   const { workId, resourceId, body } = commit;
   return store.withWrite((db) => {
     assertWorkFiles(store, workId);
+    hdGuard?.();
     const previous = store.resources(workId).find((asset) => asset.key === body.key);
     if (
       previous
@@ -892,7 +893,7 @@ async function placeMetadataReplacement({ store, commit, dir, destination, stage
   }
 }
 
-async function settlePlacement({ store, commit, destination, dir, staged }) {
+async function settlePlacement({ store, commit, destination, dir, staged, hdGuard }) {
   const { body } = commit;
   destination.stat = await status(destination.file);
   const stagingAlias = staged && (await status(staged.file));
@@ -910,10 +911,110 @@ async function settlePlacement({ store, commit, destination, dir, staged }) {
     store.fileHook('afterStagingUnlink', { workId: commit.workId, file: destination.file });
   }
   updateCommit(store, commit, 'placed');
-  return registerFile(store, commit);
+  return registerFile(store, commit, hdGuard);
 }
 
-async function placeVerified({ store, layout, commit, recoverOnly = false, guard }) {
+const withheldName = 'withheld-hd';
+
+// A derived image is publishable only while both its source observation and the
+// physical inputs used by the matcher are current. Ordinary transfers retain
+// their existing recovery rules for bytes already put in place.
+async function hdPublicationGuard({ store, layout, commit, guard, signal }) {
+  const verified = [];
+  const check = () => {
+    guard?.();
+    if (!store.hdCommitCurrent?.(commit)) throw problem('NAS_MEDIA_SET_REVIEW', '归档媒体来源已变更。');
+    for (const { asset, ctimeNs } of verified) {
+      const current = lstatSync(asset.file, { bigint: true, throwIfNoEntry: false });
+      if (!current || current.ctimeNs !== ctimeNs) throw review();
+      assertResourceCurrent({ store, resource: asset, stat: current });
+    }
+  };
+  check();
+  for (const [key, sha256] of Object.entries(commit.body.hdInputs)) {
+    const asset = await resolveResource({ store, layout, workId: commit.workId, key, signal });
+    if (!asset || asset.sha256 !== sha256) throw review();
+    const stat = await status(asset.file);
+    if (!stat) throw missing();
+    assertResourceCurrent({ store, resource: asset, stat });
+    await assertDigest({ file: asset.file, stat }, asset, 1, signal);
+    verified.push({ asset, ctimeNs: stat.ctimeNs });
+    check();
+  }
+  return check;
+}
+
+async function withholdHD({ store, layout, commit }) {
+  const { body } = commit;
+  if (!body.hdInputs || body.key !== 'cover-hd' || !stageName.test(body.stagedName)) throw review();
+  if (commit.stage !== 'hd-withdrawing') updateCommit(store, commit, 'hd-withdrawing');
+  const dir = await commitDirectory(layout, commit);
+  const staged = path.join(dir, body.stagedName),
+    withheld = path.join(dir, withheldName);
+  const parts = components(body.relative);
+  const leaf = parts.pop();
+  const parent = await directory(layout.media, parts.join('/'));
+  if (!same(parent.stat, body.homeIdentity)) throw review();
+  const formal = path.join(parent.file, leaf);
+  const formalStat = await status(formal),
+    stagedStat = await status(staged);
+  if (formalStat?.isFile() && same(formalStat, body.identity)) {
+    // A foreign file at either name stays in place, including equal bytes under a different inode.
+    if (await status(withheld)) throw review();
+    const alias = stagedStat?.isFile() && same(stagedStat, body.identity);
+    if (formalStat.nlink !== BigInt(alias ? 2 : 1)) throw review();
+    await assertDigest({ file: formal, stat: formalStat }, body, alias ? 2 : 1);
+    if (!same(await status(formal), body.identity) || !same(await status(parent.file), body.homeIdentity))
+      throw review();
+    await moveExclusive(formal, withheld);
+    await syncDirectory(parent.file);
+    await syncDirectory(dir);
+  }
+  const quarantine = await status(withheld),
+    alias = await status(staged);
+  if (quarantine) {
+    if (!quarantine.isFile() || !same(quarantine, body.identity)) throw review();
+    const linked = alias?.isFile() && same(alias, body.identity);
+    if (quarantine.nlink !== BigInt(linked ? 2 : 1)) throw review();
+    await assertDigest({ file: withheld, stat: quarantine }, body, linked ? 2 : 1);
+    if (linked) {
+      if (!same(await status(staged), body.identity)) throw review();
+      await fs.unlink(staged);
+      await syncDirectory(dir);
+    }
+  }
+  updateCommit(store, commit, 'hd-withheld');
+}
+
+async function placeVerified(options) {
+  const { store, layout, commit } = options;
+  if (!commit.body.hdInputs) return placeBytes(options);
+  if (options.recoverOnly || commit.stage === 'hd-withdrawing') {
+    await withholdHD(options);
+    return null;
+  }
+  try {
+    const guard = await hdPublicationGuard(options);
+    return await placeBytes({ ...options, guard });
+  } catch (error) {
+    if (
+      [
+        'NAS_FILE_REVIEW',
+        'NAS_FILE_PATH',
+        'NAS_FILE_MISSING',
+        'NAS_MEDIA_SET_REVIEW',
+        'NAS_DOWNLOAD_STOP',
+        'NAS_FILE_RECOVERY_PAUSED',
+        'LOGIN_REQUIRED'
+      ].includes(error.code)
+    ) {
+      await withholdHD({ store, layout, commit });
+    }
+    throw error;
+  }
+}
+
+async function placeBytes({ store, layout, commit, recoverOnly = false, guard }) {
   assertWorkFiles(store, commit.workId);
   const { body } = commit;
   const dir = await commitDirectory(layout, commit);
@@ -952,7 +1053,14 @@ async function placeVerified({ store, layout, commit, recoverOnly = false, guard
       staged: staged.file
     });
   }
-  return settlePlacement({ store, commit, destination, dir, staged });
+  return settlePlacement({
+    store,
+    commit,
+    destination,
+    dir,
+    staged,
+    hdGuard: body.hdInputs ? guard : undefined
+  });
 }
 
 export function registeredAssetProof(db, workId, asset) {
@@ -1086,9 +1194,24 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
       continue;
     }
     if (
+      commit.body.jobId === jobId &&
+      (!key || commit.body.key === key) &&
+      commit.body.hdInputs &&
+      ['verified', 'placed', 'hd-withdrawing'].includes(commit.stage)
+    ) {
+      try {
+        await withholdHD({ store, layout, commit });
+      } catch {
+        pending = true;
+        continue;
+      }
+    }
+    if (
       commit.body.jobId !== jobId ||
       (key && commit.body.key !== key) ||
-      !['staged', 'rejected', 'allocating', 'verified', 'cancel-cleanup'].includes(commit.stage)
+      !['staged', 'rejected', 'allocating', 'verified', 'cancel-cleanup', 'hd-withheld'].includes(
+        commit.stage
+      )
     )
       continue;
     try {
@@ -1097,9 +1220,15 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
       const names = await fs.readdir(dir);
       for (const name of names) {
         const file = path.join(dir, name);
-        const owned = commit.body.files?.[name];
+        const withheld = !!commit.body.hdInputs && name === withheldName;
+        const owned = withheld ? commit.body.identity : commit.body.files?.[name];
         const stat = await status(file);
-        if (!stageName.test(name) || !stat?.isFile() || stat.nlink !== 1n || !same(stat, owned)) {
+        if (
+          (!stageName.test(name) && !withheld) ||
+          !stat?.isFile() ||
+          stat.nlink !== 1n ||
+          !same(stat, owned)
+        ) {
           pending = true;
           continue;
         }
@@ -1108,6 +1237,8 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
           const current = await status(file);
           if (!current) return;
           if (!current.isFile() || current.nlink !== 1n || !same(current, owned)) throw review();
+          if (commit.body.hdInputs && (withheld || name === commit.body.stagedName))
+            await assertDigest({ file, stat: current }, commit.body);
           await fs.unlink(file);
         });
       }
@@ -1125,7 +1256,7 @@ export async function cleanFileStages({ store, layout, workId, jobId, key }) {
 
 export async function recoverFileCommits({ store, layout, workId, jobId, guard }) {
   const results = [];
-  const stages = ['verified', 'swapping', 'placed', 'moving'];
+  const stages = ['verified', 'swapping', 'placed', 'moving', 'hd-withdrawing'];
   for (const candidate of store.fileCommits(workId)) {
     if (!stages.includes(candidate.stage) || (jobId && candidate.body.jobId !== jobId)) continue;
     const result = await withWorkFiles(layout, candidate.workId, async () => {
@@ -1171,12 +1302,16 @@ export async function recoverFileCommits({ store, layout, workId, jobId, guard }
           commit.body.jobId &&
           store.db.prepare('SELECT state FROM download_jobs WHERE id=?').get(commit.body.jobId)?.state ===
             'cancelling';
-        if (!result && (obsolete || cancelling))
+        if (!result && commit.stage !== 'hd-withheld' && (obsolete || cancelling))
           updateCommit(store, commit, commit.stage === 'moving' ? 'cancelled' : 'rejected');
         return result;
       } catch (error) {
         if (error.code === 'NAS_FILE_RECOVERY_PAUSED') return null;
-        if (error.code === 'NAS_FILE_REVIEW' && commit.stage !== 'moving') markCommitForReview(store, commit);
+        if (
+          error.code === 'NAS_FILE_REVIEW' &&
+          !['moving', 'hd-withdrawing', 'hd-withheld'].includes(commit.stage)
+        )
+          markCommitForReview(store, commit);
         return { id: commit.id, workId: commit.workId, stage: commit.stage, error: fileReason(error) };
       }
     });
@@ -1299,7 +1434,14 @@ async function applyMove({ store, layout, commit, recoverOnly = false, guard }) 
 async function writeMetadata({ store, layout, work, home, jobId, signal, guard }) {
   guard();
   const { id: workId } = work;
-  const assets = store.resources(workId).filter((row) => row.kind !== 'metadata');
+  const hdCover = currentHDCover(store.db, workId);
+  const assets = store
+    .resources(workId)
+    .filter(
+      (row) =>
+        row.kind !== 'metadata' &&
+        (row.key !== 'cover-hd' || (hdCover?.key === row.key && hdCover.sha256 === row.sha256))
+    );
   if (!assets.length) return;
   for (const asset of assets)
     await resolveResource({ store, layout, workId, key: asset.key, verify: true, signal });
@@ -1339,7 +1481,7 @@ async function writeMetadata({ store, layout, work, home, jobId, signal, guard }
       .prepare('SELECT tag FROM work_tags WHERE work_id=? ORDER BY rowid')
       .all(workId)
       .map((row) => row.tag),
-    hdCover: currentHDCover(store.db, workId) ?? undefined,
+    hdCover: hdCover ?? undefined,
     publishedAt: work.publishedAt,
     originalURL: work.url,
     music: work.music,
