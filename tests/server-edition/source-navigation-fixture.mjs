@@ -112,7 +112,7 @@ export async function testNavigation(t, openOfficialProvider) {
   });
   await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
   t.after(() => proxy.close());
-  const browser = await chromium.launch({ proxy: { server: 'http://127.0.0.1:' + proxy.address().port } });
+  const browser = await chromium.launch({ chromiumSandbox: process.platform === 'linux', proxy: { server: 'http://127.0.0.1:' + proxy.address().port } });
   t.after(() => browser.close());
   const links = [];
   let page;

@@ -1,5 +1,7 @@
 # 藏匣服务版 CangXia Server
 
+[0.4.1 候选装机、绿联备份还原与现场验收](release-acceptance.md)
+
 正式代码开发分支为 `codex/server-edition-full`。它从试验分支 `codex/server-edition` 的提交 `e2ac5b10f8f7df2eb6e1966558ba54e5a8948e59` 分出。[已确认的完整版设计](../superpowers/specs/2026-11-26-full-server-edition-design.md)
 
 [0.4.1 完整实施计划](../superpowers/plans/2026-11-26-full-server-edition.md)

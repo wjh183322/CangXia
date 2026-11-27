@@ -1,0 +1,93 @@
+name: Server edition candidate
+on:
+  push:
+    branches: [codex/server-edition-full]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    if: github.ref == 'refs/heads/codex/server-edition-full'
+    runs-on: windows-2025
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with: {node-version: '24.21.0', package-manager-cache: false}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: npm ci
+      - run: npm ci --prefix server --ignore-scripts
+      - run: python -m pip install --only-binary=:all: numpy==2.2.6 opencv-python-headless==4.11.0.86
+      - run: node server/node_modules/playwright-core/cli.js install chromium
+      - run: npm run test:ui
+      - run: npm run test:layout
+      - shell: pwsh
+        run: |
+          $env:CANGXIA_TEST_COVER_PYTHON=(Get-Command python).Source
+          npm run test:server-desktop
+      - run: npm run dist
+      - shell: pwsh
+        run: ./scripts/smoke-server-install.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-windows-${{ github.sha }}
+          path: |
+            release/server/*.exe
+            release/server/*.zip
+            release/server/candidate.json
+          if-no-files-found: error
+          retention-days: 7
+  linux:
+    if: github.ref == 'refs/heads/codex/server-edition-full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      IMAGE: cangxia-server:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with: {node-version: '24.21.0', package-manager-cache: false}
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build runtime and run OpenCV golden
+        run: |
+          docker buildx build --platform linux/amd64 --load --provenance=false --sbom=false \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" -f server/Dockerfile -t "$IMAGE" .
+      - name: Inspect merged filesystem and every post-base layer
+        run: |
+          set -euo pipefail
+          base=$(node --input-type=module -e "import {BASE_IMAGE} from './feasibility/nas-b/scripts/image-inputs.mjs'; console.log(BASE_IMAGE)")
+          docker pull --platform linux/amd64 "$base"
+          c=$(docker create "$IMAGE"); trap 'docker rm "$c" >/dev/null' EXIT
+          docker export "$c" | tar -tf - > "$RUNNER_TEMP/paths"
+          n=$(node scripts/audit-server-image.mjs "$IMAGE" "$GITHUB_SHA" "$RUNNER_TEMP/paths")
+          docker image inspect "$IMAGE" > "$RUNNER_TEMP/inspect.json"
+          docker save "$IMAGE" -o "$RUNNER_TEMP/content.tar"
+          python3 -B feasibility/nas-b/scripts/audit_image_layers.py "$RUNNER_TEMP/content.tar" "$RUNNER_TEMP/inspect.json" "$IMAGE" "$n"
+          rm -- "$RUNNER_TEMP/content.tar"
+      - name: Test disposable installation, two credentials, update, Chromium and native media
+        run: bash scripts/test-server-container.sh "$IMAGE"
+      - name: Seal tested image and deployment files
+        run: |
+          set -euo pipefail
+          if ! command -v skopeo >/dev/null; then sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update && sudo apt-get install -y skopeo; fi
+          mkdir -p release/server-linux
+          cd release/server-linux
+          skopeo copy --format oci "docker-daemon:$IMAGE" oci-archive:image.tar
+          config=$(skopeo inspect --raw oci-archive:image.tar | jq -er .config.digest)
+          test "$config" = "$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+          digest="sha256:$(skopeo inspect --raw oci-archive:image.tar | sha256sum | cut -d' ' -f1)"
+          jq -n --arg revision "$GITHUB_SHA" --arg digest "$digest" --arg config "$config" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{sourceRevision:$revision,version:"0.4.1",protocolVersion:1,digest:$digest,configDigest:$config,run:$run,attempt:$attempt}' > candidate.json
+          cp ../../server/compose.yaml ../../feasibility/nas-b/chromium-seccomp.{json,LICENSE} ../../docs/server-edition/{release-acceptance,migration-rehearsal}.md .
+          sha256sum image.tar compose.yaml chromium-seccomp.json > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-linux-${{ github.sha }}
+          path: release/server-linux/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

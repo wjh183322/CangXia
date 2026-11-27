@@ -1,0 +1,39 @@
+name: cangxia-server
+services:
+  server:
+    image: ${CANGXIA_IMAGE:-ghcr.io/wjh183322/cangxia-server:latest}
+    platform: linux/amd64
+    init: true
+    restart: unless-stopped
+    user: "${CANGXIA_UID:-1000}:${CANGXIA_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./chromium-seccomp.json
+    shm_size: 512m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    ports:
+      - "${CANGXIA_PORT:-9443}:9443"
+    environment:
+      CANGXIA_URL: "${CANGXIA_URL:?Set the HTTPS address used by your Windows clients}"
+      CANGXIA_REHEARSAL_ROOT: /rehearsal
+      CANGXIA_SOURCE_UID: "${CANGXIA_SOURCE_UID:-}"
+      CANGXIA_DEPLOYED_DIGEST: "${CANGXIA_DEPLOYED_DIGEST:-}"
+      CANGXIA_RESTORE_NAME: "${CANGXIA_RESTORE_NAME:-}"
+      CANGXIA_RESTORE_LIBRARY: "${CANGXIA_RESTORE_LIBRARY:-}"
+      CANGXIA_RESTORE_SHA256: "${CANGXIA_RESTORE_SHA256:-}"
+    volumes:
+      - type: bind
+        source: "${CANGXIA_LIBRARY:?Select the dedicated library directory}"
+        target: /library
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${CANGXIA_CONFIG:?Select the private identity directory}"
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${CANGXIA_REHEARSAL:?Select the separate rehearsal directory}"
+        target: /rehearsal
+        bind: {create_host_path: false}

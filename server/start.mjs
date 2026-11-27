@@ -13,7 +13,7 @@ export function startServer({ root, expectedId }) {
   return openLibrary({ root, expectedId, mode: 'open' });
 }
 
-async function main([action = 'start', ...args]) {
+export async function runService([action = 'start', ...args]) {
   const options = { root: { type: 'string' }, 'library-id': { type: 'string' } };
   if (action === 'upgrade') {
     for (const key of ['from', 'to', 'image-digest', 'approval']) options[key] = { type: 'string' };
@@ -90,7 +90,7 @@ async function main([action = 'start', ...args]) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    console.log(JSON.stringify(await main(process.argv.slice(2))));
+    console.log(JSON.stringify(await runService(process.argv.slice(2))));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
