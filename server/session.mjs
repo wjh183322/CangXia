@@ -199,7 +199,7 @@ export function createSessionService({
   let localGrant,
     timer,
     closed = false;
-  library.write(db=>db.exec("UPDATE removal_batches SET state='paused' WHERE state='running'"));
+  library.write(db=>db.exec("UPDATE removal_batches SET state='paused' WHERE state='running'; UPDATE removal_batches SET state=json_extract(body,'$.manual.prior'),body=json_set(json_remove(body,'$.manual'),'$.reason','上次原位核对中断，请打开文件清单重新核对该项。') WHERE state='checking'"));
   library.write((db) =>
     db
       .prepare(

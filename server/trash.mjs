@@ -162,6 +162,10 @@ async function move(from, to, name) {
 }
 export function createTrashAdapter({ layout, bin }) {
   const mountFilesystems = new Map();
+  const serviceIdentity = () =>
+    linux
+      ? [process.geteuid(), process.getegid(), ...process.getgroups()].join(',')
+      : process.env.USERNAME || '';
   function binding() {
     if (!bin)
       throw invalid(
@@ -182,9 +186,7 @@ export function createTrashAdapter({ layout, bin }) {
       method: 'mirror-exclusive-rename-v1',
       media,
       recycle,
-      service: linux
-        ? [process.geteuid(), process.getegid(), ...process.getgroups()].join(',')
-        : process.env.USERNAME || '',
+      service: serviceIdentity(),
       boot: linux ? fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : ''
     };
   }
@@ -194,11 +196,20 @@ export function createTrashAdapter({ layout, bin }) {
   }
   function sameVolume(previous, current) {
     if (!previous || previous.method !== current.method || previous.service !== current.service) return false;
-    return ['media', 'recycle'].every((key) => {
-      const a = previous[key],
-        b = current[key];
-      return a?.filesystem && a.filesystem === b.filesystem && a.path === b.path && equal(a, b);
-    });
+    const roots = ['media', 'recycle'];
+    if (!roots.every((k) => previous[k]?.path === current[k].path && equal(previous[k], current[k])))
+      return false;
+    if (roots.every((k) => previous[k].filesystem && previous[k].filesystem === current[k].filesystem))
+      return true;
+    // e23c690 had no filesystem ID. A live, unchanged boot and the two original mount
+    // identities establish continuity on Linux. Windows records volume serials in dev.
+    return (
+      roots.every(
+        (k) => !Object.hasOwn(previous[k], 'filesystem') && previous[k].mount === current[k].mount
+      ) &&
+      previous.boot === current.boot &&
+      (!linux || (!!current.boot && roots.every((k) => /^\d+$/.test(current[k].mount))))
+    );
   }
   function consistentPaths(old, next, rebound) {
     if (!rebound) return JSON.stringify(old) === JSON.stringify(next);
@@ -241,6 +252,8 @@ export function createTrashAdapter({ layout, bin }) {
   // An unchanged singly-linked original is sufficient to abandon a deletion.
   // Recheck its canonical path inside the receipt transaction, even if the bin has gone offline.
   async function intactOriginal(file, expected, paths) {
+    if (expected.service !== serviceIdentity() || expected.method !== 'mirror-exclusive-rename-v1')
+      throw conflict();
     const parts = components(file),
       name = parts.pop(),
       parent = path.join(layout.media, ...parts);
@@ -274,7 +287,9 @@ export function createTrashAdapter({ layout, bin }) {
       return () => {
         const current = openParent();
         try {
-          if (stamp(stat(child(current, name))) !== before) throw conflict();
+          const registered = stat(child(current, name));
+          if (stamp(registered) !== before) throw conflict();
+          return String(registered.ctimeNs);
         } finally {
           current.close();
         }
@@ -287,6 +302,7 @@ export function createTrashAdapter({ layout, bin }) {
     check(expected);
     const parts = components(file),
       name = parts.pop();
+    let originalChangeNs;
     for (const [side, root] of [
       ['original', layout.media],
       ['recycled', bin]
@@ -295,11 +311,14 @@ export function createTrashAdapter({ layout, bin }) {
       try {
         if (JSON.stringify(current.chain.slice(-(parts.length + 1))) !== JSON.stringify(observed.paths[side]))
           throw invalid('原目录或回收子目录已被移动或替换。请按回执原路径找回并核对原目录，再重试。');
-        if (observed.stamps && stamp(stat(child(current, name))) !== observed.stamps[side]) throw conflict();
+        const state = stat(child(current, name));
+        if (observed.stamps && stamp(state) !== observed.stamps[side]) throw conflict();
+        if (side === 'original' && state) originalChangeNs = String(state.ctimeNs);
       } finally {
         current.close();
       }
     }
+    return originalChangeNs;
   }
   async function access(file, expected, action, options = {}) {
     check(expected);

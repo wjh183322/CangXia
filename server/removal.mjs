@@ -58,22 +58,22 @@ function newBatch(db, owner, scope, body) {
   );
   return token;
 }
-function fileBusy(db, id, except = '') {
+function fileBusy(db, id, except = '', also = '') {
   return !!db
     .prepare(
       `SELECT 1 FROM download_jobs WHERE work_id=? AND state NOT IN ('complete','cancelled','failed')
     UNION ALL SELECT 1 FROM file_commits WHERE work_id=? AND stage NOT IN ('registered','cleaned','cancelled')
     UNION ALL SELECT 1 FROM archive_state WHERE work_id=? AND revision<>completed
-    UNION ALL SELECT 1 FROM removal_items i JOIN removal_batches b ON b.token=i.token WHERE i.work_id=? AND b.token<>?
-    AND b.scope IN ('files','restore-files') AND b.state IN ('running','paused','restoring') AND i.state='ready' LIMIT 1`
+    UNION ALL SELECT 1 FROM removal_items i JOIN removal_batches b ON b.token=i.token WHERE i.work_id=? AND b.token NOT IN (?,?)
+    AND b.scope IN ('files','restore-files') AND ((b.state IN ('running','paused','restoring','checking') AND i.state='ready') OR (b.state='checking' AND i.ordinal=json_extract(b.body,'$.manual.ordinal'))) LIMIT 1`
     )
-    .get(id, id, id, id, except);
+    .get(id, id, id, id, except, also);
 }
 export function removalOwnsFiles(db, id) {
   return !!db
     .prepare(
       `SELECT 1 FROM removal_items i JOIN removal_batches b ON b.token=i.token WHERE i.work_id=?
-    AND b.scope IN ('files','restore-files') AND b.state IN ('running','paused','restoring') AND i.state='ready' LIMIT 1`
+    AND b.scope IN ('files','restore-files') AND ((b.state IN ('running','paused','restoring','checking') AND i.state='ready') OR (b.state='checking' AND i.ordinal=json_extract(b.body,'$.manual.ordinal'))) LIMIT 1`
     )
     .get(id);
 }
@@ -100,6 +100,41 @@ function free(db, file) {
   )
     throw error('文件登记或原路径已有新版本，请保留两个版本并核对。');
 }
+function registerVerifiedOriginal(db, f, changeNs, restore) {
+  if (!/^\d+$/.test(changeNs)) throw stale();
+  if (restore) free(db, f);
+  else resource(db, f);
+  const row = db
+    .prepare(
+      "SELECT id,body FROM file_commits WHERE work_id=? AND resource_id=? AND stage='registered' AND json_extract(body,'$.sha256')=? AND json_extract(body,'$.size')=? ORDER BY revision DESC LIMIT 1"
+    )
+    .get(f.work_id, f.id, f.sha256, f.size);
+  const proof = row && JSON.parse(row.body);
+  if (
+    !proof ||
+    proof.mtimeNs !== f.mtimeNs ||
+    proof.identity?.dev !== f.identity.dev ||
+    proof.identity?.ino !== f.identity.ino
+  )
+    throw stale();
+  const revision = db
+    .prepare('UPDATE download_options SET revision=max(revision,?)+1 RETURNING revision')
+    .get(f.revision).revision;
+  if (restore) {
+    db.prepare('INSERT INTO media_files VALUES(?,?,?,?,?)').run(
+      f.id,
+      f.work_id,
+      f.relative_path,
+      f.size,
+      f.sha256
+    );
+    db.prepare('INSERT INTO archive_assets VALUES(?,?,?,?,?)').run(f.id, f.key, f.kind, f.mime, revision);
+  } else db.prepare('UPDATE archive_assets SET revision=? WHERE id=?').run(revision, f.id);
+  db.prepare("UPDATE file_commits SET body=json_set(body,'$.registeredChangeNs',?) WHERE id=?").run(
+    changeNs,
+    row.id
+  );
+}
 function summary(db, b, offset = 0) {
   if (!Number.isSafeInteger(offset) || offset < 0) throw stale();
   const { total, done, restorable } = db
@@ -108,11 +143,14 @@ function summary(db, b, offset = 0) {
     )
     .get(b.token);
   const items = db
-    .prepare('SELECT work_id,state,body FROM removal_items WHERE token=? ORDER BY ordinal LIMIT 20 OFFSET ?')
+    .prepare(
+      'SELECT ordinal,work_id,state,body FROM removal_items WHERE token=? ORDER BY ordinal LIMIT 20 OFFSET ?'
+    )
     .all(b.token, offset)
     .map((row) => {
       const data = JSON.parse(row.body);
       return {
+        ordinal: row.ordinal,
         workId: row.work_id,
         state: row.state,
         title: data.title,
@@ -364,10 +402,95 @@ export function createRemovalService({ library, files }) {
   }
   const active = new Map();
   let closed = false;
+  function legacy(b) {
+    return (
+      b.body.binding && ['media', 'recycle'].every((k) => !Object.hasOwn(b.body.binding[k], 'filesystem'))
+    );
+  }
+  function originalBatchState(db, token) {
+    const states = db
+      .prepare('SELECT state FROM removal_items WHERE token=? GROUP BY state')
+      .all(token)
+      .map((r) => r.state);
+    if (states.includes('ready')) return 'paused';
+    if (states.includes('done')) return states.includes('cancelled') ? 'cancelled' : 'done';
+    return states.includes('restored') ? 'restored' : 'cancelled';
+  }
+  async function checkManualOriginal(b) {
+    const { ordinal, prior } = b.body.manual;
+    const { manual, ...body } = b.body;
+    const item = library.read((db) =>
+      parse(db.prepare('SELECT * FROM removal_items WHERE token=? AND ordinal=?').get(b.token, ordinal))
+    );
+    try {
+      await withWorkFiles(files.layout, item.work_id, async () => {
+        const f = item.body.file;
+        const intact = await adapter.intactOriginal(
+          f,
+          body.binding,
+          item.body.attempt || item.body.receiptPaths
+        );
+        if (!intact) throw error('原路径的文件身份、长度、修改时间或 SHA-256 不符，原有资料和回执已保留。');
+        library.write((db) => {
+          const row = db.prepare('SELECT state FROM removal_batches WHERE token=?').get(b.token);
+          if (
+            row?.state !== 'checking' ||
+            sourceAccount(db) !== body.sourceUid ||
+            fileBusy(db, f.work_id, b.token, body.parent ?? '')
+          )
+            throw stale();
+          const home = JSON.parse(
+            db.prepare('SELECT body FROM archive_homes WHERE work_id=?').get(f.work_id)?.body || 'null'
+          );
+          if (home?.identity?.dev !== f.parent.dev || home.identity.ino !== f.parent.ino) throw stale();
+          const restore = b.scope === 'restore-files',
+            insert = restore || item.state === 'done';
+          registerVerifiedOriginal(db, f, intact(), insert);
+          const state = restore ? 'done' : insert ? 'restored' : 'cancelled';
+          db.prepare('UPDATE removal_items SET state=? WHERE token=? AND ordinal=? AND state=?').run(
+            state,
+            b.token,
+            ordinal,
+            item.state
+          );
+          if (restore) {
+            if (
+              !db
+                .prepare(
+                  "UPDATE removal_items SET state='restored' WHERE token=? AND ordinal=? AND state='done'"
+                )
+                .run(body.parent, ordinal).changes
+            )
+              throw stale();
+            const unfinished = db
+              .prepare("SELECT 1 FROM removal_items WHERE token=? AND state='ready' LIMIT 1")
+              .get(b.token);
+            if (!unfinished)
+              db.prepare('UPDATE removal_batches SET state=? WHERE token=?').run(
+                originalBatchState(db, body.parent),
+                body.parent
+              );
+            mark(db, b.token, unfinished ? 'paused' : 'done', { ...body, reason: '' });
+          } else mark(db, b.token, originalBatchState(db, b.token), { ...body, reason: '' });
+        });
+      });
+    } catch (e) {
+      library.write((db) =>
+        mark(db, b.token, prior, {
+          ...body,
+          reason:
+            item.body.file.relative_path +
+            ' — ' +
+            (e.status ? e.message : '无法核对原目录及文件，请核对后重试。')
+        })
+      );
+    }
+  }
   async function run(token) {
     const b = library.read((db) =>
       parse(db.prepare('SELECT * FROM removal_batches WHERE token=?').get(token))
     );
+    if (b?.state === 'checking') return checkManualOriginal(b);
     if (!b || b.state !== 'running') return;
     while (!closed) {
       const item = library.read((db) => {
@@ -442,7 +565,7 @@ export function createRemovalService({ library, files }) {
               const intact = await adapter.intactOriginal(f, b.body.binding, previous);
               if (intact) {
                 library.write((db) => {
-                  intact();
+                  registerVerifiedOriginal(db, f, intact(), false);
                   db.prepare("UPDATE removal_items SET state='cancelled' WHERE token=? AND ordinal=?").run(
                     token,
                     item.ordinal
@@ -456,7 +579,8 @@ export function createRemovalService({ library, files }) {
               destination = restoring ? observed.original : observed.recycled;
             if (origin === 'owned') {
               library.write((db) => {
-                adapter.assertObserved(f, b.body.binding, observed);
+                const stamp = adapter.assertObserved(f, b.body.binding, observed);
+                if (!restoring) registerVerifiedOriginal(db, f, stamp, false);
                 db.prepare("UPDATE removal_items SET state='cancelled' WHERE token=? AND ordinal=?").run(
                   token,
                   item.ordinal
@@ -473,32 +597,13 @@ export function createRemovalService({ library, files }) {
           }
           library.write((db) => {
             guard(db);
-            adapter.assertObserved(f, b.body.binding, observed);
+            const stamp = adapter.assertObserved(f, b.body.binding, observed);
             if (restoring) {
               db.prepare("UPDATE removal_items SET state='restored' WHERE token=? AND ordinal=?").run(
                 b.body.parent,
                 item.ordinal
               );
-              db.prepare('INSERT INTO media_files VALUES(?,?,?,?,?)').run(
-                f.id,
-                f.work_id,
-                f.relative_path,
-                f.size,
-                f.sha256
-              );
-              const version = db
-                .prepare('UPDATE download_options SET revision=max(revision,?)+1 RETURNING revision')
-                .get(f.revision).revision;
-              db.prepare('INSERT INTO archive_assets VALUES(?,?,?,?,?)').run(
-                f.id,
-                f.key,
-                f.kind,
-                f.mime,
-                version
-              );
-              db.prepare(
-                "UPDATE file_commits SET body=json_remove(body,'$.registeredChangeNs') WHERE work_id=? AND resource_id=? AND stage='registered'"
-              ).run(f.work_id, f.id);
+              registerVerifiedOriginal(db, f, stamp, true);
             } else {
               db.prepare('DELETE FROM archive_assets WHERE id=?').run(f.id);
               db.prepare('DELETE FROM media_files WHERE id=?').run(f.id);
@@ -524,8 +629,31 @@ export function createRemovalService({ library, files }) {
       }
     }
   }
-  function control(db, { payload: { token, action } }, owner) {
+  function control(db, { payload: { token, action, ordinal, restored } }, owner) {
     const b = batch(db, token, owner);
+    if (action === 'manual') {
+      if (
+        !legacy(b) ||
+        !['files', 'restore-files'].includes(b.scope) ||
+        !['done', 'paused', 'cancelled'].includes(b.state) ||
+        active.has(token) ||
+        restored !== true ||
+        !Number.isSafeInteger(ordinal) ||
+        ordinal < 0
+      )
+        throw stale();
+      const item = db
+        .prepare('SELECT work_id,state FROM removal_items WHERE token=? AND ordinal=?')
+        .get(token, ordinal);
+      if (
+        !item ||
+        (b.scope === 'restore-files' ? item.state !== 'ready' : !['ready', 'done'].includes(item.state)) ||
+        fileBusy(db, item.work_id, token, b.body.parent ?? '')
+      )
+        throw stale();
+      mark(db, token, 'checking', { ...b.body, manual: { ordinal, prior: b.state } });
+      return { token };
+    }
     if (action === 'rebind') {
       if (
         !['files', 'restore-files'].includes(b.scope) ||
@@ -674,6 +802,10 @@ export function createRemovalService({ library, files }) {
   };
   function receiptView(db, b, offset) {
     const value = summary(db, b, offset);
+    value.manualReconcile =
+      !!legacy(b) &&
+      ['files', 'restore-files'].includes(b.scope) &&
+      ['done', 'paused', 'cancelled'].includes(b.state);
     if (
       !b.body.binding ||
       !['files', 'restore-files'].includes(b.scope) ||
@@ -686,7 +818,10 @@ export function createRemovalService({ library, files }) {
         value.rebindRequired = !!adapter.sameVolume(b.body.binding, current);
         value.reason = value.rebindRequired
           ? '已验证同一个卷和目录的新挂载。请明确重新绑定此回执，处理文件时将再次核对身份和内容。'
-          : '卷、原目录、回收目录或服务身份不符，请找回原位置。';
+          : value.reason ||
+            (value.manualReconcile
+              ? '旧证据无法核对当前挂载。请在绿联回收站手动还原后，打开文件清单逐项核对原位。'
+              : '卷、原目录、回收目录或服务身份不符，请找回原位置。');
       }
     } catch (e) {
       value.reason = value.reason || e.message;

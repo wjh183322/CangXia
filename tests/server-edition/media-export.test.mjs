@@ -48,7 +48,7 @@ const keypair = selfsigned.generate([{ name: 'commonName', value: 'localhost' }]
   keySize: 2048,
   algorithm: 'sha256'
 });
-async function fixture(t, { audioBytes = music, readDetail } = {}) {
+async function fixture(t, { audioBytes = music, readDetail, removalHook } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-media-'));
   const volume = path.join(root, 'volume'),
     profile = path.join(root, 'profile'),
@@ -109,7 +109,8 @@ async function fixture(t, { audioBytes = music, readDetail } = {}) {
     library,
     root: volume,
     source,
-    fileHook: (name) => {
+    fileHook: (name,info) => {
+      removalHook?.(name,info);
       if (name === 'beforeResourceVerify') fullVerifications++;
     },
     fetchAsset: async (url, options) => {
@@ -141,7 +142,8 @@ async function fixture(t, { audioBytes = music, readDetail } = {}) {
     downloads.store.resources('41').some((x) => x.key === 'video'),
     true
   );
-  const sessions = createSessionService({ library, source, downloads });
+  const bin=path.join(root,'native-bin');if(removalHook)fs.mkdirSync(bin);
+  const sessions = createSessionService({ library, source, downloads,removalFiles:removalHook?{...downloads,bin}:undefined });
   const tls = await keypair,
     credentials = { pc: { accountId: 'test', token: 's'.repeat(40) } };
   const server = createHttpsService({
@@ -181,7 +183,7 @@ async function fixture(t, { audioBytes = music, readDetail } = {}) {
   });
   return {
     root,
-    directory,
+    directory,bin,
     server,
     config,
     library,
@@ -1440,4 +1442,45 @@ test('one music ID and URL cannot bind a different equal-length MP4 track index 
     assert.equal(res.headers['content-type'], 'audio/mp4');
     assert.deepEqual(await contents(res), inline.subarray(start));
   }
+});
+
+test('verified cancellation on an offline recycle mount refreshes a registered video version and real HTTPS playback', async t=>{
+  const f=await fixture(t,{removalHook(stage,info){if(stage==='afterRemovalMove'&&info.file.key==='video')throw Error('simulated receipt interruption');}});
+  await f.connect();const c=f.client;
+  const cmd=(kind,payload)=>c.command({kind,payload,operationId:randomUUID(),entityVersion:0});
+  async function waitFor(kind,payload,matches){for(let i=0;i<200;i++){const r=await c.query(kind,payload);if(matches(r))return r;await new Promise(resolve=>setTimeout(resolve,40));}assert.fail('timed out '+kind);}
+  const before=(await c.query('work-detail',{id:'41'})).media.find(x=>x.key==='video');
+  const stream=(asset)=>f.manager.protocol(new Request(mediaURL(c.grant.libraryId,asset),{headers:{Range:'bytes=100-122'}}),c.epoch);
+  assert.deepEqual(Buffer.from(await(await stream(before)).arrayBuffer()),mp4.subarray(100,123));
+  await cmd('start-trash-probe',{supported:true,reference:'fixture',retention:'fixture'});
+  const p=await waitFor('trash-status',{},s=>s.phase==='await-native'&&!s.busy);
+  fs.renameSync(p.bin,p.original);await cmd('control-trash-probe',{token:p.token,observed:true,action:'verify'});
+  await waitFor('trash-status',{},s=>s.verified&&!s.busy);
+  const {scope,revision}=await c.query('list-works',{source:'media'});
+  const r=await cmd('preview-removal',{scope:'files',selection:{source:'media',scope,revision,ids:['41'],all:false}});
+  await cmd('confirm-removal',{token:r.token});await waitFor('removal-status',{token:r.token},s=>s.state==='paused');
+  const asset=f.downloads.store.resources('41').find(r=>r.key==='video');
+  const saved=()=>f.library.read(db=>JSON.parse(db.prepare("SELECT body FROM file_commits WHERE resource_id=? AND stage='registered' ORDER BY revision DESC LIMIT 1").get(asset.id).body));
+  assert.ok(saved().registeredChangeNs);
+  const original=path.join(f.downloads.layout.media,asset.relative_path);
+  fs.renameSync(path.join(f.bin,asset.relative_path),original);fs.renameSync(f.bin,f.bin+'.offline');
+  // Some filesystems retain change time across a rename. Force a metadata-only change there.
+  const initialStamp=saved().registeredChangeNs;
+  if(String(fs.statSync(original,{bigint:true}).ctimeNs)===initialStamp){
+    const arm=path.join(path.dirname(original),'fixture-alias');
+    fs.linkSync(original,arm);fs.unlinkSync(arm);
+  }
+  fs.renameSync(original,original+'.owned');fs.copyFileSync(original+'.owned',original);
+  await cmd('control-removal',{token:r.token,action:'cancel'});
+  await waitFor('removal-status',{token:r.token},s=>s.state==='paused'&&s.cancelling);
+  assert.equal(saved().registeredChangeNs,initialStamp);
+  assert.equal((await c.query('work-detail',{id:'41'})).media.find(x=>x.key==='video').version,before.version);
+  fs.renameSync(original,original+'.foreign');fs.renameSync(original+'.owned',original);
+  await cmd('control-removal',{token:r.token,action:'resume'});
+  await waitFor('removal-status',{token:r.token},s=>s.state==='cancelled');
+  assert.deepEqual(fs.readFileSync(original+'.foreign'),mp4);
+  const current=(await c.query('work-detail',{id:'41'})).media.find(x=>x.key==='video');
+  const response=await stream(current);assert.equal(response.status,206);assert.deepEqual(Buffer.from(await response.arrayBuffer()),mp4.subarray(100,123));
+  assert.notEqual(current.version,before.version);assert.equal((await stream(before)).status,409);
+  assert.equal(saved().registeredChangeNs,String(fs.statSync(original,{bigint:true}).ctimeNs));
 });

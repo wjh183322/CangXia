@@ -540,3 +540,158 @@ test('a persisted move intent can be cancelled using the verified intact origina
   assert.equal(f.store.resources('11').length, 1);
   assert.equal(fs.readFileSync(f.original, 'utf8'), 'synthetic bytes');
 });
+
+// Frozen legacy payload shape from e23c690. These rows have no filesystem ID,
+// protocol, per-item intent, receipt directory chain or new-format verification.
+function seedV14Receipt(f, { state = 'done', oldBoot = false, moved = true } = {}) {
+  const adapter = createTrashAdapter({ layout: f.layout, bin: f.bin }),
+    runtime = adapter.binding();
+  adapter.close();
+  const root = ({ path, dev, ino, mount }) => ({ path, dev, ino, mount });
+  const binding = {
+    method: 'mirror-exclusive-rename-v1',
+    media: root(runtime.media),
+    recycle: root(runtime.recycle),
+    service: runtime.service,
+    boot: oldBoot ? 'historical-linux-boot' : runtime.boot
+  };
+  const token = randomUUID(),
+    asset = f.store.resources('11')[0];
+  if (moved) {
+    const dest = path.join(f.bin, asset.relative_path);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(f.original, dest);
+  }
+  f.library.write((db) => {
+    const parent = JSON.parse(db.prepare('SELECT body FROM archive_homes').get().body).identity;
+    const body = {
+      count: 1,
+      files: 1,
+      relations: 3,
+      source: 'all',
+      sourceUid: null,
+      binding,
+      reason: '',
+      boot: randomUUID(),
+      generation: 1
+    };
+    db.prepare('INSERT INTO removal_batches VALUES(?,?,?,?,?,?,?)').run(
+      token,
+      'test',
+      'files',
+      7,
+      state,
+      Date.now(),
+      JSON.stringify(body)
+    );
+    db.prepare('INSERT INTO removal_items VALUES(?,?,?,?,?)').run(
+      token,
+      0,
+      '11',
+      state === 'done' ? 'done' : 'ready',
+      JSON.stringify({
+        title: 'sample',
+        file: { ...asset, identity: f.proof.identity, mtimeNs: f.proof.mtimeNs, parent }
+      })
+    );
+    db.prepare('INSERT INTO trash_probe VALUES(1,?)').run(
+      JSON.stringify({
+        token: randomUUID(),
+        account: 'test',
+        phase: 'verified',
+        binding,
+        relative_path: 'old-test/sample.txt',
+        reference: 'historical',
+        retention: 'test'
+      })
+    );
+    if (state === 'done') db.exec('DELETE FROM archive_assets;DELETE FROM media_files');
+  });
+  return token;
+}
+for (const state of ['done', 'paused'])
+  test(
+    'fresh probe explicitly upgrades actual e23c690 ' + state + ' receipt on the original mount',
+    async (t) => {
+      const f = fixture(t),
+        token = seedV14Receipt(f, { state });
+      assert.throws(() => f.cmd('control-removal', { token, action: 'rebind' }));
+      await verifyTestRecycle(f);
+      f.cmd('control-removal', { token, action: 'rebind' });
+      if (state === 'paused') {
+        f.cmd('control-removal', { token, action: 'resume' });
+        await until(
+          () => f.query('removal-status', { token }),
+          (s) => s.state === 'done'
+        );
+      }
+      const r = f.cmd('preview-restore', { token });
+      assert.equal(r.reason, '');
+      f.cmd('restore-removal', { token: r.token });
+      await until(
+        () => f.query('removal-status', { token: r.token }),
+        (s) => s.state === 'done'
+      );
+      assert.equal(fs.readFileSync(f.original, 'utf8'), 'synthetic bytes');
+    }
+  );
+test('legacy proof with replaced recycle root cannot be upgraded', async (t) => {
+  const f = fixture(t),
+    token = seedV14Receipt(f);
+  fs.renameSync(f.bin, f.bin + '-original');
+  fs.mkdirSync(f.bin);
+  await verifyTestRecycle(f);
+  assert.throws(() => f.cmd('control-removal', { token, action: 'rebind' }));
+  assert.equal(fs.existsSync(f.original), false);
+});
+for (const state of ['done', 'paused'])
+  test(
+    'old-boot legacy ' + state + ' receipt reconciles only the exact manually restored original',
+    async (t) => {
+      const f = fixture(t),
+        token = seedV14Receipt(f, { state, oldBoot: true });
+      await verifyTestRecycle(f);
+      assert.throws(() => f.cmd('control-removal', { token, action: 'rebind' }));
+      const recycled = path.join(f.bin, 'folder', 'one', 'video.mp4');
+      fs.copyFileSync(recycled, f.original);
+      const manual = () => f.cmd('control-removal', { token, action: 'manual', ordinal: 0, restored: true });
+      const status = () => f.query('removal-status', { token });
+      manual();
+      await until(status, (s) => s.state !== 'checking');
+      assert.equal(status().state, state);
+      assert.equal(f.store.resources('11').length, state === 'done' ? 0 : 1);
+      fs.renameSync(f.original, f.original + '.unknown');
+      fs.renameSync(recycled, f.original);
+      manual();
+      await until(status, (s) => s.state === (state === 'done' ? 'restored' : 'cancelled'));
+      assert.equal(f.store.resources('11').length, 1);
+      assert.equal(fs.readFileSync(f.original + '.unknown', 'utf8'), 'synthetic bytes');
+    }
+  );
+
+test('legacy partially restored batch reconciles its in-flight restore item and parent receipt', async (t) => {
+  const f = fixture(t),
+    parent = seedV14Receipt(f, { oldBoot: true }),
+    token = randomUUID();
+  f.library.write((db) => {
+    const old = JSON.parse(db.prepare('SELECT body FROM removal_batches WHERE token=?').get(parent).body);
+    db.prepare("UPDATE removal_batches SET state='restoring' WHERE token=?").run(parent);
+    db.prepare("INSERT INTO removal_batches VALUES(?,?,'restore-files',7,'paused',?,?)").run(
+      token,
+      'test',
+      Date.now(),
+      JSON.stringify({ ...old, parent, priorState: 'done' })
+    );
+    db.prepare(
+      "INSERT INTO removal_items SELECT ?,ordinal,work_id,'ready',body FROM removal_items WHERE token=?"
+    ).run(token, parent);
+  });
+  fs.renameSync(path.join(f.bin, 'folder', 'one', 'video.mp4'), f.original);
+  f.cmd('control-removal', { token, action: 'manual', ordinal: 0, restored: true });
+  await until(
+    () => f.query('removal-status', { token }),
+    (s) => s.state === 'done'
+  );
+  assert.equal(f.query('removal-status', { token: parent }).state, 'restored');
+  assert.equal(f.store.resources('11').length, 1);
+});
