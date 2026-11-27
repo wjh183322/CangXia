@@ -35,7 +35,8 @@ const staticHosts = [
   'bytednsdoc.com',
   'zijieapi.com'
 ];
-const official = (url) => url.origin === origin && ['/', '/user/self'].includes(url.pathname);
+const official = (url) =>
+  !url.username && !url.password && url.origin === origin && ['/', '/user/self'].includes(url.pathname);
 const sourceFailure = () =>
   new SourceError('SOURCE_BROWSER', 'NAS 无法打开抖音官方页面，请检查浏览器和网络。');
 const unsupported = () => new SourceError('MANUAL_UNAVAILABLE', '当前验证控件已变化，请重新查看抖音的提示。');
@@ -165,10 +166,24 @@ export async function openOfficialProvider(
       pendingRead;
     let startup = true,
       clicked = false;
+    let startupNav;
+    const protocol = await context.newCDPSession(page);
+    await protocol.send('Page.enable');
+    const { frameTree } = await protocol.send('Page.getFrameTree');
+    const mainFrameId = frameTree.frame.id;
+    const navigation = () => login?.navigation ?? startupNav;
+    function revokeNavigation() {
+      login = null;
+      startupNav = null;
+      manualPanel = null;
+      pendingRead = null;
+    }
+    const expired = () => new SourceError('SOURCE_TIMEOUT', '抖音登录页面加载超时，请刷新。');
     function authorizeNavigation(req) {
       const exact = req.url() === home && req.method() === 'GET' && !req.redirectedFrom();
       if (startup) {
         startup = false;
+        if (exact) startupNav = { request: req, initial: true };
         return exact;
       }
       const view = login;
@@ -199,25 +214,97 @@ export async function openOfficialProvider(
         return false;
       }
     }
-    page.on('framenavigated', (frame) => {
-      if (frame !== page.mainFrame()) return;
+    function commit(frame) {
+      if (frame.parentId || frame.id !== mainFrameId) return;
       key = 'cx' + randomUUID();
       manualPanel = null;
       const nav = login?.navigation;
-      if (!nav || !nav.confirmed || frame.url() !== home) {
+      startupNav = null;
+      if (!nav || !nav.confirmed || frame.url !== nav.request.url()) {
         login = null;
         return;
       }
       try {
         login.check();
         signal.throwIfAborted();
+        if (now() >= login.openUntil) throw expired();
       } catch {
         login = null;
         return;
       }
       login.document = key;
-      login.passive = nav.initial;
+      login.passive = nav.initial && frame.url === home;
       login.navigation = null;
+    }
+    protocol.on('Page.frameNavigated', ({ frame }) => commit(frame));
+    protocol.on('Page.navigatedWithinDocument', ({ frameId, url }) => {
+      if (frameId !== mainFrameId || !login) return;
+      try {
+        login.check();
+        signal.throwIfAborted();
+        if (!official(new URL(url))) throw unsupported();
+      } catch {
+        login = null;
+        manualPanel = null;
+      }
+    });
+    page.on('request', (req) => {
+      if (!req.isNavigationRequest() || req.frame() !== page.mainFrame() || !req.redirectedFrom()) return;
+      const nav = navigation();
+      if (
+        nav?.initial &&
+        nav.redirect &&
+        nav.request === req.redirectedFrom() &&
+        req.method() === 'GET' &&
+        req.url() === origin + '/'
+      )
+        nav.request = req;
+      else revokeNavigation();
+    });
+    page.on('requestfailed', (req) => {
+      if (navigation()?.request !== req) return;
+      revokeNavigation();
+    });
+    // Chromium follows HTTP redirects natively. Check the main document response before
+    // allowing the browser to issue the next request, without reissuing any request.
+    protocol.on('Fetch.requestPaused', async (ev) => {
+      const { requestId } = ev;
+      let allow = true;
+      const redirect = [301, 302, 303, 307, 308].includes(ev.responseStatusCode);
+      if (redirect && ev.frameId !== mainFrameId) allow = false;
+      if (redirect && ev.frameId === mainFrameId) {
+        const nav = navigation();
+        try {
+          const locations = (ev.responseHeaders || []).filter((h) => h.name.toLowerCase() === 'location');
+          if (
+            !nav?.initial ||
+            nav.redirect ||
+            nav.request.url() !== home ||
+            ev.request.url !== home ||
+            ev.request.method !== 'GET' ||
+            locations.length !== 1 ||
+            new URL(locations[0].value, home).href !== origin + '/'
+          )
+            throw unsupported();
+          signal.throwIfAborted();
+          login?.check();
+          nav.redirect = true;
+        } catch {
+          allow = false;
+          revokeNavigation();
+        }
+      }
+      try {
+        await protocol.send(
+          allow ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+          allow ? { requestId } : { requestId, errorReason: 'Aborted' }
+        );
+      } catch {
+        /* Closing the associated context cancels the paused browser request. */
+      }
+    });
+    await protocol.send('Fetch.enable', {
+      patterns: [{ resourceType: 'Document', requestStage: 'Response' }]
     });
     function live() {
       signal.throwIfAborted();
@@ -286,7 +373,8 @@ export async function openOfficialProvider(
     page.on('response', (response) => {
       const view = login;
       if (view?.navigation?.request === response.request()) {
-        view.navigation.confirmed = response.status() === 200 && response.url() === home;
+        view.navigation.confirmed =
+          response.status() === 200 && response.url() === view.navigation.request.url();
       }
       if (view?.issueRequest !== response.request()) return;
       view.issued =
@@ -307,7 +395,9 @@ export async function openOfficialProvider(
     await context.route('**/*', async (route) => {
       let allowed = false;
       try {
-        allowed = await allowRequest(route.request(), page, authorize, authorizeNavigation);
+        const req = route.request();
+        if (!login?.navigation || (req.isNavigationRequest() && req.frame() === page.mainFrame()))
+          allowed = await allowRequest(req, page, authorize, authorizeNavigation);
       } catch {}
       let preserveBlank = false;
       if (!allowed)
@@ -323,7 +413,7 @@ export async function openOfficialProvider(
       await (allowed ? route.fallback() : route.abort(preserveBlank ? 'aborted' : undefined)).catch(() => {});
     });
     await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    async function fixed(fn, observeBootstrap = false) {
+    async function fixed(fn, observeBootstrap = false, opening = false) {
       const initial = key,
         view = login;
       const reloaded = () =>
@@ -331,9 +421,13 @@ export async function openOfficialProvider(
 
       try {
         signal.throwIfAborted();
-        if (!official(new URL(page.url()))) throw sourceFailure();
+        if (!opening && !official(new URL(page.url()))) throw sourceFailure();
         if (observeBootstrap && view?.navigation && !view.navigation.initial) {
           view.check();
+          if (now() >= view.openUntil) {
+            login = null;
+            throw expired();
+          }
           return { phase: 'loading' };
         }
         const value = await abortable(fn(), AbortSignal.any([signal, AbortSignal.timeout(16000)]));
@@ -341,9 +435,13 @@ export async function openOfficialProvider(
         if (!official(new URL(page.url()))) throw sourceFailure();
         if (reloaded()) {
           view.check();
+          if (now() >= view.openUntil) {
+            login = null;
+            throw expired();
+          }
           return { phase: 'loading' };
         }
-        if (observeBootstrap && (view !== login || key !== initial)) throw unsupported();
+        if (!opening && (view !== login || key !== initial)) throw unsupported();
         return value;
       } catch (e) {
         if (
@@ -351,6 +449,10 @@ export async function openOfficialProvider(
           (e.code === 'MANUAL_UNAVAILABLE' || /Execution context was destroyed/.test(e.message))
         ) {
           view.check();
+          if (now() >= view.openUntil) {
+            login = null;
+            throw expired();
+          }
           return { phase: 'loading' };
         }
         if (e instanceof SourceError) throw e;
@@ -410,14 +512,18 @@ export async function openOfficialProvider(
       },
       storage: () => fixed(() => context.storageState()),
       beginLogin: (check) =>
-        fixed(async () => {
-          check();
-          login = { check, opening: true, openUntil: now() + 30000, remaining: 24 };
-          clicked = false;
-          await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          if (login?.navigation && !login.navigation.initial) login.check();
-          else live();
-        }),
+        fixed(
+          async () => {
+            check();
+            login = { check, opening: true, openUntil: now() + 30000, remaining: 24 };
+            clicked = false;
+            await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            if (login?.navigation && !login.navigation.initial) login.check();
+            else live();
+          },
+          false,
+          true
+        ),
       endLogin: () => {
         login = null;
         manualPanel = null;

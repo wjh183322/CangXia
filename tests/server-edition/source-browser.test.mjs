@@ -581,3 +581,12 @@ test(
     );
   }
 );
+test(
+  'native redirect, history, passive reload completion, cancellation and deadline share only the approved document',
+  { timeout: 20000 },
+  async (t) => {
+    const { openOfficialProvider } = await import('../../server/source-provider.mjs');
+    const { testNavigation } = await import('./source-navigation-fixture.mjs');
+    await testNavigation(t, openOfficialProvider);
+  }
+);
