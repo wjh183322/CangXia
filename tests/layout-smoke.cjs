@@ -47,11 +47,25 @@ app.whenReady().then(async()=>{
   await win.webContents.insertCSS(':root,body,button,input,select,textarea{font-family:"CangXia Layout Fixture",sans-serif !important}');
   await waitFor('populated first page', "document.querySelectorAll('.work-card').length===20");
   await js(`(()=>{const input=document.querySelector('[aria-label="顶部跳转页码"]');input.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'2');input.dispatchEvent(new Event('input',{bubbles:true}));})()`);await sleep();
+  await js(`window.pageJumpCommit=new Promise(resolve=>{
+    const observer=new MutationObserver(()=>{
+      const title=document.querySelector('.cover-title')?.textContent;
+      if(title!=='布局测试 21')return;
+      observer.disconnect();
+      resolve({title,top:document.querySelector('[aria-label="顶部跳转页码"]').value,
+        bottom:document.querySelector('[aria-label="底部跳转页码"]').value,
+        count:document.querySelectorAll('.work-card').length});
+    });observer.observe(document.querySelector('#root'),{subtree:true,childList:true,characterData:true});
+  });true`);
   for(const type of ['rawKeyDown','char','keyUp'])await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent',
     {type,key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13,...(type==='char'?{text:'\r',unmodifiedText:'\r'}:{})});
   await waitFor('page two after Enter', "document.querySelector('.cover-title')?.textContent==='布局测试 21'");
+  const committed=await js('window.pageJumpCommit');
+  assert.deepEqual(committed,{title:'布局测试 21',top:'2',bottom:'2',count:1},'first committed page must agree with both controls');
   assert.equal(await js(`document.querySelector('.cover-title').textContent`),'布局测试 21');assert.equal(await js(`document.querySelector('[aria-label="底部跳转页码"]').value`),'2');
   await js(`document.querySelector('[aria-label="顶部上一页"]').click()`);await sleep();
+  await waitFor('both controls and the first page after previous', `document.querySelector('.cover-title')?.textContent==='布局测试 1'&&
+    document.querySelector('[aria-label="顶部跳转页码"]').value==='1'&&document.querySelector('[aria-label="底部跳转页码"]').value==='1'`);
   await assertGeometry('unfiltered account');assert.equal(checks[0].columns,5);
   await js(`document.querySelector('[aria-label="本页全选"]').click()`);await sleep();await assertGeometry('bulk action bar has reserved space');
   await js(`(()=>{const i=document.querySelector('[aria-label="搜索作品、作者或标签"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'布局测试 21');i.dispatchEvent(new Event('input',{bubbles:true}));})()`);await sleep();
