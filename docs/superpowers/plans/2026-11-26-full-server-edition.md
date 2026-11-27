@@ -13,6 +13,8 @@
 
 开发实绩：任务 01–04 已通过逐项独立审查。Windows 安装并存与连接门验证见[运行 45920990422](https://github.com/wjh183322/CangXia/actions/runs/45920990422)，SQLite 与会话验证见[运行 45920990514](https://github.com/wjh183322/CangXia/actions/runs/45920990514)，来源导航及解析回归见[运行 45924550123](https://github.com/wjh183322/CangXia/actions/runs/45924550123)。正式来源链路目前使用隔离的 Chromium、Electron 和合成响应验证；真实账号和实机适配仍属发布验收。
 
+任务 05–07 已通过独立审查。按来源恢复和排序、指定断点的读取交接、可逐件查看的恢复日志、正式客户端分页目录和跨页选择已有隔离回归。仅涉及界面的选择确认不代表对应下载或删除执行器已经交付。
+
 ## Global Constraints
 
 - 在 `codex/server-edition-full` 开发，业务和界面对照提交 `08e6436522a3828211e9c32b51f90d7d830b4fa8`。保留 main、备份版、既有 NAS 版、试验分支及试验镜像。
@@ -113,7 +115,7 @@ assert.equal(reportContainsSecrets,false);
 
 **文件与接口**　新增 server/read-store.mjs、server/memberships.mjs；复用经核查的 work-merge；对照 electron/collection-reads.mjs、store.mjs。测试文件 `tests/server-edition/memberships.test.mjs`。commitSourcePage({jobId,jobEpoch,authEpoch,source,inputCursor,items,nextCursor,operationId,removalRevision}) → {savedCursor,restoredIds}；removeMembership({source,workId,expectedVersion})。
 
-- [ ] 在测试文件加入 `memberships` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `memberships` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.deepEqual(afterFolder.total,['T1','T2']);
@@ -122,16 +124,16 @@ assert.deepEqual(afterBoth.total,['T1','A','T2']);
 assert.equal(mediaCopies,1);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/memberships.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。作品、来源成员、该来源次序、删除版本、恢复明细、页断点和回执在同一事务内。按目标来源自动恢复；本页定位依据该来源返回顺序，快速读取合并已读前缀，保留未访问尾部，完整读取保持平台返回项相对顺序。覆盖正反读取、两个自建夹、重复页、提交前崩溃、提交后丢确认，以及在途页之后用户再次移除。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: memberships`）。
+- [x] 运行 `node --test tests/server-edition/memberships.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。作品、来源成员、该来源次序、删除版本、恢复明细、页断点和回执在同一事务内。按目标来源自动恢复；本页定位依据该来源返回顺序，快速读取合并已读前缀，保留未访问尾部，完整读取保持平台返回项相对顺序。覆盖正反读取、两个自建夹、重复页、提交前崩溃、提交后丢确认，以及在途页之后用户再次移除。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: memberships`）。
 
 ### 06．采集作业、必要收尾与历史明细
 
 **文件与接口**　新增 server/read-jobs.mjs、server/read-history.mjs；修改 src/collection-read-ui.jsx、collection-batch-ui.jsx、read-history-ui.jsx、read-history-counts.jsx、author-ui.jsx；对照 electron/collection-batch.mjs、author-reader.mjs。测试文件 `tests/server-edition/read-history.test.mjs`。startRead({source,mode,followFolders,operationId})、controlRead({jobId,action,operationId})、historyItems({runId,kind,page}) → {items,total,page}；restored 项含 workId、name、source、position。
 
-- [ ] 在测试文件加入 `read-history` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `read-history` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.equal(batch.restoredRelations,2);
@@ -140,16 +142,16 @@ assert.equal(retry.detailCount,1);
 assert.equal(foldersStartedAfterFailedTotal,0);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/read-history.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。连接任务 05 的事务。实现普通新增、完整核对、作者、链接导入、续读和原有确认条件。总收藏必要 JSON/目录整理完成才跟进勾选的夹；普通单夹失败与全局故障分别处理。收回旧读者后再交接，区分第 2 页已发和未发。旧日志缺详情只显示实际保存的信息。正式端覆盖超过原型页数与行数上限的样本。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: read-history`）。
+- [x] 运行 `node --test tests/server-edition/read-history.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。连接任务 05 的事务。实现普通新增、完整核对、作者、链接导入、续读和原有确认条件。总收藏必要 JSON/目录整理完成才跟进勾选的夹；普通单夹失败与全局故障分别处理。收回旧读者后再交接，区分第 2 页已发和未发。旧日志缺详情只显示实际保存的信息。正式端覆盖超过原型页数与行数上限的样本。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: read-history`）。
 
 ### 07．资料库查询、搜索和原界面接入
 
 **文件与接口**　新增 server/catalogue.mjs、electron/server-ipc.mjs；修改 electron/preload.cjs、electron/main.mjs、src/main.jsx、library-ui.jsx、workspace-ui.jsx、nas-catalogue-ui.jsx、creator-ui.jsx。测试文件 `tests/server-edition/catalogue.test.mjs`。listWorks({source,filter,sort,page,revision})、workDetail(id)、setTags(command)、resolveSelection({filter,revision})；保留 preload 的原返回结构或在主进程明确转换。
 
-- [ ] 在测试文件加入 `catalogue` 场景，按本节业务输入构建夹具，断言如下。
+- [x] 在测试文件加入 `catalogue` 场景，按本节业务输入构建夹具，断言如下。
 
 ```js
 assert.deepEqual(page.ids,baseline.ids);
@@ -158,10 +160,10 @@ assert.equal(expiredSelection.applied,0);
 assert.equal(openedUrl,expectedDouyinUrl);
 ```
 
-- [ ] 运行 `node --test tests/server-edition/catalogue.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
-- [ ] 接入正式入口。原列表、搜索、筛选、排序、分页、消息、标签、作者归属、详情往返和跨页选择与备份版逐项对照。连接状态替代备份同步状态。每条恢复明细可用数字 ID 打开经校验的抖音 HTTPS 原页，使用 Windows 默认浏览器，包括库中已无作品但历史保留 ID。
-- [ ] 重跑同一命令，全部断言通过。
-- [ ] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: catalogue`）。
+- [x] 运行 `node --test tests/server-edition/catalogue.test.mjs`，核对失败点落在缺失行为或缺失正式入口。
+- [x] 接入正式入口。原列表、搜索、筛选、排序、分页、消息、标签、作者归属、详情往返和跨页选择与备份版逐项对照。连接状态替代备份同步状态。每条恢复明细可用数字 ID 打开经校验的抖音 HTTPS 原页，使用 Windows 默认浏览器，包括库中已无作品但历史保留 ID。
+- [x] 重跑同一命令，全部断言通过。
+- [x] 检查差异，仅提交该任务的功能、测试和对应验收记录（提交主题 `server-edition: catalogue`）。
 
 ### 08．NAS 下载、补齐与崩溃恢复
 
