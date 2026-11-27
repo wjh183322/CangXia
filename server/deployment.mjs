@@ -1,5 +1,5 @@
 import {separatePaths} from './rehearsal-files.mjs';
-import {prepareRecovery} from './deployment-recovery.mjs';
+import {checkApprovalMount,prepareRecovery} from './deployment-recovery.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomBytes, randomUUID, X509Certificate} from 'node:crypto';
@@ -67,14 +67,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (!process.getuid?.()) throw Error('请使用独立非 root 身份运行。');
     const mountInfo = fs.readFileSync('/proc/self/mountinfo','utf8');
     const mounts = new Set(mountInfo.split('\n').map(line=>line.split(' ')[4]));
-    for(const dir of ['/library','/config','/rehearsal']) if(!mounts.has(dir)) throw Error('请挂载独立目录 '+dir);
-    separatePaths(['/library','/config','/rehearsal'],mountInfo);
+    for(const dir of ['/library','/config','/rehearsal','/approved']) if(!mounts.has(dir)) throw Error('请挂载独立目录 '+dir);
+    separatePaths(['/library','/config','/rehearsal','/approved'],mountInfo);
+    checkApprovalMount(mountInfo,'/approved',process.getuid());
     privateEntry('/rehearsal',true);
     Object.assign(process.env,prepareDeployment({root:'/library',config:'/config',url:process.env.CANGXIA_URL}));
     const devices=JSON.parse(fs.readFileSync(process.env.CANGXIA_DEVICES_FILE,'utf8'));
-    prepareRecovery({dir:'/rehearsal',accountId:Object.values(devices)[0].accountId,env:process.env});
+    const configuration=prepareRecovery({dir:'/rehearsal',inputsDir:'/approved',accountId:Object.values(devices)[0].accountId,env:process.env});
     const {runService} = await import('./start.mjs');
-    const state = await runService(['start']);
+    const state = await runService(['start'],{inputsRoot:'/approved',configuration});
     console.log(JSON.stringify(state));
     if (state.state !== 'serving') process.exitCode=1;
   } catch (error) { console.error(error.message); process.exitCode=1; }

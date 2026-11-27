@@ -63,7 +63,7 @@ else
   config=$(skopeo inspect --raw "docker://$registry@$digest" | jq -er '.config.digest|select(test("^sha256:[0-9a-f]{64}$"))')
 fi
 if [[ "$action" == candidate ]]; then
-  archive="oci-archive:$root/image.tar"
+  archive="dir:$root/image"
   check "$archive"
   # A new package has no visibility to inspect. Seed only an empty scratch image,
   # never candidate bytes, then require the requested visibility from the API.

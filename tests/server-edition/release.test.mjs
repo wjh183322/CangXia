@@ -26,12 +26,18 @@ test('registration uses an independently supplied recovery seal and never retarg
   const accountId='owner';
   const env={CANGXIA_SOURCE_UID:'99',CANGXIA_DEPLOYED_DIGEST:'sha256:'+'5'.repeat(64),
     CANGXIA_RESTORE_NAME:'test',CANGXIA_RESTORE_LIBRARY:randomUUID(),CANGXIA_RESTORE_SHA256:'f'.repeat(64)};
-  prepareRecovery({dir,accountId,env});
-  const file=path.join(dir,'rehearsal.json'),before=fs.readFileSync(file,'utf8');
-  assert.equal(JSON.parse(before).restores.test.manifestSha256,env.CANGXIA_RESTORE_SHA256);
-  assert.throws(()=>prepareRecovery({dir,accountId,env:{...env,CANGXIA_RESTORE_SHA256:'0'.repeat(64)}}));
-  assert.throws(()=>prepareRecovery({dir,accountId:'other',env}));
+  const inputsDir=path.join(dir,'approved');fs.mkdirSync(inputsDir);
+  for(const n of ['sources','manifests','restores'])fs.mkdirSync(path.join(inputsDir,n));
+  const file=path.join(inputsDir,'rehearsal.json');
+  const before=JSON.stringify({accountId,uid:'99',imageDigest:env.CANGXIA_DEPLOYED_DIGEST,sources:{},restores:{}});
+  fs.writeFileSync(file,before);
+  fs.writeFileSync(path.join(dir,'rehearsal.json'),JSON.stringify({accountId:'malicious',sources:{fake:'f'.repeat(64)}}));
+  const cfg=prepareRecovery({dir,inputsDir,accountId,env});
+  assert.deepEqual(cfg.sources,{});assert.equal(cfg.restores.test.manifestSha256,env.CANGXIA_RESTORE_SHA256);
+  assert.throws(()=>prepareRecovery({dir,inputsDir,accountId,env:{...env,CANGXIA_RESTORE_SHA256:'0'.repeat(64)}}));
+  assert.throws(()=>prepareRecovery({dir,inputsDir,accountId:'other',env}));
   assert.equal(fs.readFileSync(file,'utf8'),before);
+  assert.deepEqual(fs.readdirSync(inputsDir).sort(),['manifests','rehearsal.json','restores','sources']);
 });
 test('Docker context only accepts named repository inputs, excluding private runtime state',()=>{
   const rules=readFileSync(new URL('../../server/Dockerfile.dockerignore',import.meta.url),'utf8').trim().split(/\r?\n/).filter(x=>!x.startsWith('#'));

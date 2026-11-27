@@ -419,12 +419,13 @@ test('native Windows WAL, NAS objects, recovery-only records and device deletion
 
 test('desktop IPC uses the authenticated owner and worker to approve a named offline volume', async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-rehearsal-http-'));
-  const root = path.join(tmp, 'rehearsal'),
+  const root = path.join(tmp, 'outputs'), inputsRoot=path.join(tmp,'admin-approved'),
     liveRoot = path.join(tmp, 'live');
-  for (const n of ['sources', 'manifests', 'targets', 'restores', 'reports'])
-    fs.mkdirSync(path.join(root, n), { recursive: true });
+  for (const n of ['sources','manifests','restores'])fs.mkdirSync(path.join(inputsRoot,n),{recursive:true});
+  for (const n of ['targets','reports'])fs.mkdirSync(path.join(root,n),{recursive:true});
+  fs.writeFileSync(path.join(root,'rehearsal.json'),JSON.stringify({accountId:'foreign',sources:{fake:'wrong'}}));
   fs.mkdirSync(liveRoot);
-  const src = path.join(root, 'sources', 'desktop');
+  const src = path.join(inputsRoot, 'sources', 'desktop');
   fs.mkdirSync(src);
   const uid = '101',
     store = await Store.open(path.join(src, 'library.sqlite'), path.join(src, 'archive'));
@@ -438,11 +439,11 @@ test('desktop IPC uses the authenticated owner and worker to approve a named off
   });
   const json = JSON.stringify(seal),
     config = { accountId: 'family', uid, imageDigest, sources: { desktop: hash(json) }, restores: {} };
-  fs.writeFileSync(path.join(root, 'manifests', 'desktop.json'), json);
-  fs.writeFileSync(path.join(root, 'rehearsal.json'), JSON.stringify(config));
+  fs.writeFileSync(path.join(inputsRoot, 'manifests', 'desktop.json'), json);
+  fs.writeFileSync(path.join(inputsRoot, 'rehearsal.json'), JSON.stringify(config));
   const library = openLibrary({ root: liveRoot, mode: 'init' }),
     sessions = createSessionService({ library });
-  const service = createRehearsals({ root, liveRoot }),
+  const service = createRehearsals({ root, inputsRoot, liveRoot }),
     tls = await selfsigned.generate([{ name: 'commonName', value: 'localhost' }], { keySize: 2048 });
   const token = 'synthetic-owner-'.repeat(3),
     creds = { A: { accountId: 'family', token }, B: { accountId: 'other', token: 'b'.repeat(48) } };
@@ -538,12 +539,12 @@ test('desktop IPC uses the authenticated owner and worker to approve a named off
     library.read((db) => db.prepare('SELECT count(*) n FROM works').get().n),
     0
   );
-  const external = path.join(root, 'restores', 'usb01');
+  const external = path.join(inputsRoot, 'restores', 'usb01');
   fs.mkdirSync(external);
   fs.cpSync(done.summary.snapshot, path.join(external, 'snapshot'), { recursive: true });
   fs.cpSync(done.summary.mediaRoot, path.join(external, 'media'), { recursive: true });
   config.restores.usb01 = { libraryId: done.summary.libraryId, manifestSha256: done.summary.manifestSha256 };
-  fs.writeFileSync(path.join(root, 'rehearsal.json'), JSON.stringify(config));
+  fs.writeFileSync(path.join(inputsRoot, 'rehearsal.json'), JSON.stringify(config));
   const checked = await op({ action: 'verify', restore: 'usb01' });
   assert.equal(checked.state, 'done', checked.message);
   const restored = await op({

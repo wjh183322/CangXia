@@ -59,7 +59,9 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with: {node-version: '24.21.0', package-manager-cache: false}
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      - run: node node_modules/electron/install.js
+      - run: node -e "if (!require('node:fs').statSync(require('electron')).isFile()) process.exit(1)"
       - run: npm run dist
       - shell: pwsh
         run: ./scripts/smoke-server-install.ps1

@@ -15,7 +15,7 @@ test('saved profile directory with unexpected access fails closed',async t=>{
   t.after(async()=>{await sessions.close();await source.close();library.close();});
   const who={deviceId:'ci',accountId:'ci'}, grant=sessions.acquire(who,{deviceId:'ci',instanceId:randomUUID(),operationId:randomUUID()});
   const profile=randomUUID();
-  library.write(db=>db.prepare('INSERT INTO source_account VALUES(1,?,?,?)').run('42','fixture',profile));
+  library.write(db=>db.prepare('INSERT OR REPLACE INTO source_account VALUES(1,?,?,?)').run('42','fixture',profile));
   const dir=root+'/cangxia-server/source-session';
   fs.mkdirSync(dir,{recursive:true,mode:0o700}); fs.chmodSync(dir,0o755);
   await assert.rejects(source.recover(sessions.sourceSession(who,grant)),/权限/);

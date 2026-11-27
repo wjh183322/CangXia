@@ -17,7 +17,9 @@ jobs:
         with: {node-version: '24.21.0', package-manager-cache: false}
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      - run: node node_modules/electron/install.js
+      - run: node -e "if (!require('node:fs').statSync(require('electron')).isFile()) process.exit(1)"
       - run: npm ci --prefix server --ignore-scripts
       - run: |
           python -m pip install --only-binary=:all: numpy==2.2.6 opencv-python-headless==4.11.0.86

@@ -13,7 +13,7 @@ export function startServer({ root, expectedId }) {
   return openLibrary({ root, expectedId, mode: 'open' });
 }
 
-export async function runService([action = 'start', ...args]) {
+export async function runService([action = 'start', ...args], rehearsalOptions={}) {
   const options = { root: { type: 'string' }, 'library-id': { type: 'string' } };
   if (action === 'upgrade') {
     for (const key of ['from', 'to', 'image-digest', 'approval']) options[key] = { type: 'string' };
@@ -56,7 +56,7 @@ export async function runService([action = 'start', ...args]) {
         server.once('error', reject);
         server.listen(port, process.env.CANGXIA_HOST ?? '0.0.0.0', () => {
           try {
-            config.rehearsals=createRehearsals({root:process.env.CANGXIA_REHEARSAL_ROOT,liveRoot:root});
+            config.rehearsals=createRehearsals({root:process.env.CANGXIA_REHEARSAL_ROOT,liveRoot:root,...rehearsalOptions});
             config.source = createSourceBrowser({ library, root });
             config.downloads = createDownloads({library,root,source:config.source});
             config.sessions = createSessionService({ library, source: config.source,downloads:config.downloads });

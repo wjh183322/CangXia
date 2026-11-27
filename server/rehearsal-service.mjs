@@ -18,10 +18,11 @@ const readJson = (file) => {
   if (!st.isFile() || st.nlink !== 1) throw Error('配置或报告不是独立普通文件。');
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 };
-function configAt(root) {
+function configAt(root,inputsRoot,configuration) {
   directory(root);
-  for (const n of ['sources', 'manifests', 'targets', 'restores', 'reports']) directory(child(root, n));
-  const config = readJson(child(root, 'rehearsal.json'));
+  for (const n of ['targets', 'reports']) directory(child(root,n));
+  for (const n of ['sources','manifests','restores']) directory(child(inputsRoot,n));
+  const config = configuration ?? readJson(child(inputsRoot,'rehearsal.json'));
   for (const n of [...Object.keys(config.sources), ...Object.keys(config.restores ?? {})]) nameOf(n);
   if (
     !/^[0-9]{1,30}$/.test(config.uid) ||
@@ -31,8 +32,8 @@ function configAt(root) {
     throw Error('请配置彩排账号、来源及镜像摘要。');
   return config;
 }
-function checkRehearsalPaths(root, liveRoot, config, selected) {
-  const area = (name) => directory(child(root, name));
+function checkRehearsalPaths(root, inputsRoot, liveRoot, config, selected) {
+  const area = (name) => directory(child(['sources','restores','manifests'].includes(name)?inputsRoot:root,name));
   const reports = area('reports'),
     targets = area('targets'),
     sources = area('sources'),
@@ -75,13 +76,13 @@ function filesFor(root, config, names) {
     return { ...JSON.parse(bytes), directory: directory(child(root, 'sources/' + n)) };
   });
 }
-async function run({ root, liveRoot, input, config }, guard) {
+async function run({ root, inputsRoot, liveRoot, input, config }, guard) {
   const action = input.action;
   if (['verify', 'restore'].includes(action)) {
     const restore = nameOf(input.restore),
       expected = config.restores?.[restore];
     if (!expected) throw Error('请选择配置好的独立恢复副本。');
-    const base = directory(child(root, 'restores/' + restore));
+    const base = directory(child(inputsRoot, 'restores/' + restore));
     const args = {
       snapshot: directory(child(base, 'snapshot')),
       mediaRoot: directory(child(base, 'media')),
@@ -146,7 +147,7 @@ async function run({ root, liveRoot, input, config }, guard) {
       guard
     });
   }
-  const sources = filesFor(root, config, input.sources),
+  const sources = filesFor(inputsRoot, config, input.sources),
     args = { sources, target, uid: config.uid, imageDigest: config.imageDigest, guard };
   for (const s of sources) disjoint(liveRoot, s.directory);
   if (action === 'preview') return previewImport(args);
@@ -219,7 +220,7 @@ if (!isMainThread && workerData?.rehearsalWorker) {
       throw Error('彩排报告目录身份已变化。');
   };
   const validateOutput = () => {
-    checkRehearsalPaths(workerData.root, workerData.liveRoot, workerData.config, workerData.input.target);
+    checkRehearsalPaths(workerData.root, workerData.inputsRoot, workerData.liveRoot, workerData.config, workerData.input.target);
     checkDir();
   };
   try {
@@ -234,7 +235,7 @@ if (!isMainThread && workerData?.rehearsalWorker) {
     finishReport(dir, 'error.json', { message: e.message });
   }
 }
-export function createRehearsals({ root, liveRoot }) {
+export function createRehearsals({ root, liveRoot, inputsRoot=root, configuration }) {
   const running = new Map();
   if (root) {
     directory(root);
@@ -243,13 +244,13 @@ export function createRehearsals({ root, liveRoot }) {
   }
   function requireConfig() {
     if (!root) throw Error('请在 NAS 配置独立彩排目录和封存清单。');
-    return configAt(root);
+    return configAt(root,inputsRoot,configuration);
   }
   return {
     handle(session, accountId, input = {}) {
       const config = requireConfig();
       owner(config, session, accountId);
-      const reports = checkRehearsalPaths(root, liveRoot, config, input.target);
+      const reports = checkRehearsalPaths(root, inputsRoot, liveRoot, config, input.target);
       if (input.action === 'list') {
         const jobs = fs
           .readdirSync(reports)
@@ -309,7 +310,7 @@ export function createRehearsals({ root, liveRoot }) {
       const flag = new SharedArrayBuffer(4),
         abort = () => Atomics.store(new Int32Array(flag), 0, 1);
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { rehearsalWorker: true, root, liveRoot, input, config, flag, dir, reportIdentity }
+        workerData: { rehearsalWorker: true, root, inputsRoot, liveRoot, input, config, flag, dir, reportIdentity }
       });
       const check = setInterval(() => {
         try {

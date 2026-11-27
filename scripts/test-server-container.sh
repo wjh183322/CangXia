@@ -1,47 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
-image=$1
+export CANGXIA_IMAGE=$1 CANGXIA_DEPLOYED_DIGEST=$2
 seed=$(mktemp -d)
-container="server-candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-trap 'docker rm -f "$container" >/dev/null 2>&1 || true; rm -rf -- "$seed"' EXIT
-for name in library config rehearsal empty; do mkdir -m 700 "$seed/$name"; done
+export CANGXIA_LIBRARY="$seed/library" CANGXIA_CONFIG="$seed/config" CANGXIA_REHEARSAL="$seed/rehearsal" CANGXIA_APPROVED="$seed/approved"
+export CANGXIA_UID=$(id -u) CANGXIA_GID=$(id -g) CANGXIA_SOURCE_UID=42 CANGXIA_PORT=19443 CANGXIA_URL=https://127.0.0.1:19443
+mkdir "$seed/project"
+cp server/compose.yaml feasibility/nas-b/chromium-seccomp.json "$seed/project/"
+compose=(docker compose --project-name "cangxia-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --project-directory "$seed/project" -f "$seed/project/compose.yaml")
+trap '"${compose[@]}" down --timeout 5 >/dev/null 2>&1 || true; sudo rm -rf -- "$seed"' EXIT
+for name in library config rehearsal empty old; do mkdir -m 700 "$seed/$name"; done
 mkdir "$seed"/{library,config}/CREATE-NEW-CANGXIA
-flags=(--init --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --network none
-  --security-opt no-new-privileges:true --security-opt "seccomp=$PWD/feasibility/nas-b/chromium-seccomp.json"
-  --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --shm-size 512m
-  -v "$seed/config:/config" -v "$seed/rehearsal:/rehearsal" -e CANGXIA_URL=https://127.0.0.1:9443 -e CANGXIA_REHEARSAL_ROOT=/rehearsal)
-start() {
-  docker run -d --name "$container" "${flags[@]}" -v "$seed/library:/library" "$image"
-  for i in $(seq 1 45); do
-    if docker exec "$container" node /opt/cangxia/server/health.mjs >/dev/null 2>&1; then return; fi
-    sleep 1
-  done
-  docker logs "$container"; return 1
+mkdir -p "$CANGXIA_APPROVED"/{sources,manifests,restores}
+sudo chown -R "0:$CANGXIA_GID" "$CANGXIA_APPROVED"; sudo chmod -R 750 "$CANGXIA_APPROVED"
+"${compose[@]}" config --quiet
+up() {
+  if ! "${compose[@]}" up -d --pull never --force-recreate --wait --wait-timeout 80; then "${compose[@]}" logs; return 1; fi
 }
-start
-docker exec "$container" node --input-type=module -e '
-import assert from "node:assert/strict";import fs from "node:fs";import {ServerClient} from "./electron/server-client.mjs";
-const read=n=>JSON.parse(fs.readFileSync("/config/identity/windows-"+n+".json"));
-const a=new ServerClient(),b=new ServerClient();
-await a.connect(read(1));await a.acquire();assert.equal((await a.query("list-works",{source:"total"})).total,0);
-await b.connect(read(2));await assert.rejects(b.acquire());await a.release();await b.acquire();await b.release();'
+fixture=/opt/cangxia/tests/server-edition/compose-fixture.mjs
+fixture_run() {
+  "${compose[@]}" run --rm --no-deps -T -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" --entrypoint node server "$fixture" "$1"
+}
+refuse() {
+  local code=0
+  timeout 40s "${compose[@]}" run --rm --no-deps -T server >"$seed/refusal" 2>&1 || code=$?
+  cat "$seed/refusal"
+  test "$code" = 1
+}
+up
+node tests/server-edition/compose-fixture.mjs empty "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG/identity"
+"${compose[@]}" exec -T server node --input-type=module -e '
+import fs from "node:fs";import assert from "node:assert/strict";
+for(const path of ["/approved","/approved/sources","/approved/restores","/approved/manifests"])
+ assert.throws(()=>fs.writeFileSync(path+"/forbidden","test"),e=>e.code==="EROFS"||e.code==="EACCES");
+for(const path of ["/rehearsal/targets","/rehearsal/reports"]){fs.writeFileSync(path+"/probe","test");fs.unlinkSync(path+"/probe");}'
+"${compose[@]}" down --timeout 20
+fixture_run seed
+up
+node tests/server-edition/compose-fixture.mjs populated "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG/identity"
 before=$(sha256sum "$seed/config/identity/"*.json "$seed/config/identity/server.crt" "$seed/library/cangxia-server/identity.json")
-docker stop -t 20 "$container"; docker rm "$container"; start
-after=$(sha256sum "$seed/config/identity/"*.json "$seed/config/identity/server.crt" "$seed/library/cangxia-server/identity.json")
-test "$before" = "$after"
-docker stop -t 20 "$container"; docker rm "$container"
-if docker run --rm "${flags[@]}" -v "$seed/empty:/library" "$image"; then exit 1; fi
-test -z "$(ls -A "$seed/empty")"
-cp -a "$seed/library" "$seed/future"
-docker run --rm "${flags[@]}" -v "$seed/future:/library" --entrypoint node "$image" --input-type=module -e '
-import {DatabaseSync} from "node:sqlite"; const db=new DatabaseSync("/library/cangxia-server/library.sqlite");db.exec("PRAGMA user_version=999");db.close();'
-before=$(sha256sum "$seed/future/cangxia-server/library.sqlite")
-if docker run --rm "${flags[@]}" -v "$seed/future:/library" "$image"; then exit 1; fi
-test "$before" = "$(sha256sum "$seed/future/cangxia-server/library.sqlite")"
-# All mounted tests and fixture dependencies are outside the image and synthetic.
-docker run --rm "${flags[@]}" -v "$seed/library:/library" -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
+up
+node tests/server-edition/compose-fixture.mjs populated "$CANGXIA_LIBRARY" "$CANGXIA_CONFIG/identity"
+test "$before" = "$(sha256sum "$seed/config/identity/"*.json "$seed/config/identity/server.crt" "$seed/library/cangxia-server/identity.json")"
+"${compose[@]}" down --timeout 20
+export CANGXIA_LIBRARY="$seed/empty"; refuse; test -z "$(ls -A "$seed/empty")"
+export CANGXIA_LIBRARY="$seed/old"; fixture_run old
+old_bytes=$(sha256sum "$seed/old/cangxia-server/library.sqlite" "$seed/old/cangxia-server/media/fixture.png")
+refuse; grep -q migration-required "$seed/refusal"
+test "$old_bytes" = "$(sha256sum "$seed/old/cangxia-server/library.sqlite" "$seed/old/cangxia-server/media/fixture.png")"
+test -z "$(ls -A "$seed/old/cangxia-server/snapshots")"
+fixture_run upgrade
+export CANGXIA_LIBRARY="$seed/library"
+# The browser/native tests run with synthetic inputs in a separate temporary library.
+mkdir -m 700 "$seed/browser"
+export CANGXIA_LIBRARY="$seed/browser"
+# Reuse the existing library identity in this disposable test copy.
+cp -a "$seed/library/cangxia-server" "$seed/browser/"
+"${compose[@]}" run --rm --no-deps -T -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
   -v "$PWD/electron/server-ipc.mjs:/opt/cangxia/electron/server-ipc.mjs:ro" -v "$PWD/node_modules:/opt/cangxia/node_modules:ro" \
-  -e CANGXIA_TEST_COVER_PYTHON=/opt/cover-runtime/bin/python --entrypoint node "$image" /opt/cangxia/tests/server-edition/container-smoke.mjs
-docker run --rm "${flags[@]}" -v "$seed/library:/library" -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
+  -e CANGXIA_TEST_COVER_PYTHON=/opt/cover-runtime/bin/python --entrypoint node server /opt/cangxia/tests/server-edition/container-smoke.mjs
+"${compose[@]}" run --rm --no-deps -T -v "$PWD/tests/server-edition:/opt/cangxia/tests/server-edition:ro" \
   -v "$PWD/node_modules:/opt/cangxia/node_modules:ro" -e CANGXIA_TEST_COVER_PYTHON=/opt/cover-runtime/bin/python \
-  --entrypoint node "$image" /opt/cangxia/tests/server-edition/benchmark.mjs 50000
+  --entrypoint node server /opt/cangxia/tests/server-edition/benchmark.mjs 50000

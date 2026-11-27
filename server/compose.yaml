@@ -37,3 +37,9 @@ services:
         source: "${CANGXIA_REHEARSAL:?Select the separate rehearsal directory}"
         target: /rehearsal
         bind: {create_host_path: false}
+
+      - type: bind
+        source: "${CANGXIA_APPROVED:?Select the administrator-owned read-only input directory}"
+        target: /approved
+        read_only: true
+        bind: {create_host_path: false}
