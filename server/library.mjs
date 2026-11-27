@@ -8,7 +8,7 @@ import { serverIdentity } from '../shared/server-identity.mjs';
 
 export const APP_ID = serverIdentity.appId;
 export const APPLICATION_ID = 0x43585346;
-export const CURRENT_SCHEMA = 5;
+export const CURRENT_SCHEMA = 6;
 export const isUuid = (value) =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -24,6 +24,7 @@ export const upgradeV1 = `
 export const upgradeV2 = fs.readFileSync(new URL('./schema/v3.sql', import.meta.url), 'utf8');
 export const upgradeV3 = fs.readFileSync(new URL('./schema/v4.sql', import.meta.url), 'utf8');
 export const upgradeV4 = 'ALTER TABLE source_account ADD COLUMN profile_id TEXT';
+export const upgradeV5 = fs.readFileSync(new URL('./schema/v6.sql', import.meta.url), 'utf8');
 const catalog = (db) =>
   db
     .prepare(
@@ -43,6 +44,8 @@ reference.exec(upgradeV3);
 schemas.set(4, JSON.stringify(catalog(reference)));
 reference.exec(upgradeV4);
 schemas.set(5, JSON.stringify(catalog(reference)));
+reference.exec(upgradeV5);
+schemas.set(6, JSON.stringify(catalog(reference)));
 reference.close();
 
 const foreign = () => Error('The mounted volume or database does not match the formal library.');
@@ -248,7 +251,7 @@ export function describe(layout, db) {
     from,
     to: CURRENT_SCHEMA,
     spaceRequired: pages * pageSize * 4 + 1048576,
-    reason: '建立操作回执、独占会话及实体版本表；从版本 1 升级时另建立文件路径唯一约束及升级回执表。',
+    reason: '建立独立来源排序、归属移除版本、恢复明细、来源读取断点及操作回执等结构；从版本 1 升级时另建立文件路径唯一约束及升级回执表。',
     impact: '只修改数据库结构，归档媒体保持原位。',
     rollback: '先保全快照之后的新增资料，再用匹配的旧程序在独立目录验证快照与媒体清单，确认后切换。'
   };
@@ -293,6 +296,7 @@ function initialize(root, id) {
     db.exec(upgradeV2);
     db.exec(upgradeV3);
     db.exec(upgradeV4);
+    db.exec(upgradeV5);
     db.prepare('INSERT INTO library_identity VALUES (1,?,?)').run(APP_ID, id);
     db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${CURRENT_SCHEMA}; COMMIT`);
     if (db.prepare('PRAGMA journal_mode=WAL').get().journal_mode !== 'wal') throw Error('WAL unavailable.');

@@ -1,14 +1,15 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
+import { createReadStore } from './read-store.mjs';
+import { failure } from './service-error.mjs';
+import { removeMembership } from './memberships.mjs';
 import { isUuid } from './library.mjs';
 
 export const ttlMs = 20_000;
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const stale = () => failure(403, 'SESSION_LOST', '使用权已失效，请重新连接。');
-export function failure(status, code, message) {
-  return Object.assign(new Error(message), { status, code });
-}
+export { failure } from './service-error.mjs';
 const invalid = () => failure(400, 'INVALID_REQUEST', '请求参数无效。');
 const conflict = () => failure(409, 'OPERATION_CONFLICT', '操作标识已用于不同的请求。');
 function receiptRow(db, accountId, operationId, digest) {
@@ -52,7 +53,7 @@ function setTags(db, { payload, entityVersion }) {
   return { id, entityVersion: version + 1 };
 }
 function initialState(db) {
-  const count = db.prepare('SELECT count(*) AS n FROM works').get().n;
+  const count = db.prepare("SELECT count(*) AS n FROM source_members WHERE source_id='total'").get().n;
   return {
     version: serverIdentity.version,
     works: [],
@@ -74,7 +75,16 @@ export function createSessionService({
 }) {
   const bootId = randomUUID(),
     libraryId = library.libraryId;
-  const mutations = new Map(Object.entries({ 'set-tags': setTags, ...commands }));
+  const mutations = new Map(
+    Object.entries({
+      'set-tags': setTags,
+      'remove-membership': (db, { payload, entityVersion }) => {
+        if (Object.keys(payload).some((key) => !['source', 'workId'].includes(key))) throw invalid();
+        return removeMembership(db, { ...payload, expectedVersion: entityVersion });
+      },
+      ...commands
+    })
+  );
   const reads = new Map(
     Object.entries({
       state: (db) => {
@@ -243,6 +253,9 @@ export function createSessionService({
         checked(db, who, grant);
         return value;
       });
+    },
+    readStore(who, grant) {
+      return createReadStore({ session: service.sourceSession(who, grant), browser: source });
     },
     sourceSession(who, grant) {
       const signal = service.signal(who, grant);

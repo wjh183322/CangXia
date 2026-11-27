@@ -333,25 +333,37 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4])
+for (const version of [3, 4, 5])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
-    const { CURRENT_SCHEMA } = await import('../../server/library.mjs');
+    const { APP_ID, APPLICATION_ID, CURRENT_SCHEMA, upgradeV1, upgradeV2, upgradeV3, upgradeV4 } =
+      await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const library = openLibrary({ root, mode: 'init' }),
-      expectedId = library.libraryId;
-    library.close();
-    const dir = path.join(root, 'cangxia-server'),
+    const expectedId = randomUUID(),
+      dir = path.join(root, 'cangxia-server'),
       file = path.join(dir, 'library.sqlite');
-    const db = new DatabaseSync(file);
-    db.exec(
-      version === 3
-        ? 'DROP TABLE source_account'
-        : "ALTER TABLE source_account DROP COLUMN profile_id; INSERT INTO source_account VALUES(1,'101','fixture')"
+    for (const name of ['media', 'snapshots']) fs.mkdirSync(path.join(dir, name), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'identity.json'),
+      JSON.stringify({ appId: APP_ID, libraryId: expectedId })
     );
+    const db = new DatabaseSync(file);
+    db.exec(fs.readFileSync(new URL('../../server/schema/v1.sql', import.meta.url), 'utf8'));
+    db.exec(upgradeV1);
+    db.exec(upgradeV2);
+    if (version >= 4) {
+      db.exec(upgradeV3);
+      db.exec("INSERT INTO source_account VALUES(1,'101','fixture')");
+    }
+    if (version === 5) db.exec(upgradeV4);
+    db.prepare('INSERT INTO library_identity VALUES(1,?,?)').run(APP_ID, expectedId);
+    db.exec('PRAGMA application_id=' + APPLICATION_ID);
     db.exec('PRAGMA user_version=' + version + "; INSERT INTO works VALUES('29','fixture','{}')");
+    db.exec(
+      "INSERT INTO source_members VALUES('folder:77','29',7); INSERT INTO work_tags VALUES('29','manual')"
+    );
     db.close();
     const bytes = fs.readFileSync(file);
     const preview = inspectUpgrade(root, expectedId);
@@ -401,7 +413,16 @@ for (const version of [3, 4])
         conn.prepare("SELECT title FROM works WHERE id='29'").get().title,
         conn.prepare('SELECT count(*) n FROM source_account').get().n
       ]),
-      ['fixture', version === 4 ? 1 : 0]
+      ['fixture', version >= 4 ? 1 : 0]
+    );
+    const { orderedMemberships } = await import('../../server/memberships.mjs');
+    assert.deepEqual(
+      upgraded.read((db) => orderedMemberships(db, { kind: 'collection', id: '77' }).map((m) => m.workId)),
+      ['29']
+    );
+    assert.equal(
+      upgraded.read((db) => db.prepare('SELECT tag FROM work_tags').get().tag),
+      'manual'
     );
   });
 
