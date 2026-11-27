@@ -431,11 +431,14 @@ export async function restoreApproved(input) {
               "SELECT 1 FROM file_commits WHERE stage NOT IN ('registered','complete','cancelled','cleaned','superseded','rejected','moved')"
             )
             .get() ||
-          db
-            .prepare("SELECT 1 FROM removal_items WHERE state NOT IN ('restored','cancelled','kept','done')")
-            .get()
+          db.prepare(`SELECT 1 FROM removal_batches b JOIN removal_items i ON i.token=b.token
+            WHERE b.scope IN ('files','restore-files') AND b.state NOT IN ('preview','discarded')
+            AND (i.state NOT IN ('restored','cancelled','kept','done') OR
+              (b.state='checking' AND i.ordinal=json_extract(b.body,'$.manual.ordinal'))) LIMIT 1`).get()
         )
           throw Error('存在单独需要恢复的文件操作或回收区，请先核对对应文件。');
+        // The new volume cannot grant a confirmation issued against the previous mount and lease.
+        db.exec("UPDATE removal_batches SET state='discarded' WHERE state='preview'");
         return rebindFiles(db, archive, guard);
       });
       const store = openDownloadStore({ root: scratch, library: lib });

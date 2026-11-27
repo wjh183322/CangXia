@@ -24,6 +24,7 @@ import * as recovery from '../../server/recovery.mjs';
 import { mediaList } from '../../server/media.mjs';
 import { authorPublic } from '../../shared/backup-protocol.mjs';
 import { createDownloads } from '../../server/downloads.mjs';
+import { createRemovalService } from '../../server/removal.mjs';
 import { openLibrary } from '../../server/library.mjs';
 import { createBackupServer } from '../../backup-server/server.mjs';
 import { sealSource, previewImport, importApproved } from '../../server/migration.mjs';
@@ -749,6 +750,16 @@ test('independent memberships, audio identity, ranked overlays and restored gene
         );
         assert.ok(!downloads.page(db, { tab: 'active' }).jobs.some((j) => j.workId === '5'));
       });
+      const removal = createRemovalService({ library: lib });
+      const holder = { grant: { proof: 'owner', bootId: 'fixture', generation: 1 }, who: { accountId: uid } };
+      const membershipPreview = lib.write((db) => {
+        const scope = listWorks(db, { source: 'folder:77' }, holder);
+        return removal.commands['preview-removal'](db, { payload: {
+          scope: 'membership', selection: { source: 'folder:77', scope: scope.scope,
+            revision: scope.revision, all: false, ids: ['1'] }
+        } }, holder);
+      });
+      assert.equal(membershipPreview.items[0].state, 'ready');
       const proof = await preserveBeforeRollback({
         root: target,
         libraryId: result.libraryId,
@@ -768,6 +779,14 @@ test('independent memberships, audio identity, ranked overlays and restored gene
         manifestSha256: proof.manifestSha256
       });
       assert.equal(restored.verifiedPlayback, 1);
+      const detached = openLibrary({ root: restored.target, expectedId: result.libraryId });
+      try {
+        detached.read((db) => {
+          assert.equal(db.prepare('SELECT state FROM removal_batches WHERE token=?').get(membershipPreview.token).state, 'discarded');
+          assert.deepEqual(listWorks(db, { source: 'folder:77' }, holder).ids, ['3', '1', '2']);
+        });
+      } finally { detached.close(); }
+      assert.equal(lib.read(db => db.prepare('SELECT state FROM removal_batches WHERE token=?').get(membershipPreview.token).state), 'preview');
       lib.write((db) =>
         db.prepare("UPDATE works SET body=json_set(body,'$.music.id','101') WHERE id='88'").run()
       );
