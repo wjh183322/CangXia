@@ -338,7 +338,10 @@ export function createSessionService({
         if (saved) return saved;
         const run = mutations.get(kind);
         if (!run) throw failure(404, 'UNKNOWN_COMMAND', '服务不支持此操作。');
-        if (kind === 'start-read' && discovery.busy(localGrant.controller.signal))
+        if (
+          (kind === 'start-read' || (kind === 'control-read' && payload.action !== 'stop')) &&
+          discovery.busy(localGrant.controller.signal)
+        )
           throw failure(409, 'READ_CONFLICT', '已有来源读取正在进行。');
         const value = run(db, command, { who, grant });
         if (!value || typeof value.then === 'function') throw Error('Commands must commit synchronously.');

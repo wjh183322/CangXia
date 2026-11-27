@@ -439,6 +439,33 @@ for (const version of [3, 4, 5, 6, 7])
     if (version >= 6) db.exec(upgradeV5);
     if (version === 7) {
       db.exec(upgradeV6);
+      db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
+      db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();
+      for (const [index, id] of ['MS4wLjABlegacy001', 'MS4wLjABlegacy002', '78'].entries()) {
+        const key = (index === 2 ? 'folder:' : 'author:') + id,
+          stepId = randomUUID(),
+          batchId = randomUUID(),
+          epoch = randomUUID();
+        db.prepare('INSERT INTO read_sources VALUES(?,?,?,?,1,0)').run(
+          key,
+          '101',
+          '作者' + index,
+          JSON.stringify({ id, uid: '55', name: '作者' + index })
+        );
+        db.prepare(
+          "INSERT INTO read_batches(id,uid,auth_epoch,owner_boot,owner_generation,status,started) VALUES(?,'101',?,'b',1,'review','2026-11-01')"
+        ).run(batchId, epoch);
+        db.prepare(
+          "INSERT INTO read_steps(id,batch_id,ordinal,source_id,name,mode,status,outcome) VALUES(?,?,0,?,'作者','full','review','end')"
+        ).run(stepId, batchId, key);
+        db.prepare(
+          "INSERT INTO source_read_runs(job_id,job_epoch,auth_epoch,uid,source_id,active,cursor) VALUES(?,1,?,'101',?,1,NULL)"
+        ).run(stepId, epoch, key);
+        db.prepare("INSERT INTO source_read_items(job_id,work_id,baseline) VALUES(?,'500',0)").run(stepId);
+        db.prepare("INSERT INTO source_members(source_id,work_id,position) VALUES(?,'500',0)").run(key);
+        if (index === 1)
+          db.prepare("INSERT INTO read_finalizers VALUES(?,'500',?,'pending')").run(stepId, randomUUID());
+      }
       db.exec(
         "INSERT INTO read_batches(id,uid,auth_epoch,owner_boot,owner_generation,status,started) VALUES('old-group','101','a','b',1,'complete','2026-11-01')"
       );
@@ -478,6 +505,54 @@ for (const version of [3, 4, 5, 6, 7])
       const old = upgraded.read((db) => jobSummary(db, 'old-group'));
       assert.equal(old.steps[0].historyCount, null);
       assert.equal(old.steps[0].name, '旧夹');
+      const { registerReadHandlers } = await import('../../electron/server-reads.mjs');
+      const { ServerClient } = await import('../../electron/server-client.mjs');
+      const identity = { uid: '101', authEpoch: randomUUID() };
+      let networkReads = 0;
+      const source = {
+        account: () => identity,
+        readSourcePage: async () => {
+          networkReads++;
+          throw Error('terminal page fetched');
+        }
+      };
+      const service = createSessionService({ library: upgraded, source, readDelay: 0 });
+      t.after(() => service.close());
+      const { config } = await httpsFixture(t, service, source),
+        client = new ServerClient();
+      await client.connect(config);
+      await client.acquire();
+      t.after(() => client.lock());
+      const handlers = new Map();
+      registerReadHandlers({ ipc: (name, access, fn) => handlers.set(name, fn), client, notify: () => {} });
+      const { authors } = await client.query('state');
+      for (const [index, a] of authors.entries()) {
+        const { readSummary } = await handlers.get('readAuthor')({
+          id: a.id,
+          resume: true,
+          readAll: true,
+          checkpoint: { jobId: a.run.batchId, stepId: a.run.token }
+        });
+        assert.equal(readSummary.outcome, 'end-warning');
+        assert.equal(readSummary.warning, true);
+        assert.equal(readSummary.status, index ? 'finalizing' : 'complete');
+      }
+      const pendingFolder = (await client.query('state')).collectionReadInfo['78'].full;
+      await assert.rejects(
+        handlers.get('sync')({
+          collectionId: '78',
+          mode: 'full',
+          resume: true,
+          checkpoint: { jobId: pendingFolder.batchId, stepId: pendingFolder.token }
+        }),
+        /确认/
+      );
+      assert.equal((await client.query('read-job', { jobId: pendingFolder.batchId })).status, 'review');
+      assert.equal(networkReads, 0);
+      assert.equal(
+        upgraded.read((db) => db.prepare('SELECT count(*) n FROM read_anchors').get().n),
+        0
+      );
     }
     if (version === 4) {
       const privateDir = path.join(dir, 'source-session');

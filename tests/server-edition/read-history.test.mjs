@@ -548,6 +548,26 @@ for (const [action, method] of [
     }
   );
 }
+test('active discovery excludes resume, confirm and reset while stop remains available', async (t) => {
+  const f = await fixture(t);
+  f.rows(() => {
+    throw Error('paused');
+  });
+  const previous = await f.done((await f.start(total)).jobId);
+  const operationId = randomUUID();
+  await f.client.call('source/begin', { operationId, action: 'folders' });
+  for (const action of ['resume', 'reset', 'confirm']) {
+    await assert.rejects(
+      f.cmd('control-read', { jobId: previous.jobId, action, confirmed: true }),
+      /已有来源读取/
+    );
+  }
+  await f.cmd('control-read', { jobId: previous.jobId, action: 'stop' });
+  await f.client.call('source/stop', { operationId });
+  f.rows(() => ({ ids: ['11'] }));
+  await f.cmd('control-read', { jobId: previous.jobId, action: 'resume' });
+  assert.equal((await f.done(previous.jobId)).status, 'complete');
+});
 test('work import is an idempotent NAS job and does not create a favorite relation', async (t) => {
   const f = await fixture(t);
   const url = 'https://www.douyin.com/video/' + A;
@@ -603,5 +623,8 @@ test('failed total and required archive finalization never dispatch a linked fol
   );
   const gated = await f.done((await f.start(total, { followFolders: ['77'] })).jobId);
   assert.equal(gated.status, 'finalizing');
+  const child = { jobId: gated.jobId, stepId: gated.steps[1].token, source: folder };
+  for (const action of ['reset', 'resume', 'confirm'])
+    await assert.rejects(f.cmd('control-read', { ...child, action, confirmed: true }), /总收藏/);
   assert.equal(f.calls.filter((c) => c.source.kind === 'collection').length, 0);
 });

@@ -18,7 +18,7 @@ const batchStatus = (db, id, state, msg = '') =>
   db.prepare('UPDATE read_batches SET status=?,message=? WHERE id=?').run(state, msg, id);
 function stepStatus(db, id, state, msg = '') {
   db.prepare(
-    `UPDATE read_steps SET status=?,message=?,history_count=(SELECT count(*) FROM source_members WHERE source_id=read_steps.source_id)
+    `UPDATE read_steps SET status=?,message=?,history_count=CASE WHEN outcome='end-warning' AND history_count IS NULL THEN NULL ELSE (SELECT count(*) FROM source_members WHERE source_id=read_steps.source_id) END
     WHERE id=?`
   ).run(state, msg, id);
 }
@@ -326,12 +326,21 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       job.id
     );
     const step =
-      (requested && (!wholeBatch || p.action === 'reset') ? requested : null) ??
+      (requested && (!wholeBatch || p.action !== 'resume') ? requested : null) ??
       currentStep(db, job.id) ??
       db
         .prepare("SELECT * FROM read_steps WHERE batch_id=? AND status='failed' ORDER BY ordinal LIMIT 1")
         .get(job.id);
     if (!step) throw reject();
+    if (
+      step.ordinal > 0 &&
+      db
+        .prepare(
+          "SELECT 1 FROM read_steps WHERE batch_id=? AND source_id='total' AND ordinal<? AND status<>'complete'"
+        )
+        .get(job.id, step.ordinal)
+    )
+      throw reject('总收藏及必要整理尚未完成。');
     if (p.action === 'resume' && p.followFolders === true) {
       const first = db
         .prepare('SELECT * FROM read_steps WHERE batch_id=? ORDER BY ordinal LIMIT 1')
@@ -365,24 +374,25 @@ export function createReadJobs({ source, readDelay = 1100 }) {
       batchStatus(db, job.id, sibling ? 'partial' : 'stopped', '所选来源已从头读取。');
       return result;
     }
-    if (
-      requested &&
-      step.status === 'waiting' &&
-      db
-        .prepare(
-          "SELECT 1 FROM read_steps WHERE batch_id=? AND source_id='total' AND ordinal<? AND status<>'complete'"
-        )
-        .get(job.id, step.ordinal)
-    )
-      throw reject('总收藏及必要整理尚未完成。');
+
     if (step.outcome === 'limit') db.prepare('UPDATE read_steps SET outcome=NULL WHERE id=?').run(step.id);
     if (!['waiting', 'paused', 'failed', 'review', 'finalizing'].includes(step.status))
       throw reject('所选读取已经结束。');
-    if (step.status === 'review' && p.action !== 'confirm')
+    const run = runRow(db, step.id);
+    // v7 used the collection review state for an author whose last page had
+    // already committed. Resume only the terminal run belonging to this UID.
+    const terminalAuthorReview =
+      step.source_id.startsWith('author:') &&
+      step.status === 'review' &&
+      step.outcome === 'end' &&
+      run?.active === 1 &&
+      run.cursor === null &&
+      run.source_id === step.source_id &&
+      run.uid === account.uid;
+    if (step.status === 'review' && p.action !== 'confirm' && !terminalAuthorReview)
       throw reject('本轮返回数量明显减少，请确认采用此次对照。');
     if (p.action === 'confirm' && step.status !== 'review') throw reject();
     if (step.status === 'finalizing' && unfinishedArchive(db, step)) throw reject('NAS 必要整理仍未完成。');
-    const run = runRow(db, step.id);
     if (run) {
       if (!run.active) {
         const latest = db
@@ -415,7 +425,10 @@ export function createReadJobs({ source, readDelay = 1100 }) {
         );
       }
     }
-    if (p.action === 'confirm') db.prepare("UPDATE read_steps SET outcome='end' WHERE id=?").run(step.id);
+    if (terminalAuthorReview)
+      db.prepare("UPDATE read_steps SET outcome='end-warning' WHERE id=?").run(step.id);
+    else if (p.action === 'confirm')
+      db.prepare("UPDATE read_steps SET outcome='end' WHERE id=?").run(step.id);
     db.prepare(
       "UPDATE read_batches SET hidden=0,status='running',owner_generation=?,owner_boot=?,auth_epoch=?,message='' WHERE id=?"
     ).run(grant.generation, grant.bootId, account.authEpoch, job.id);
