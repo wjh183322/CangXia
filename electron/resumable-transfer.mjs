@@ -17,7 +17,7 @@ async function readCheckpoint(dir,name,url,signal,checkpoints){
   return {...value,hash,partial};
  }catch(e){if(signal?.aborted)throw e;return null;}
 }
-export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{}}){
+export async function transferAsset({dir,target,url,signal,fetchMedia,extension,progress=()=>{},checkpointBytes=2*1024*1024,checkpoints=null,maxBytes=Infinity,reserve=async()=>{},preserveExisting=false,onFileWrite=()=>{},openPartial=null}){
  const meta=requireInside(dir,path.join(dir,target.name+'.resume.json')),metaTemp=meta+'.tmp';if(!checkpoints){ordinary(meta);ordinary(metaTemp);}
  const clearCheckpoint=async()=>{if(checkpoints)checkpoints.delete(meta);else{await remove(meta);await remove(metaTemp);}};
  let saved=target.name.startsWith('.cangxia-')?null:await readCheckpoint(dir,target.name,url,signal,checkpoints);
@@ -49,14 +49,14 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
   if(checkpoints)checkpoints.set(meta,value);else{ordinary(metaTemp);const record=await fs.promises.open(metaTemp,'w');let identity;try{onFileWrite(metaTemp,await record.stat());await record.writeFile(JSON.stringify(value));await record.sync();identity=await record.stat();onFileWrite(metaTemp,identity,{settled:true});}finally{await record.close();}ordinary(meta);await fs.promises.rename(metaTemp,meta);onFileWrite(meta,identity,{settled:true});}lastSaved=offset;lastTime=Date.now();
  };
  try{
-  handle=await fs.promises.open(partial,saved?'r+':'w');onFileWrite(partial,await handle.stat());if(saved)await handle.truncate(offset);else await clearCheckpoint();
-  reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset);
+  handle=openPartial?await openPartial(partial):await fs.promises.open(partial,saved?'r+':'w');onFileWrite(partial,await handle.stat());if(saved)await handle.truncate(offset);else{if(openPartial)await handle.truncate(0);await clearCheckpoint();}
+  reader=response.body?.getReader();if(!reader)throw new Error('资源没有返回文件内容');progress(offset,total);
   while(true){
    signal?.throwIfAborted();const {done,value}=await reader.read();if(done)break;signal?.throwIfAborted();
    if((total!==null&&offset+value.byteLength>total)||offset+value.byteLength>maxBytes||(target.kind==='image'&&offset+value.byteLength>50000000))throw new Error('资源长度异常，未标记为完整');
    if(total===null)await reserve(offset+value.byteLength);
    let used=0;while(used<value.byteLength){const write=await handle.write(value,used,value.byteLength-used,offset+used);if(!write.bytesWritten)throw new Error('文件写入未完成');used+=write.bytesWritten;}
-   hash.update(value);offset+=value.byteLength;progress(offset);
+   hash.update(value);offset+=value.byteLength;progress(offset,total);
    if(offset-lastSaved>=checkpointBytes||Date.now()-lastTime>=2000)await checkpoint();
   }
   signal?.throwIfAborted();if(!offset||(total!==null&&offset!==total))throw new Error('文件未下载完整，已保留可续传进度');
@@ -71,6 +71,6 @@ export async function transferAsset({dir,target,url,signal,fetchMedia,extension,
  }catch(e){if(handle)try{await checkpoint();}catch{await clearCheckpoint().catch(()=>{});}throw e;}
  finally{
   await reader?.cancel().catch(()=>{});reader?.releaseLock();if(handle)try{onFileWrite(partial,await handle.stat(),{settled:true});}finally{await handle.close().catch(()=>{});}
-  if(!finished&&!resumable){await remove(partial).catch(()=>{});await clearCheckpoint().catch(()=>{});}
+  if(!finished&&!resumable&&!openPartial){await remove(partial).catch(()=>{});await clearCheckpoint().catch(()=>{});}
  }
 }

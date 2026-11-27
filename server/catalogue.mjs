@@ -70,9 +70,9 @@ const hasMedia =
 const videoFiles =
   "(SELECT count(*) FROM media_files WHERE work_id=w.id AND lower(relative_path) GLOB '*.mp4')";
 const imageFiles =
-  "(SELECT count(*) FROM media_files WHERE work_id=w.id AND (lower(relative_path) GLOB '*.jpg' OR lower(relative_path) GLOB '*.jpeg' OR lower(relative_path) GLOB '*.webp' OR lower(relative_path) GLOB '*.png') AND lower(relative_path) NOT LIKE '%cover%')";
+  "(SELECT count(*) FROM media_files WHERE work_id=w.id AND (lower(relative_path) GLOB '*.jpg' OR lower(relative_path) GLOB '*.jpeg' OR lower(relative_path) GLOB '*.webp' OR lower(relative_path) GLOB '*.png' OR lower(relative_path) GLOB '*.avif') AND lower(relative_path) NOT LIKE '%cover%')";
 const checking = "coalesce(json_extract(w.body,'$.localStatus'),'') IN ('checking','unknown')";
-const complete = `NOT (${checking}) AND EXISTS(SELECT 1 FROM download_jobs d WHERE d.work_id=w.id AND d.state='complete') AND CASE WHEN json_extract(w.body,'$.type')='images' THEN json_array_length(w.body,'$.images')>0 AND ${imageFiles}>=json_array_length(w.body,'$.images') ELSE ${videoFiles}>0 END`;
+const complete = `NOT (${checking}) AND EXISTS(SELECT 1 FROM download_jobs d WHERE d.work_id=w.id AND d.state='complete' AND d.id NOT LIKE 'audio:%') AND CASE WHEN json_extract(w.body,'$.type')='images' THEN json_array_length(w.body,'$.images')>0 AND ${imageFiles}>=json_array_length(w.body,'$.images') ELSE ${videoFiles}>0 END`;
 const resolvedPerson = `cx_person(p.person,coalesce(
   (SELECT body FROM source_creator_profiles WHERE id='uid:'||json_extract(p.person,'$.uid')),
   (SELECT body FROM source_creator_profiles WHERE json_extract(body,'$.secUid')=nullif(json_extract(p.person,'$.secUid'),'') LIMIT 1)

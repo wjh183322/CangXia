@@ -24,7 +24,7 @@ async function waitFor(fn) {
           BrowserWindow.getAllWindows().map((w) =>
             js(
               w,
-              "({role:window.cangxia?.windowRole,status:document.querySelector('[role=status]')?.textContent, modal:document.querySelector('.modal')?.textContent?.slice(-300)})"
+              "({role:window.cangxia?.windowRole,status:document.querySelector('[role=status]')?.textContent, modal:document.querySelector('.modal')?.textContent?.slice(-300),toast:document.querySelector('.toast')?.textContent,selection:document.querySelector('.selection-dock')?.textContent})"
             )
           )
         )
@@ -62,7 +62,7 @@ app.whenReady().then(async () => {
           win,
           `(()=>{const b=[...document.querySelectorAll('button')].find(x=>!x.disabled&&(x.textContent.trim()===${JSON.stringify(label)}||x.getAttribute('aria-label')===${JSON.stringify(label)}));if(!b)return false;b.click();return true;})()`
         )
-      );
+      ).catch(e=>{throw Error(label+'\n'+e.message);});
     const scenario = (name) => fs.writeFileSync(path.join(root, 'scenario'), name);
     const hits = (name, route) =>
       fs
@@ -233,6 +233,16 @@ app.whenReady().then(async () => {
     await click('核对并添加作者');
     await waitFor(()=>js(win,"!!document.querySelector('.author-nav-list .collection-nav')"));
     assert.equal(await js(win,"window.cangxia.listWorks({source:'author:MS4wLjABsynthetic001'}).then(r=>r.ids.includes('9200'))"),true);
+    await js(win,"document.querySelector('.author-nav-list .collection-nav').click()");
+    await waitFor(()=>js(win,`(()=>{const b=document.querySelector('[data-work-id="9200"] .card-checkbox');if(!b)return false;b.click();return true;})()`));
+    await click('下载所选作品');
+    await click('只下载未保存的 1 个');
+    await waitFor(()=>js(win,"!document.querySelector('.modal')&&!document.querySelector('.selection-dock')"));
+    await js(win,"document.querySelector('.downloads-nav').click()");
+    await click('已下载 · 1');
+    await waitFor(()=>js(win,"document.querySelector('.job-title')?.textContent.includes('作者样本')"));
+    await js(win,`(()=>{const el=document.querySelector('[aria-label="同时下载作品数"]');el.value='2';el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(()=>js(win,"window.cangxia.state().then(s=>s.queue.concurrency===2)"));
     powerMonitor.emit('resume');
     await waitFor(() => win.isDestroyed() && gate.isVisible());
     assert.equal(await js(gate, '!!document.querySelector(".qr-image-box img")'), false);

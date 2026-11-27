@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { openLibrary } from '../../server/library.mjs';
+import {createDownloads} from '../../server/downloads.mjs';
 import { createSessionService } from '../../server/session.mjs';
 import { parseWork, parsePlatformJSON } from '../../electron/model.mjs';
 
@@ -75,13 +76,15 @@ function setup(t) {
       }
     });
   const source = make();
+  const cleanups=[];
   t.after(async () => {
+    for(const fn of cleanups)await fn();
     await source.close();
     sessions.close();
     library.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { source, provider, session, library, make, sessions, who, grant, root };
+  return { source, provider, session, library, make, sessions, who, grant, root, cleanups };
 }
 test('restored NAS state is verified against self, and another UID makes no change', async (t) => {
   const { source, provider, session, make, library } = setup(t);
@@ -272,10 +275,16 @@ test(
     timeout: 60000
   },
   async (t) => {
-    const { source, provider, who, grant, sessions, library } = setup(t);
+    const { source, provider, who, grant, sessions, library,root:volume,cleanups } = setup(t);
     sessions.release(who, grant, randomUUID());
     sessions.close();
-    const live = createSessionService({ library, source });
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==','base64');
+    const downloads=createDownloads({library,root:volume,source,fetchAsset:async url=>{
+      assert.equal(url,'https://p3.douyinpic.com/test-image');
+      return new Response(png,{headers:{'Content-Type':'image/png','Content-Length':String(png.length)}});
+    }});
+    cleanups.push(()=>downloads.close());
+    const live = createSessionService({ library, source,downloads });
     t.after(() => live.close());
     const { config } = await httpsFixture(t, live, source);
     provider.phase = 'ready';
@@ -328,6 +337,7 @@ test(
             aweme_list: Array.from({ length: scenario === 'shrink-author' ? 1 : 30 }, (_, i) => ({
               aweme_id: String(9200 + i),
               item_title: '作者样本',
+              ...(i===0&&{aweme_type:68,images:[{uri:'fixture-image',origin_image:{uri:'fixture-image',url_list:['https://p3.douyinpic.com/test-image']}}]}),
               author
             }))
           })
@@ -402,7 +412,7 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5, 6, 7, 8])
+for (const version of [3, 4, 5, 6, 7, 8, 9])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
     const {
@@ -414,7 +424,7 @@ for (const version of [3, 4, 5, 6, 7, 8])
       upgradeV3,
       upgradeV4,
       upgradeV5,
-      upgradeV6,upgradeV7
+      upgradeV6,upgradeV7,upgradeV8
     } = await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -439,6 +449,7 @@ for (const version of [3, 4, 5, 6, 7, 8])
     if (version >= 6) db.exec(upgradeV5);
     if (version>=7)db.exec(upgradeV6);
     if (version>=8)db.exec(upgradeV7);
+    if(version>=9)db.exec(upgradeV8);
     if (version === 7) {
       db.prepare('UPDATE source_account SET profile_id=?').run(randomUUID());
       db.prepare("INSERT INTO works VALUES('500','author baseline','{}')").run();

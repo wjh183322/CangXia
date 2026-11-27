@@ -17,7 +17,7 @@ methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
 methods.push('defectOverview');
 methods.push('validateDefectSelection','validateDownloadSelection');
 methods.push('sourceLoginView','sourceManualLogin','sourceQrShown');
-methods.push('catalogueAction','listWorks','cataloguePosition','catalogueChoices','resolveSelection');
+methods.push('previewDownloadSelection','catalogueAction','listWorks','cataloguePosition','catalogueChoices','resolveSelection');
 methods.push('startRead','controlRead','historyItems');
 methods.push('serverIdentity','serverSession','serverGateReady','serverConnect','serverRelease','serverCommand','serverReceipt');
 api.windowRole=typeof process==='undefined'?'':process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17);

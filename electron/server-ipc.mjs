@@ -1,5 +1,25 @@
 import { randomUUID } from 'node:crypto';
 export function registerCatalogueHandlers({ ipc, client }) {
+  const command = (kind, payload) =>
+    client.command({ kind, payload, operationId: randomUUID(), entityVersion: 0 });
+  const control = (action, ids = null, extra = {}) => command('control-download', { action, ids, ...extra });
+  ipc('downloadPage', 'workspace', (query) => client.query('download-page', query));
+  ipc('previewDownloads', 'workspace', (workIds) => client.query('preview-download', { workIds }));
+  ipc('download', 'workspace', (workIds, options = {}) =>
+    command('enqueue-download', {
+      workIds,
+      selection: options.scope || 'missing',
+      revision: options.revision
+    })
+  );
+  ipc('setDownloadConcurrency', 'workspace', (value) => control('concurrency', null, { value }));
+  ipc('pause', 'workspace', () => control('pause'));
+  ipc('resume', 'workspace', () => control('resume'));
+  ipc('retryDownloads', 'workspace', (ids) => control('retry', ids ?? null));
+  ipc('cancelDownloads', 'workspace', (ids, options) =>
+    control('cancel', ids ?? null, { state: options?.state })
+  );
+  ipc('clearCompleted', 'workspace', (ids) => control('clear', ids ?? null));
   ipc('catalogueAction', 'workspace', (action, selection) =>
     client.command({
       operationId: randomUUID(),
@@ -9,6 +29,7 @@ export function registerCatalogueHandlers({ ipc, client }) {
     })
   );
   for (const [method, query] of Object.entries({
+    previewDownloadSelection: 'download-selection',
     listWorks: 'list-works',
     cataloguePosition: 'catalogue-position',
     catalogueChoices: 'catalogue-choices',

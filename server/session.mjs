@@ -78,6 +78,7 @@ export function createSessionService({
   now = () => performance.now(),
   source,
   readDelay,
+  downloads,
   commands = {},
   catalogueActions = {},
   queries = {}
@@ -86,6 +87,8 @@ export function createSessionService({
     libraryId = library.libraryId;
   const discovery = createSourceOperations();
   const jobs = createReadJobs({ source, readDelay });
+  if(downloads) catalogueActions={download:(db,ids)=>downloads.enqueue(db,ids,'unsaved'),
+    'download-missing':(db,ids)=>downloads.enqueue(db,ids,'missing'),repair:(db,ids)=>downloads.enqueue(db,ids,'repair'),audio:(db,ids)=>downloads.enqueue(db,ids,'audio'),...catalogueActions};
   const mutations = new Map(
     Object.entries({
       'start-read': jobs.start,
@@ -111,6 +114,14 @@ export function createSessionService({
         }
         return { added: true };
       },
+      ...(downloads&&{
+        'enqueue-download':(db,{payload})=>{
+          if(Object.keys(payload).some(k=>!['workIds','selection','revision'].includes(k)))throw invalid();
+          if(payload.revision!==undefined&&catalogueRevision(db)!==payload.revision)throw failure(409,'STALE_SELECTION','作品列表已更新，请重新确认。');
+          return downloads.enqueue(db,payload.workIds,payload.selection);
+        },
+        'control-download':(db,{payload})=>downloads.control(db,payload)
+      }),
       'set-tags': setTags,
       'archive-author':archiveAuthor,
       'catalogue-action': (db,command,owner)=>{
@@ -128,6 +139,11 @@ export function createSessionService({
   );
   const reads = new Map(
     Object.entries({
+      ...(downloads&&{'download-selection':(db,input,owner)=>{
+        const {count}=confirmedSelection(db,input,owner);
+        const ids=confirmedSelection(db,{...input,confirmedCount:count},owner,{collect:true});
+        return downloads.preview(db,ids);
+      },'download-page':downloads.page,'preview-download':(db,{workIds})=>({...downloads.preview(db,workIds),revision:catalogueRevision(db)})}),
       'work-detail': catalogueDetail,
       'list-works': listWorks,
       'catalogue-position': cataloguePosition,
@@ -138,6 +154,7 @@ export function createSessionService({
       'history-items': historyItems,
       state: (db) => {
         const state = initialState(db);
+        if(downloads)state.queue=downloads.state(db);
         const identity = source?.account();
         if (identity) {
           state.account = { uid: identity.uid, nickname: identity.nickname };
@@ -366,6 +383,7 @@ export function createSessionService({
       });
       if (['start-read', 'control-read'].includes(command.kind))
         jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
+      if(downloads&&['enqueue-download','control-download','catalogue-action'].includes(command.kind))void downloads.run().catch(()=>{});
       return receipt;
     },
     receipt(who, grant, operationId) {

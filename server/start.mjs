@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
+import {createDownloads} from './downloads.mjs';
 import { createHttpsService } from './http.mjs';
 import { createSourceBrowser } from './source-browser.mjs';
 import { createSessionService } from './session.mjs';
@@ -55,7 +56,9 @@ async function main([action = 'start', ...args]) {
         server.listen(port, process.env.CANGXIA_HOST ?? '0.0.0.0', () => {
           try {
             config.source = createSourceBrowser({ library, root });
-            config.sessions = createSessionService({ library, source: config.source });
+            config.downloads = createDownloads({library,root,source:config.source});
+            config.sessions = createSessionService({ library, source: config.source,downloads:config.downloads });
+            void config.downloads.run().catch(e=>console.error('NAS 下载队列停止',e.code||'STORAGE_ERROR'));
             resolve();
           } catch (error) {
             server.close();
@@ -66,6 +69,7 @@ async function main([action = 'start', ...args]) {
       const stop = async () => {
         config.sessions.close();
         server.closeAllConnections();
+        await config.downloads.close();
         await config.source.close();
         server.close(() => library.close());
       };

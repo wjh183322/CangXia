@@ -228,6 +228,7 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
         db.prepare(
           'INSERT INTO source_account(singleton,uid,nickname,profile_id) VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET nickname=excluded.nickname,profile_id=excluded.profile_id'
         ).run(identity.uid, identity.nickname, profileId);
+        db.prepare('INSERT INTO download_auth VALUES (1,?) ON CONFLICT(id) DO UPDATE SET session_key=excluded.session_key WHERE session_key<>excluded.session_key').run(sessionKey);
         return row?.profile_id;
       });
     } catch (error) {
@@ -354,6 +355,37 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
       return read({ authEpoch, signal }, requestFor(source, cursor, count), (raw) =>
         parseSourcePage({ ...raw, source, inputCursor: cursor })
       );
+    },
+    async readDownloadDetail({workId,uid,sessionKey,authEpoch,signal}) {
+      if(!decimal(workId))throw stale();
+      return serial(async()=>{
+        const check=()=>library.read(db=>{
+          signal.throwIfAborted();
+          const row=db.prepare('SELECT uid,profile_id,session_key,auth_epoch FROM source_account,download_auth,download_options').get();
+          if(closed||!row?.profile_id||row.uid!==uid||row.session_key!==sessionKey||row.auth_epoch!==authEpoch)throw stale();
+          return row;
+        });
+        if(Date.now()<resumeAt)throw limited();
+        const saved=storage.load(check().profile_id);
+        if(!saved)throw loginRequired();
+        const provider=await openProvider(saved,signal);
+        try{
+          const verify=async()=>{
+            check();
+            if(await provider.sessionKey()!==sessionKey)throw stale();
+            const identity=await provider.self(signal);
+            if(!validAccountIdentity(identity)||identity.uid!==uid)throw wrong();
+            check();
+          };
+          await verify();
+          const raw=await provider.read(apiRequest('/aweme/v1/web/aweme/detail/',{params:{aweme_id:workId}}),signal);
+          const issue=inspectSourceResponse(raw);
+          if(issue.code==='SOURCE_RATE_LIMITED')pause(issue.retryAfter);
+          if(issue.code)throw new SourceError(issue.code,'请在 Windows 核对来源账号后重试。');
+          await verify();
+          return parseSourceDetail({...raw,workId,observedAt:new Date().toISOString()});
+        } finally {await provider.close();}
+      });
     },
     async readDetail({ workId, authEpoch, signal }) {
       if (!decimal(workId)) throw new SourceError('SOURCE_PAGE_INVALID', '作品 ID 无效。');
