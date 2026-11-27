@@ -1,4 +1,4 @@
-import { app, BrowserWindow, powerMonitor } from 'electron';
+import { app, BrowserWindow, powerMonitor, shell } from 'electron';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +52,84 @@ app.whenReady().then(async () => {
     );
     await waitFor(() => js(win, "document.querySelector('.account-button')?.textContent.includes('样本')"));
     assert.equal(await js(win, 'window.cangxia.state().then(s=>s.account.uid)'), '7345612390836712341');
+    let opened;
+    shell.openExternal = async (url) => {
+      opened = url;
+    };
+    const click = async (label) =>
+      waitFor(() =>
+        js(
+          win,
+          `(()=>{const b=[...document.querySelectorAll('button')].find(x=>!x.disabled&&(x.textContent.trim()===${JSON.stringify(label)}||x.getAttribute('aria-label')===${JSON.stringify(label)}));if(!b)return false;b.click();return true;})()`
+        )
+      );
+    await click('添加收藏夹');
+    await click('读取账号里的收藏夹');
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const el=[...document.querySelectorAll('label')].find(l=>l.textContent.includes('离线夹'));if(!el)return false;el.querySelector('input').click();return true;})()"
+      )
+    );
+    await click('添加 1 个收藏夹');
+    async function run() {
+      await click('同步收藏');
+      await js(win, "document.querySelector('[aria-label=同步自建收藏夹]').click()");
+      await js(win, "document.querySelector('.collection-read-full').open=true");
+      await click('从头完整核对');
+      await waitFor(() => js(win, "!!document.querySelector('.collection-batch-results')"));
+    }
+    await run();
+    await click('关闭');
+    for (const source of [
+      { kind: 'total', id: '__all__' },
+      { kind: 'collection', id: '77' }
+    ]) {
+      const command = {
+        kind: 'remove-membership',
+        payload: { source, workId: '9191' },
+        entityVersion: 0,
+        operationId: crypto.randomUUID()
+      };
+      await js(win, `window.cangxia.serverCommand(${JSON.stringify(command)})`);
+    }
+    await run();
+    await click('查看读取日志');
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const b=document.querySelector('.read-log-runs button');if(!b)return false;b.click();return true;})()"
+      )
+    );
+    await waitFor(() =>
+      js(
+        win,
+        "(()=>{const b=document.querySelector('.read-log-group .read-log-runs button');if(!b)return false;b.click();return true;})()"
+      )
+    );
+    await click('本轮恢复');
+    await click('打开抖音作品 9191');
+    await waitFor(() => opened === 'https://www.douyin.com/video/9191');
+    await assert.rejects(js(win, "window.cangxia.openOriginal('https://evil.invalid')"));
+    await click('关闭');
+    const fill = async (selector, value) =>
+      js(
+        win,
+        `(()=>{const e=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`
+      );
+    await click('作品链接');
+    await fill('textarea.link-input', 'https://www.douyin.com/video/9192');
+    await click('读取作品');
+    await waitFor(() =>
+      js(win, "[...document.querySelectorAll('button')].some(b=>b.textContent.includes('打开抖音原作品'))")
+    );
+    await click('关闭弹窗');
+    await click('作者作品');
+    await click('添加作者');
+    await fill('#author-link', 'https://www.douyin.com/user/MS4wLjABsynthetic001');
+    await click('核对并添加作者');
+    await click('从头读取 20 条');
+    await waitFor(() => js(win, "!!document.querySelector('.read-result')"));
     powerMonitor.emit('resume');
     await waitFor(() => win.isDestroyed() && gate.isVisible());
     assert.equal(await js(gate, '!!document.querySelector(".qr-image-box img")'), false);

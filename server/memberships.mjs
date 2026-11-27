@@ -44,7 +44,7 @@ export function removeMembership(db, { source, workId, expectedVersion }) {
   return { source, workId, entityVersion: version + 1, removalRevision: revision };
 }
 
-export function publishMemberships(db, run, ticket, page, titles) {
+export function publishMemberships(db, run, ticket, page, titles, preserveNewerOrder = false) {
   const restoredIds = [];
   const observe = db.prepare(`INSERT INTO source_read_items(job_id,work_id,observed) VALUES(?,?,?)
     ON CONFLICT(job_id,work_id) DO UPDATE SET observed=coalesce(observed,excluded.observed)`);
@@ -54,7 +54,7 @@ export function publishMemberships(db, run, ticket, page, titles) {
   const publish =
     db.prepare(`INSERT INTO source_members(source_id,work_id,position,order_generation) VALUES(?,?,?,?)
     ON CONFLICT(source_id,work_id) DO UPDATE SET position=excluded.position,order_generation=excluded.order_generation
-    WHERE source_members.order_generation<>excluded.order_generation`);
+    WHERE source_members.order_generation<excluded.order_generation`);
   const restore = db.prepare(
     'UPDATE membership_removals SET version=version+1 WHERE source_id=? AND work_id=?'
   );
@@ -73,7 +73,7 @@ export function publishMemberships(db, run, ticket, page, titles) {
     }
     publish.run(run.source_id, workId, position, run.generation);
   }
-  if (page.terminal) {
+  if (page.terminal && !preserveNewerOrder) {
     // Full reads place previously known, unreturned works beside their original
     // anchors. Use the pre-read ordering, even after several published prefixes.
     const baseline = db

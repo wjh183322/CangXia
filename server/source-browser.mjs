@@ -1,3 +1,4 @@
+import { discoveryReads } from './read-sources.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -90,10 +91,11 @@ function privateStorage(root, libraryId) {
     }
   };
 }
-function requestFor(source, cursor) {
+function requestFor(source, cursor, count = 30) {
   source = validateSource(source);
   if (!decimal(cursor)) throw new SourceError('SOURCE_PAGE_INVALID', '来源游标无效。');
-  const count = 30;
+  if (!Number.isInteger(count) || count < 1 || count > 30)
+    throw new SourceError('SOURCE_PAGE_INVALID', '读取页大小无效。');
   if (source.kind === 'total')
     return apiRequest('/aweme/v1/web/aweme/listcollection/', { method: 'POST', form: { cursor, count } });
   if (source.kind === 'collection')
@@ -347,8 +349,9 @@ export function createSourceBrowser({ library, root, openProvider = openOfficial
         }
         return {};
       }),
-    async readSourcePage({ source, cursor, authEpoch, signal }) {
-      return read({ authEpoch, signal }, requestFor(source, cursor), (raw) =>
+    ...discoveryReads(read),
+    async readSourcePage({ source, cursor, authEpoch, signal, count }) {
+      return read({ authEpoch, signal }, requestFor(source, cursor, count), (raw) =>
         parseSourcePage({ ...raw, source, inputCursor: cursor })
       );
     },

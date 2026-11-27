@@ -279,6 +279,15 @@ test(
     t.after(() => live.close());
     const { config } = await httpsFixture(t, live, source);
     provider.phase = 'ready';
+    provider.read = async ({url}) => {
+      const route=new URL(url).pathname;
+      const author={uid:'88',sec_uid:'MS4wLjABsynthetic001',nickname:'离线作者'};
+      if(route.endsWith('/user/profile/other/'))return {status:200,text:JSON.stringify({user:author})};
+      if(route.endsWith('/aweme/detail/'))return {status:200,text:JSON.stringify({aweme_detail:{aweme_id:'9192',item_title:'分享样本',author}})};
+      if(route.endsWith('/aweme/post/'))return {status:200,text:JSON.stringify({has_more:0,aweme_list:[{aweme_id:'9193',item_title:'作者样本',author}]})};
+      if(route.endsWith('/collects/list/'))return {status:200,text:JSON.stringify({has_more:0,collects_list:[{collects_id:'77',collects_name:'离线夹'}]})};
+      return {status:200,text:JSON.stringify({has_more:0,aweme_list:[{aweme_id:'9191',item_title:'离线作品'}]})};
+    };
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-desktop-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
     fs.writeFileSync(path.join(root, 'connection.json'), JSON.stringify(config));
@@ -333,10 +342,10 @@ test('rate-limit pauses subsequent pages and refuses to expose a cursor or provi
     );
   assert.equal(calls, 1);
 });
-for (const version of [3, 4, 5])
+for (const version of [3, 4, 5, 6])
   test('schema ' + version + ' requires verified migration and preserves the bound account', async (t) => {
     const { DatabaseSync } = await import('node:sqlite');
-    const { APP_ID, APPLICATION_ID, CURRENT_SCHEMA, upgradeV1, upgradeV2, upgradeV3, upgradeV4 } =
+    const { APP_ID, APPLICATION_ID, CURRENT_SCHEMA, upgradeV1, upgradeV2, upgradeV3, upgradeV4,upgradeV5 } =
       await import('../../server/library.mjs');
     const { inspectUpgrade, applyUpgrade } = await import('../../server/upgrade.mjs');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cx-source-upgrade-'));
@@ -357,12 +366,13 @@ for (const version of [3, 4, 5])
       db.exec(upgradeV3);
       db.exec("INSERT INTO source_account VALUES(1,'101','fixture')");
     }
-    if (version === 5) db.exec(upgradeV4);
+    if (version >= 5) db.exec(upgradeV4);
+    if (version >= 6) db.exec(upgradeV5);
     db.prepare('INSERT INTO library_identity VALUES(1,?,?)').run(APP_ID, expectedId);
     db.exec('PRAGMA application_id=' + APPLICATION_ID);
     db.exec('PRAGMA user_version=' + version + "; INSERT INTO works VALUES('29','fixture','{}')");
     db.exec(
-      "INSERT INTO source_members VALUES('folder:77','29',7); INSERT INTO work_tags VALUES('29','manual')"
+      "INSERT INTO source_members(source_id,work_id,position) VALUES('folder:77','29',7); INSERT INTO work_tags VALUES('29','manual')"
     );
     db.close();
     const bytes = fs.readFileSync(file);

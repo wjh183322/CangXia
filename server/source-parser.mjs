@@ -519,7 +519,7 @@ function observe(raw, observedAt, { fullDetail = false } = {}) {
   return { work: { ...work, observedFields: fields, mediaQuality: mediaQuality(raw, work) }, hints };
 }
 
-function collectProfiles(works) {
+export function collectProfiles(works) {
   const profiles = [];
   for (const work of works) {
     for (const creator of [work.author, ...(work.coAuthors ?? [])]) {

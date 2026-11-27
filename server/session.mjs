@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { contentHash } from '../shared/backup-protocol.mjs';
 import { serverIdentity } from '../shared/server-identity.mjs';
+import { createReadJobs, readState } from './read-jobs.mjs';
+import { historyRuns, historyItems, jobSummary } from './read-history.mjs';
+import { boundIdentity, readWorkDetail } from './read-sources.mjs';
 import { createReadStore } from './read-store.mjs';
 import { failure } from './service-error.mjs';
 import { removeMembership } from './memberships.mjs';
@@ -70,13 +73,36 @@ export function createSessionService({
   library,
   now = () => performance.now(),
   source,
+  readDelay,
   commands = {},
   queries = {}
 }) {
   const bootId = randomUUID(),
     libraryId = library.libraryId;
+  const jobs = createReadJobs({ source, readDelay });
   const mutations = new Map(
     Object.entries({
+      'start-read': jobs.start,
+      'control-read': jobs.control,
+      'clear-read-history': (db) => {
+        db.exec("UPDATE read_batches SET hidden=1 WHERE status<>'running'; DELETE FROM read_legacy_runs");
+        return { cleared: true };
+      },
+      'add-folders': (db, { payload }) => {
+        const { uid } = boundIdentity(db, source);
+        if (!Array.isArray(payload.ids) || !payload.ids.length) throw invalid();
+        for (const id of payload.ids) {
+          if (
+            typeof id !== 'string' ||
+            !/^\d+$/.test(id) ||
+            !db
+              .prepare('UPDATE read_sources SET added=1 WHERE source_id=? AND uid=? AND NOT missing')
+              .run('folder:' + id, uid).changes
+          )
+            throw invalid();
+        }
+        return { added: true };
+      },
       'set-tags': setTags,
       'remove-membership': (db, { payload, entityVersion }) => {
         if (Object.keys(payload).some((key) => !['source', 'workId'].includes(key))) throw invalid();
@@ -87,6 +113,10 @@ export function createSessionService({
   );
   const reads = new Map(
     Object.entries({
+      'work-detail': readWorkDetail,
+      'read-job': (db, { jobId }) => jobSummary(db, jobId),
+      'history-runs': historyRuns,
+      'history-items': historyItems,
       state: (db) => {
         const state = initialState(db);
         const identity = source?.account();
@@ -94,7 +124,7 @@ export function createSessionService({
           state.account = { uid: identity.uid, nickname: identity.nickname };
           state.collector.connected = true;
         }
-        return state;
+        return readState(db, state);
       },
       ...queries
     })
@@ -199,6 +229,7 @@ export function createSessionService({
           generation,
           JSON.stringify(holder)
         );
+        jobs.stopExpired(db, { bootId, generation });
         save(db, who.accountId, operationId, digest, { generation });
         return { grant: { ...who, libraryId, bootId, generation, instanceId, proof, ttlMs }, until };
       });
@@ -283,7 +314,7 @@ export function createSessionService({
       });
     },
     command(who, grant, command) {
-      return library.write((db) => {
+      const receipt = library.write((db) => {
         checked(db, who, grant);
         const { operationId, kind, payload, entityVersion } = command;
         if (
@@ -306,6 +337,9 @@ export function createSessionService({
         checked(db, who, grant);
         return save(db, who.accountId, operationId, digest, { ...value, operationId, kind });
       });
+      if (['start-read', 'control-read'].includes(command.kind))
+        jobs.wake(service.sourceSession(who, grant), grant, receipt.jobId);
+      return receipt;
     },
     receipt(who, grant, operationId) {
       return service.read(who, grant, (db) => receiptRow(db, who.accountId, operationId));

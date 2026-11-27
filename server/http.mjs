@@ -1,3 +1,4 @@
+import { sourceAction } from './read-sources.mjs';
 import https from 'node:https';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { failure } from './session.mjs';
@@ -92,6 +93,13 @@ export function createHttpsService(options) {
           case '/v1/receipt':
             result = sessions.receipt(who, body.grant, body.operationId);
             break;
+          case '/v1/source/folders':
+          case '/v1/source/author':
+          case '/v1/source/resolve-work': {
+            const session = sessions.sourceSession(who, body.grant);
+            result = await sourceAction(options.source, session, req.url.split('/').pop(), body);
+            break;
+          }
           default: {
             const action = sourceActions.get(req.url);
             if (!action) throw failure(404, 'UNKNOWN_ROUTE', '无此服务接口。');

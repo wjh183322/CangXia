@@ -17,6 +17,7 @@ methods.push('exportWorkDiagnostic','refreshStorageSize','cancelStorageSize');
 methods.push('defectOverview');
 methods.push('validateDefectSelection','validateDownloadSelection');
 methods.push('sourceLoginView','sourceManualLogin','sourceQrShown');
+methods.push('startRead','controlRead','historyItems');
 methods.push('serverIdentity','serverSession','serverGateReady','serverConnect','serverRelease','serverCommand','serverReceipt');
 api.windowRole=typeof process==='undefined'?'':process.argv.find(value=>value.startsWith('--cangxia-window='))?.slice(17);
 api.onServerSession=callback=>{const listener=(_event,state)=>callback(state);ipcRenderer.on('cangxia:server-session',listener);return()=>ipcRenderer.removeListener('cangxia:server-session',listener);};

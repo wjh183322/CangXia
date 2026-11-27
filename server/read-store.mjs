@@ -12,13 +12,15 @@ const decimal = (value) => typeof value === 'string' && /^\d+$/.test(value);
 const getRun = (db, id) => db.prepare('SELECT * FROM source_read_runs WHERE job_id=?').get(id);
 const getOp = (db, id) => db.prepare('SELECT * FROM source_page_operations WHERE operation_id=?').get(id);
 
-function validatePage(ticket, page) {
+export function validatePage(ticket, page, bufferedCursor = null) {
   if (
     !page ||
     sourceKey(page.source) !== sourceKey(ticket.source) ||
     page.inputCursor !== ticket.inputCursor ||
     typeof page.terminal !== 'boolean' ||
-    (page.terminal ? page.nextCursor !== null : !decimal(page.nextCursor)) ||
+    (page.terminal
+      ? page.nextCursor !== null
+      : !decimal(page.nextCursor) && !(bufferedCursor && page.nextCursor === bufferedCursor)) ||
     !Array.isArray(page.works) ||
     !Array.isArray(page.refs) ||
     page.uniqueCount !== page.works.length ||
@@ -47,7 +49,7 @@ function validatePage(ticket, page) {
   if (page.aux.audioSourceHints.some((h) => !ids.has(h.workId))) throw invalid();
 }
 
-function saveWorks(db, page) {
+export function saveWorks(db, page) {
   const titles = new Map();
   const find = db.prepare('SELECT title,body FROM works WHERE id=?');
   const put = db.prepare(`INSERT INTO works VALUES(?,?,?) ON CONFLICT(id)
@@ -264,7 +266,10 @@ export function createReadStore({ session, browser }) {
         )
           throw stale();
         const page = input.page;
-        validatePage(input, page);
+        const buffer = db
+          .prepare('SELECT cursor,offset FROM read_page_buffers WHERE run_id=?')
+          .get(run.job_id);
+        validatePage(input, page, buffer && buffer.cursor + '@' + buffer.offset);
         const digest = contentHash(page);
         if (op.result) {
           if (op.digest !== digest) throw conflict();
@@ -281,7 +286,10 @@ export function createReadStore({ session, browser }) {
         )
           throw stale();
         const titles = saveWorks(db, page);
-        const restoredIds = publishMemberships(db, run, input, page, titles);
+        const preserveNewerOrder = !!db
+          .prepare('SELECT superseded FROM read_steps WHERE id=?')
+          .get(run.job_id)?.superseded;
+        const restoredIds = publishMemberships(db, run, input, page, titles, preserveNewerOrder);
         const result = { savedCursor: page.nextCursor, restoredIds };
         db.prepare('UPDATE source_read_runs SET cursor=?,received=received+? WHERE job_id=?').run(
           page.nextCursor,

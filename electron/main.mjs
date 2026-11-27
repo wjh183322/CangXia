@@ -1,9 +1,10 @@
-import { app, BrowserWindow, ipcMain, powerMonitor, safeStorage, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, powerMonitor, safeStorage, screen,shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createDiagnostics } from './diagnostics.mjs';
+import {registerReadHandlers} from './server-reads.mjs';
 import { connectionProfile, ServerClient } from './server-client.mjs';
 import { serverIdentity, serverProfilePath } from '../shared/server-identity.mjs';
 
@@ -185,6 +186,9 @@ app
     ipc('serverRelease', 'workspace', () => client.release());
     ipc('serverReceipt', 'workspace', (id) => client.receipt(id));
     ipc('serverCommand', 'workspace', (command) => client.command(command));
+    registerReadHandlers({ipc,client,openExternal:url=>shell.openExternal(url),notify:value=>{
+      if(alive(workspace)&&client.state().owned)workspace.webContents.send('cangxia:change',value);
+    }});
     ipc('state', 'workspace', () => client.query('state'));
     ipc('startQrLogin', 'workspace', () => client.call('source/open', {}));
     ipc('sourceLoginView', 'workspace', viewId => client.call('source/view', {viewId}));
